@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from cywl_oopz.features.agent.catalog import ReloadableProviderCatalog
 from cywl_oopz.features.agent.models import (
+    AgentMessage,
     AgentRun,
     AgentRunLimits,
     AgentRunState,
@@ -27,6 +28,7 @@ from cywl_oopz.features.agent.models import (
     ProviderProtocol,
 )
 from cywl_oopz.features.agent.repository import (
+    SqlAlchemyAgentMessageRepository,
     SqlAlchemyAgentRunRepository,
     SqlAlchemyAgentThreadRepository,
     SqlAlchemyModelSelectionRepository,
@@ -38,7 +40,6 @@ from cywl_oopz.storage.models import (
     AgentRunRecord,
     ChannelSettingsRecord,
     LlmModelRecord,
-    UserLlmPreferenceRecord,
 )
 from cywl_oopz.storage.url import normalize_asyncpg_url
 
@@ -134,12 +135,6 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
         async with sessions() as session:
             async with session.begin():
                 session.add(
-                    UserLlmPreferenceRecord(
-                        person_id="person",
-                        preferred_model_id=preferred_model_id,
-                    )
-                )
-                session.add(
                     ChannelSettingsRecord(
                         area_id="area",
                         channel_id="channel",
@@ -150,9 +145,11 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
 
         catalog = ReloadableProviderCatalog(catalog_repository)
         await catalog.reload()
+        selection_repository = SqlAlchemyModelSelectionRepository(sessions)
+        await selection_repository.set_user_model("person", preferred_model_id)
         selected = await ProviderSelectionService(
             catalog,
-            SqlAlchemyModelSelectionRepository(sessions),
+            selection_repository,
         ).resolve(
             ConversationKey("channel", "area", "channel", "person"),
             required_capabilities=frozenset({ModelCapability.TOOL_CALLING}),
@@ -200,6 +197,28 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
         assert completed.status == AgentRunStatus.SUCCEEDED
         assert completed.stop_reason == AgentStopReason.COMPLETED
 
+        message_repository = SqlAlchemyAgentMessageRepository(sessions)
+        await message_repository.append(
+            thread.id,
+            run_id,
+            (
+                AgentMessage("user", "text", {"text": "question"}),
+                AgentMessage(
+                    "assistant",
+                    "text",
+                    {"text": "answer"},
+                    input_tokens=10,
+                    output_tokens=5,
+                ),
+            ),
+        )
+        assert await message_repository.count(thread.id) == 2
+        loaded_messages = await message_repository.load(thread.id, limit=10)
+        assert [message.content["text"] for message in loaded_messages] == [
+            "question",
+            "answer",
+        ]
+
         stale_id = uuid4()
         stale_at = now - timedelta(hours=2)
         await run_repository.add(
@@ -214,6 +233,11 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
                 heartbeat_at=stale_at,
             )
         )
+        await message_repository.append(
+            thread.id,
+            stale_id,
+            (AgentMessage("user", "text", {"text": "stale question"}),),
+        )
         assert (
             await run_repository.abandon_stale(
                 now - timedelta(hours=1),
@@ -221,6 +245,12 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
             )
             == 1
         )
+        assert await message_repository.count(thread.id) == 2
+        visible_after_abandon = await message_repository.load(thread.id, limit=10)
+        assert [message.content["text"] for message in visible_after_abandon] == [
+            "question",
+            "answer",
+        ]
 
         with pytest.raises(IntegrityError):
             async with sessions.begin() as session:

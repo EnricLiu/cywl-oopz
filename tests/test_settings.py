@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from cywl_oopz.core.errors import ConfigurationError
-from cywl_oopz.settings import AppSettings, ChatSettings, DatabaseSettings
+from cywl_oopz.settings import AgentMode, AppSettings, ChatSettings, DatabaseSettings
 
 
 def valid_environment() -> dict[str, str]:
@@ -31,6 +31,14 @@ def test_app_settings_use_the_injected_oopz_credentials(monkeypatch) -> None:
     assert settings.oopz.device_id == "device"
     assert settings.oopz.person_uid == "bot"
     assert settings.oopz.jwt_token == "token"
+    assert settings.agent.mode is AgentMode.LEGACY
+
+
+def test_agent_mode_uses_database_catalog_without_legacy_llm_credentials() -> None:
+    settings = AppSettings.from_mapping(valid_environment() | {"CYWL_AGENT_MODE": "agent"})
+
+    assert settings.agent.enabled is True
+    assert settings.chat.enabled is False
 
 
 def test_settings_require_database_url_without_echoing_secret() -> None:

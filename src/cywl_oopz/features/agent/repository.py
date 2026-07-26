@@ -6,14 +6,16 @@ from collections.abc import Mapping
 from dataclasses import asdict
 from datetime import datetime
 from typing import Any
+from uuid import UUID
 
-from sqlalchemy import select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from cywl_oopz.core.errors import DatabaseError
 from cywl_oopz.features.chat.models import ConversationKey
 from cywl_oopz.storage.models import (
+    AgentMessageRecord,
     AgentRunRecord,
     AgentThreadRecord,
     ChannelSettingsRecord,
@@ -23,6 +25,7 @@ from cywl_oopz.storage.models import (
 )
 
 from .models import (
+    AgentMessage,
     AgentRun,
     AgentRunState,
     AgentRunStatus,
@@ -215,6 +218,24 @@ class SqlAlchemyModelSelectionRepository:
         except SQLAlchemyError as exc:
             raise DatabaseError("Failed to load LLM model selection") from exc
 
+    async def set_user_model(self, person_id: str, model_id: UUID) -> None:
+        """Insert or update one user's default model."""
+        try:
+            async with self._sessions() as session:
+                async with session.begin():
+                    record = await session.get(UserLlmPreferenceRecord, person_id)
+                    if record is None:
+                        session.add(
+                            UserLlmPreferenceRecord(
+                                person_id=person_id,
+                                preferred_model_id=model_id,
+                            )
+                        )
+                    else:
+                        record.preferred_model_id = model_id
+        except SQLAlchemyError as exc:
+            raise DatabaseError("Failed to save user LLM preference") from exc
+
 
 class SqlAlchemyAgentThreadRepository:
     """Persist Agent thread metadata without keeping ORM sessions across model I/O."""
@@ -253,6 +274,53 @@ class SqlAlchemyAgentThreadRepository:
                     )
         except SQLAlchemyError as exc:
             raise DatabaseError("Failed to create Agent thread") from exc
+
+    async def set_selected_model(self, key: ConversationKey, model_id: UUID) -> None:
+        """Pin an existing thread without changing its history."""
+        try:
+            async with self._sessions() as session:
+                async with session.begin():
+                    result = await session.execute(
+                        update(AgentThreadRecord)
+                        .where(
+                            AgentThreadRecord.scope == key.scope,
+                            AgentThreadRecord.area_id == key.area_id,
+                            AgentThreadRecord.channel_id == key.channel_id,
+                            AgentThreadRecord.person_id == key.person_id,
+                        )
+                        .values(
+                            selected_model_id=model_id,
+                            version=AgentThreadRecord.version + 1,
+                        )
+                    )
+                    if result.rowcount != 1:
+                        raise DatabaseError("Agent thread does not exist")
+        except SQLAlchemyError as exc:
+            raise DatabaseError("Failed to select Agent thread model") from exc
+
+    async def refresh_expiry(self, thread_id: UUID, expires_at: datetime) -> None:
+        """Extend a thread TTL after a completed interaction."""
+        try:
+            async with self._sessions() as session:
+                async with session.begin():
+                    await session.execute(
+                        update(AgentThreadRecord)
+                        .where(AgentThreadRecord.id == thread_id)
+                        .values(expires_at=expires_at)
+                    )
+        except SQLAlchemyError as exc:
+            raise DatabaseError("Failed to refresh Agent thread") from exc
+
+    async def delete(self, key: ConversationKey) -> None:
+        """Delete one thread and let database cascades remove runtime records."""
+        try:
+            async with self._sessions() as session:
+                async with session.begin():
+                    record = await session.scalar(self._query(key))
+                    if record is not None:
+                        await session.delete(record)
+        except SQLAlchemyError as exc:
+            raise DatabaseError("Failed to delete Agent thread") from exc
 
     @staticmethod
     def _query(key: ConversationKey):
@@ -374,6 +442,116 @@ class SqlAlchemyAgentRunRepository:
                     return result.rowcount
         except SQLAlchemyError as exc:
             raise DatabaseError("Failed to abandon stale Agent runs") from exc
+
+
+class SqlAlchemyAgentMessageRepository:
+    """Persist ordered messages while locking only the owning thread row."""
+
+    def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
+        self._sessions = sessions
+
+    async def load(self, thread_id: UUID, *, limit: int) -> tuple[AgentMessage, ...]:
+        """Load a bounded suffix and return it in chronological order."""
+        try:
+            async with self._sessions() as session:
+                records = (
+                    await session.scalars(
+                        select(AgentMessageRecord)
+                        .outerjoin(
+                            AgentRunRecord,
+                            AgentRunRecord.id == AgentMessageRecord.run_id,
+                        )
+                        .where(AgentMessageRecord.thread_id == thread_id)
+                        .where(
+                            or_(
+                                AgentMessageRecord.run_id.is_(None),
+                                AgentRunRecord.status == AgentRunStatus.SUCCEEDED.value,
+                            )
+                        )
+                        .order_by(AgentMessageRecord.sequence.desc())
+                        .limit(limit)
+                    )
+                ).all()
+                records.reverse()
+                return tuple(self._to_domain(record) for record in records)
+        except SQLAlchemyError as exc:
+            raise DatabaseError("Failed to load Agent messages") from exc
+
+    async def append(
+        self,
+        thread_id: UUID,
+        run_id: UUID,
+        messages: tuple[AgentMessage, ...],
+    ) -> None:
+        """Append one batch after serializing writers on the thread record."""
+        if not messages:
+            return
+        try:
+            async with self._sessions() as session:
+                async with session.begin():
+                    thread = await session.scalar(
+                        select(AgentThreadRecord)
+                        .where(AgentThreadRecord.id == thread_id)
+                        .with_for_update()
+                    )
+                    if thread is None:
+                        raise DatabaseError("Agent thread does not exist")
+                    last_sequence = (
+                        await session.scalar(
+                            select(func.max(AgentMessageRecord.sequence)).where(
+                                AgentMessageRecord.thread_id == thread_id
+                            )
+                        )
+                        or 0
+                    )
+                    for offset, message in enumerate(messages, start=1):
+                        session.add(
+                            AgentMessageRecord(
+                                thread_id=thread_id,
+                                run_id=run_id,
+                                sequence=last_sequence + offset,
+                                role=message.role,
+                                kind=message.kind,
+                                content=dict(message.content),
+                                input_tokens=message.input_tokens,
+                                output_tokens=message.output_tokens,
+                            )
+                        )
+        except SQLAlchemyError as exc:
+            raise DatabaseError("Failed to append Agent messages") from exc
+
+    async def count(self, thread_id: UUID) -> int:
+        """Count one thread without reading message content."""
+        try:
+            async with self._sessions() as session:
+                return (
+                    await session.scalar(
+                        select(func.count(AgentMessageRecord.id)).where(
+                            AgentMessageRecord.thread_id == thread_id,
+                            or_(
+                                AgentMessageRecord.run_id.is_(None),
+                                AgentMessageRecord.run_id.in_(
+                                    select(AgentRunRecord.id).where(
+                                        AgentRunRecord.status == AgentRunStatus.SUCCEEDED.value
+                                    )
+                                ),
+                            ),
+                        )
+                    )
+                    or 0
+                )
+        except SQLAlchemyError as exc:
+            raise DatabaseError("Failed to count Agent messages") from exc
+
+    @staticmethod
+    def _to_domain(record: AgentMessageRecord) -> AgentMessage:
+        return AgentMessage(
+            role=record.role,
+            kind=record.kind,
+            content=_mapping(record.content),
+            input_tokens=record.input_tokens,
+            output_tokens=record.output_tokens,
+        )
 
 
 def _mapping(value: object) -> Mapping[str, Any]:

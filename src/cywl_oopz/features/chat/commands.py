@@ -21,16 +21,16 @@ from cywl_oopz.storage.channel_settings import ChannelSettingsRepository
 
 from .history import ChatInputTooLongError
 from .models import ConversationKey
-from .service import ChatService
 from .tasks import ChatTaskSupervisor
+from .use_case import ChatUseCase
 
 logger = logging.getLogger(__name__)
 
 
-class _ChatCommand:
+class ChatCommandController:
     """Shared safe error mapping for chat-facing command controllers."""
 
-    def __init__(self, service: ChatService) -> None:
+    def __init__(self, service: ChatUseCase) -> None:
         self._service = service
 
     @staticmethod
@@ -63,7 +63,7 @@ class _ChatCommand:
         await context.reply(message)
 
 
-class ChatCommand(_ChatCommand):
+class ChatCommand(ChatCommandController):
     """Start or continue a text conversation with `!chat <prompt>`."""
 
     name = "chat"
@@ -82,10 +82,10 @@ class ChatCommand(_ChatCommand):
         await context.reply(response.content)
 
 
-class MentionChatHandler(_ChatCommand):
+class MentionChatHandler(ChatCommandController):
     """Reply only when an incoming non-command message explicitly mentions this bot."""
 
-    def __init__(self, service: ChatService, bot_person_id: str) -> None:
+    def __init__(self, service: ChatUseCase, bot_person_id: str) -> None:
         super().__init__(service)
         self._bot_person_id = bot_person_id
 
@@ -113,10 +113,10 @@ class MentionChatHandler(_ChatCommand):
         )
 
 
-class AmbientChatHandler(_ChatCommand):
+class AmbientChatHandler(ChatCommandController):
     """Handle normal private messages and channels explicitly enabled in PostgreSQL."""
 
-    def __init__(self, service: ChatService, channels: ChannelSettingsRepository) -> None:
+    def __init__(self, service: ChatUseCase, channels: ChannelSettingsRepository) -> None:
         super().__init__(service)
         self._channels = channels
 
@@ -147,13 +147,13 @@ class AmbientChatHandler(_ChatCommand):
         return True
 
 
-class NewConversationCommand(_ChatCommand):
+class NewConversationCommand(ChatCommandController):
     """Forget only the caller's active conversation with `!new`."""
 
     name = "new"
     description = "清空当前文字对话的上下文。"
 
-    def __init__(self, service: ChatService, tasks: ChatTaskSupervisor) -> None:
+    def __init__(self, service: ChatUseCase, tasks: ChatTaskSupervisor) -> None:
         super().__init__(service)
         self._tasks = tasks
 
@@ -168,13 +168,13 @@ class NewConversationCommand(_ChatCommand):
         await context.reply("已开始新的对话。")
 
 
-class CancelChatCommand(_ChatCommand):
+class CancelChatCommand(ChatCommandController):
     """Cancel the caller's active LLM response with `!cancel`."""
 
     name = "cancel"
     description = "取消当前正在生成的文字回复。"
 
-    def __init__(self, service: ChatService, tasks: ChatTaskSupervisor) -> None:
+    def __init__(self, service: ChatUseCase, tasks: ChatTaskSupervisor) -> None:
         super().__init__(service)
         self._tasks = tasks
 
@@ -190,13 +190,13 @@ class CancelChatCommand(_ChatCommand):
             await context.reply("当前没有正在生成的文字回复。")
 
 
-class ModelCommand(_ChatCommand):
+class ModelCommand(ChatCommandController):
     """Show or change an allow-listed model with `!model [name]`."""
 
     name = "model"
     description = "查看或切换允许使用的模型。"
 
-    def __init__(self, service: ChatService, tasks: ChatTaskSupervisor) -> None:
+    def __init__(self, service: ChatUseCase, tasks: ChatTaskSupervisor) -> None:
         super().__init__(service)
         self._tasks = tasks
 
@@ -223,7 +223,7 @@ class ModelCommand(_ChatCommand):
         await context.reply(f"当前模型已切换为：{selected}")
 
 
-class ChatStatusCommand(_ChatCommand):
+class ChatStatusCommand(ChatCommandController):
     """Show safe conversation metadata with `!chat-status`."""
 
     name = "chat-status"

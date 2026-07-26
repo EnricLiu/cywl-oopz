@@ -163,6 +163,24 @@ def test_catalog_rejects_duplicate_application_defaults() -> None:
         )
 
 
+def test_catalog_resolves_provider_default_and_lists_safe_aliases() -> None:
+    catalog = ProviderCatalog.build(
+        (provider(),),
+        (
+            model(MODEL_ID, application_default=True),
+            model(FALLBACK_MODEL_ID),
+        ),
+    )
+
+    selected = catalog.find_selectable("primary")
+
+    assert selected is not None
+    assert selected.model_id == MODEL_ID
+    assert [
+        f"{item.provider_alias}/{item.model_alias}" for item in catalog.selectable_models()
+    ] == ["primary/model-2", "primary/model-3"]
+
+
 def test_run_state_maps_terminal_reasons_and_rejects_reentry() -> None:
     now = datetime.now(UTC)
     running = AgentRunState(uuid4()).start(now)

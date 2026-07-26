@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Coroutine
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from oopz_sdk import OopzBot
@@ -12,16 +13,21 @@ from oopz_sdk.models import Message as OopzMessage
 
 from .commands.builtin import HelpCommand, PingCommand, StatusCommand
 from .commands.router import CommandRouter
-from .core.errors import DatabaseError
+from .core.errors import ConfigurationError, DatabaseError
 from .core.health import HealthRegistry, HealthState
 from .features.agent.catalog import ProviderCatalogAdminService, ReloadableProviderCatalog
+from .features.agent.commands import ProviderCommand
+from .features.agent.pydantic_ai_engine import PydanticAiAgentEngine
+from .features.agent.registry import AgentModelRegistry
 from .features.agent.repository import (
+    SqlAlchemyAgentMessageRepository,
     SqlAlchemyAgentRunRepository,
     SqlAlchemyAgentThreadRepository,
     SqlAlchemyModelSelectionRepository,
     SqlAlchemyProviderCatalogRepository,
 )
 from .features.agent.selection import ProviderSelectionService
+from .features.agent.service import AgentConversationService
 from .features.chat.commands import (
     AmbientChatHandler,
     CancelChatCommand,
@@ -61,18 +67,35 @@ class BotApplication:
         )
         self.agent_threads = SqlAlchemyAgentThreadRepository(self.database.session_factory)
         self.agent_runs = SqlAlchemyAgentRunRepository(self.database.session_factory)
+        self.agent_messages = SqlAlchemyAgentMessageRepository(self.database.session_factory)
+        selection_repository = SqlAlchemyModelSelectionRepository(self.database.session_factory)
         self.agent_selection = ProviderSelectionService(
             self.agent_catalog,
-            SqlAlchemyModelSelectionRepository(self.database.session_factory),
+            selection_repository,
+        )
+        self.agent_models = AgentModelRegistry(self.agent_catalog)
+        self.agent_engine = PydanticAiAgentEngine(self.agent_models)
+        self.agent_chat = AgentConversationService(
+            settings.agent,
+            settings.chat,
+            self.agent_engine,
+            self.agent_catalog,
+            self.agent_selection,
+            selection_repository,
+            self.agent_threads,
+            self.agent_runs,
+            self.agent_messages,
+            health=self.health,
         )
         self._provider = self._create_chat_provider()
         self.chat_tasks = ChatTaskSupervisor()
-        self.chat = ChatService(
+        self.legacy_chat = ChatService(
             settings.chat,
             self._provider,
             SqlAlchemyConversationRepository(self.database.session_factory),
             health=self.health,
         )
+        self.chat = self.agent_chat if settings.agent.enabled else self.legacy_chat
         channel_settings = SqlAlchemyChannelSettingsRepository(self.database.session_factory)
         self._mention_handler = MentionChatHandler(self.chat, settings.oopz.person_uid)
         self._ambient_handler = AmbientChatHandler(self.chat, channel_settings)
@@ -82,7 +105,9 @@ class BotApplication:
         self.health.mark("database", HealthState.PENDING)
         self.health.mark(
             "llm",
-            HealthState.PENDING if settings.chat.enabled else HealthState.DISABLED,
+            HealthState.PENDING
+            if settings.chat.enabled or settings.agent.enabled
+            else HealthState.DISABLED,
         )
         self.health.mark("oopz", HealthState.PENDING)
 
@@ -100,6 +125,8 @@ class BotApplication:
         self.commands.register(CancelChatCommand(self.chat, self.chat_tasks))
         self.commands.register(ModelCommand(self.chat, self.chat_tasks))
         self.commands.register(ChatStatusCommand(self.chat))
+        if self.settings.agent.enabled:
+            self.commands.register(ProviderCommand(self.agent_chat, self.chat_tasks))
 
     async def run(self) -> None:
         """Start the database check before entering the long-running OOPZ client."""
@@ -110,9 +137,32 @@ class BotApplication:
                 self.health.mark("database", HealthState.DEGRADED, "connection check failed")
                 raise
             self.health.mark("database", HealthState.HEALTHY, "connection check passed")
+            if self.settings.agent.enabled:
+                await self.agent_models.reload()
+                catalog = self.agent_catalog.snapshot
+                default_model_id = catalog.application_default_model_id()
+                default_model = (
+                    catalog.resolve(
+                        default_model_id,
+                        required_capabilities=frozenset(),
+                        require_user_selectable=False,
+                    )
+                    if default_model_id is not None
+                    else None
+                )
+                if default_model is None:
+                    raise ConfigurationError(
+                        "Agent mode requires an enabled application-default LLM model"
+                    )
+                now = datetime.now(UTC)
+                await self.agent_runs.abandon_stale(
+                    now - timedelta(seconds=self.settings.agent.stale_run_after_seconds),
+                    now,
+                )
             await self.bot.run()
         finally:
             await self.chat_tasks.close()
+            await self.agent_engine.aclose()
             await self._provider.aclose()
             await self.database.close()
 

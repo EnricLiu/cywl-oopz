@@ -95,6 +95,65 @@ class ProviderCatalog:
             fallback_model_id=model.fallback_model_id,
         )
 
+    def find_selectable(
+        self,
+        provider_alias: str,
+        model_alias: str | None = None,
+        *,
+        required_capabilities: frozenset[ModelCapability] = frozenset(),
+    ) -> AgentModelRef | None:
+        """Resolve an owner-defined alias, using the Provider default when omitted."""
+        provider_name = provider_alias.strip().casefold()
+        model_name = model_alias.strip().casefold() if model_alias is not None else None
+        provider = next(
+            (
+                candidate
+                for candidate in self.providers.values()
+                if candidate.alias.casefold() == provider_name
+            ),
+            None,
+        )
+        if provider is None or not provider.user_selectable:
+            return None
+        candidates = [
+            model
+            for model in self.models.values()
+            if model.provider_id == provider.id
+            and (
+                model.alias.casefold() == model_name
+                if model_name is not None
+                else model.is_provider_default
+            )
+        ]
+        if len(candidates) != 1:
+            return None
+        return self.resolve(
+            candidates[0].id,
+            required_capabilities=required_capabilities,
+            require_user_selectable=True,
+        )
+
+    def selectable_models(
+        self,
+        *,
+        required_capabilities: frozenset[ModelCapability] = frozenset(),
+    ) -> tuple[AgentModelRef, ...]:
+        """List enabled user-selectable models in stable alias order."""
+        resolved = (
+            self.resolve(
+                model.id,
+                required_capabilities=required_capabilities,
+                require_user_selectable=True,
+            )
+            for model in self.models.values()
+        )
+        return tuple(
+            sorted(
+                (model for model in resolved if model is not None),
+                key=lambda item: (item.provider_alias, item.model_alias),
+            )
+        )
+
 
 class ReloadableProviderCatalog:
     """Own one atomically replaced catalog snapshot."""

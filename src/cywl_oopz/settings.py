@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
+from enum import StrEnum
 from urllib.parse import urlparse
 
 from dotenv import find_dotenv, load_dotenv
@@ -223,6 +224,86 @@ class ChatSettings:
         )
 
 
+class AgentMode(StrEnum):
+    """Runtime route for text conversations."""
+
+    LEGACY = "legacy"
+    AGENT = "agent"
+
+
+@dataclass(frozen=True, slots=True)
+class AgentSettings:
+    """Framework-neutral policy for the bounded Agent conversation path."""
+
+    mode: AgentMode
+    system_prompt: str
+    session_ttl_seconds: int
+    max_history_messages: int
+    max_history_characters: int
+    timeout_seconds: float
+    max_model_requests: int
+    max_tool_calls: int
+    max_total_tokens: int
+    max_parallel_tools: int
+    stale_run_after_seconds: int
+
+    @property
+    def enabled(self) -> bool:
+        """Return whether OOPZ chat traffic should use the Agent path."""
+        return self.mode is AgentMode.AGENT
+
+    @classmethod
+    def from_mapping(cls, values: Mapping[str, str]) -> AgentSettings:
+        """Build Agent settings without requiring legacy provider environment values."""
+        raw_mode = values.get("CYWL_AGENT_MODE", AgentMode.LEGACY.value).strip().casefold()
+        try:
+            mode = AgentMode(raw_mode)
+        except ValueError as exc:
+            raise ConfigurationError("CYWL_AGENT_MODE must be legacy or agent") from exc
+        return cls(
+            mode=mode,
+            system_prompt=values.get("CYWL_AGENT_SYSTEM_PROMPT", "").strip()
+            or "你是 CYWL，一个友好、简洁、善于使用工具的 OOPZ 社区助手。",
+            session_ttl_seconds=_positive_integer(
+                values,
+                "CYWL_AGENT_SESSION_TTL_SECONDS",
+                86400,
+            ),
+            max_history_messages=_positive_integer(
+                values,
+                "CYWL_AGENT_MAX_HISTORY_MESSAGES",
+                20,
+            ),
+            max_history_characters=_positive_integer(
+                values,
+                "CYWL_AGENT_MAX_HISTORY_CHARACTERS",
+                20000,
+            ),
+            timeout_seconds=_positive_float(values, "CYWL_AGENT_TIMEOUT_SECONDS", 45.0),
+            max_model_requests=_positive_integer(
+                values,
+                "CYWL_AGENT_MAX_MODEL_REQUESTS",
+                6,
+            ),
+            max_tool_calls=_positive_integer(values, "CYWL_AGENT_MAX_TOOL_CALLS", 8),
+            max_total_tokens=_positive_integer(
+                values,
+                "CYWL_AGENT_MAX_TOTAL_TOKENS",
+                32000,
+            ),
+            max_parallel_tools=_positive_integer(
+                values,
+                "CYWL_AGENT_MAX_PARALLEL_TOOLS",
+                3,
+            ),
+            stale_run_after_seconds=_positive_integer(
+                values,
+                "CYWL_AGENT_STALE_RUN_AFTER_SECONDS",
+                90,
+            ),
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class AppSettings:
     """All settings owned by the CYWL application."""
@@ -230,6 +311,7 @@ class AppSettings:
     oopz: OopzConfig
     database: DatabaseSettings
     chat: ChatSettings
+    agent: AgentSettings
     command_prefix: str = "!"
     environment: str = "development"
 
@@ -255,6 +337,7 @@ class AppSettings:
             oopz=oopz,
             database=DatabaseSettings.from_mapping(values),
             chat=ChatSettings.from_mapping(values),
+            agent=AgentSettings.from_mapping(values),
             command_prefix=command_prefix,
             environment=values.get("CYWL_ENV", "development").strip() or "development",
         )
