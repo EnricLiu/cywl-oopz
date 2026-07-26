@@ -18,6 +18,17 @@ from cywl_oopz.features.agent.models import AgentIdentity, AgentRunLimits
 _TOOL_NAME = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
 
 
+class ToolExecutionError(Exception):
+    """Expected tool failure with a stable model-visible error code."""
+
+    def __init__(self, error_code: str) -> None:
+        normalized = error_code.strip()
+        if not _TOOL_NAME.fullmatch(normalized):
+            raise ValueError("Tool error code must be a stable snake_case identifier")
+        self.error_code = normalized
+        super().__init__(normalized)
+
+
 class ToolEffect(StrEnum):
     """Observable side-effect class used by deterministic policy."""
 

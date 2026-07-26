@@ -33,6 +33,7 @@ from cywl_oopz.features.agent.tools.models import (
     ToolExecutionResult,
     ToolExecutionStatus,
 )
+from cywl_oopz.features.agent.tools.music import EnqueueMusicInput, EnqueueMusicOutput
 from cywl_oopz.features.chat.models import ConversationKey
 
 
@@ -110,6 +111,53 @@ class LiveModelRegistry:
 
     async def aclose(self) -> None:
         return None
+
+
+class LiveMusicToolRuntime:
+    """Exercise the real A5 enqueue schema without touching OOPZ or a music catalog."""
+
+    def __init__(self) -> None:
+        self.queries: list[str] = []
+        self.descriptor = ToolDescriptor(
+            name="enqueue_music",
+            description="为用户当前语音频道点歌。",
+            input_model=EnqueueMusicInput,
+            output_model=EnqueueMusicOutput,
+            effect=ToolEffect.WRITE,
+            timeout_seconds=10,
+            max_output_characters=2000,
+            concurrency_safe=False,
+            idempotent=True,
+        )
+
+    def descriptors(self, names: tuple[str, ...]) -> tuple[ToolDescriptor, ...]:
+        assert names == ("enqueue_music",)
+        return (self.descriptor,)
+
+    async def execute(
+        self,
+        call: ToolCall,
+        context: ToolExecutionContext,
+    ) -> ToolExecutionResult:
+        del context
+        arguments = EnqueueMusicInput.model_validate(call.arguments)
+        self.queries.append(arguments.query)
+        return ToolExecutionResult(
+            call.call_id,
+            call.name,
+            ToolExecutionStatus.SUCCEEDED,
+            {
+                "voice_channel_id": "live-voice",
+                "position": 1,
+                "track": {
+                    "source": "netease",
+                    "source_id": "42",
+                    "title": "Blue Train",
+                    "artists": ["John Coltrane"],
+                    "duration_ms": 640000,
+                },
+            },
+        )
 
 
 @pytest.mark.asyncio
@@ -202,6 +250,33 @@ async def test_live_provider_text_tools_streaming_and_usage() -> None:
         assert agent_result.stop_reason is AgentStopReason.COMPLETED
         assert agent_result.tool_calls == 1
 
+        music_runtime = LiveMusicToolRuntime()
+        music_engine = PydanticAiAgentEngine(LiveModelRegistry(model), music_runtime)
+        started_at = time.perf_counter()
+        music_result = await music_engine.run(
+            AgentRunRequest(
+                run_id=uuid4(),
+                thread_id=uuid4(),
+                identity=AgentIdentity("live-person", key),
+                model=live_model_ref(config),
+                prompt=(
+                    "用户明确要求点播 John Coltrane 的 Blue Train。"
+                    "必须调用 enqueue_music 一次，query 使用“Blue Train John Coltrane”；"
+                    "获得结果后用一句中文确认。"
+                ),
+                context=(),
+                enabled_tools=("enqueue_music",),
+                limits=AgentRunLimits(timeout_seconds=90),
+            )
+        )
+        metrics["music_tool_loop_seconds"] = round(
+            time.perf_counter() - started_at,
+            3,
+        )
+        assert music_runtime.queries == ["Blue Train John Coltrane"]
+        assert music_result.stop_reason is AgentStopReason.COMPLETED
+        assert music_result.tool_calls == 1
+
         started_at = time.perf_counter()
         first_delta_at: float | None = None
         streamed_parts: list[str] = []
@@ -265,3 +340,17 @@ def _load_live_config() -> LiveLlmConfig:
     if not all((config.base_url, config.api_key, config.model_name)):
         pytest.fail("Live LLM endpoint, API key, and model name are not configured")
     return config
+
+
+def live_model_ref(config: LiveLlmConfig) -> AgentModelRef:
+    """Build the same live model reference for focused project adapter checks."""
+    return AgentModelRef(
+        provider_id=uuid4(),
+        model_id=uuid4(),
+        provider_alias="live",
+        model_alias="live",
+        remote_model_name=config.model_name,
+        protocol=ProviderProtocol.OPENAI_CHAT_COMPATIBLE,
+        capabilities=frozenset({ModelCapability.TOOL_CALLING}),
+        fallback_model_id=None,
+    )

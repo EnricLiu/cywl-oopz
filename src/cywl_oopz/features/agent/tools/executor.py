@@ -16,6 +16,7 @@ from .models import (
     ToolEffect,
     ToolExecution,
     ToolExecutionContext,
+    ToolExecutionError,
     ToolExecutionResult,
     ToolExecutionStatus,
 )
@@ -123,6 +124,13 @@ class ToolExecutor:
                 call,
                 ToolExecutionStatus.FAILED,
                 error_code="tool_timeout",
+            )
+        except ToolExecutionError as exc:
+            return await self._finish(
+                context,
+                call,
+                ToolExecutionStatus.FAILED,
+                error_code=exc.error_code,
             )
         except Exception:
             return await self._finish(

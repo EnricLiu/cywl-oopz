@@ -18,6 +18,23 @@ DEFAULT_AGENT_TOOLS = (
     "get_agent_status",
     "get_channel_settings",
     "react_to_message",
+    "search_music_catalog",
+    "enqueue_music",
+    "get_music_queue",
+    "skip_music",
+    "pause_music",
+    "resume_music",
+)
+
+MUSIC_AGENT_TOOLS = frozenset(
+    {
+        "search_music_catalog",
+        "enqueue_music",
+        "get_music_queue",
+        "skip_music",
+        "pause_music",
+        "resume_music",
+    }
 )
 
 
@@ -399,6 +416,56 @@ class AgentSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class MusicSettings:
+    """Configuration for the optional Netease-backed OOPZ music feature."""
+
+    enabled: bool
+    catalog_base_url: str
+    catalog_cookie: str
+    request_timeout_seconds: float
+    search_limit: int
+    bitrate: int
+    max_queue_length: int
+    max_query_characters: int
+    playback_poll_seconds: float
+
+    @classmethod
+    def from_mapping(cls, values: Mapping[str, str]) -> MusicSettings:
+        """Build music settings and require an HTTP catalog only when enabled."""
+        enabled = _boolean(values, "CYWL_MUSIC_ENABLED", False)
+        base_url = values.get("CYWL_MUSIC_CATALOG_BASE_URL", "").strip().rstrip("/")
+        if enabled:
+            parsed = urlparse(base_url)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                raise ConfigurationError(
+                    "CYWL_MUSIC_CATALOG_BASE_URL must be an HTTP(S) URL when music is enabled"
+                )
+        return cls(
+            enabled=enabled,
+            catalog_base_url=base_url,
+            catalog_cookie=values.get("CYWL_MUSIC_NETEASE_COOKIE", "").strip(),
+            request_timeout_seconds=_positive_float(
+                values,
+                "CYWL_MUSIC_REQUEST_TIMEOUT_SECONDS",
+                5.0,
+            ),
+            search_limit=_positive_integer(values, "CYWL_MUSIC_SEARCH_LIMIT", 5),
+            bitrate=_positive_integer(values, "CYWL_MUSIC_BITRATE", 320_000),
+            max_queue_length=_positive_integer(values, "CYWL_MUSIC_MAX_QUEUE_LENGTH", 50),
+            max_query_characters=_positive_integer(
+                values,
+                "CYWL_MUSIC_MAX_QUERY_CHARACTERS",
+                200,
+            ),
+            playback_poll_seconds=_positive_float(
+                values,
+                "CYWL_MUSIC_PLAYBACK_POLL_SECONDS",
+                1.0,
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class AppSettings:
     """All settings owned by the CYWL application."""
 
@@ -406,6 +473,7 @@ class AppSettings:
     database: DatabaseSettings
     chat: ChatSettings
     agent: AgentSettings
+    music: MusicSettings
     command_prefix: str = "!"
     environment: str = "development"
 
@@ -432,6 +500,7 @@ class AppSettings:
             database=DatabaseSettings.from_mapping(values),
             chat=ChatSettings.from_mapping(values),
             agent=AgentSettings.from_mapping(values),
+            music=MusicSettings.from_mapping(values),
             command_prefix=command_prefix,
             environment=values.get("CYWL_ENV", "development").strip() or "development",
         )

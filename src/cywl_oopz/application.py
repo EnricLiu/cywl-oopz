@@ -44,6 +44,14 @@ from .features.agent.tools.builtin import (
     ReactToMessageTool,
 )
 from .features.agent.tools.executor import ToolExecutor
+from .features.agent.tools.music import (
+    EnqueueMusicTool,
+    GetMusicQueueTool,
+    PauseMusicTool,
+    ResumeMusicTool,
+    SearchMusicCatalogTool,
+    SkipMusicTool,
+)
 from .features.agent.tools.policy import ToolAvailabilityService, ToolPolicy
 from .features.agent.tools.registry import ToolRegistry
 from .features.chat.commands import (
@@ -61,8 +69,11 @@ from .features.chat.provider import ChatProvider, DisabledChatProvider
 from .features.chat.repository import SqlAlchemyConversationRepository
 from .features.chat.service import ChatService
 from .features.chat.tasks import ChatTaskSupervisor
+from .features.music.netease import NeteaseMusicCatalog
+from .features.music.service import MusicRequestService
+from .integrations.oopz.music import OopzMusicVoiceGateway
 from .integrations.oopz.reactions import OopzReactionGateway
-from .settings import AppSettings
+from .settings import MUSIC_AGENT_TOOLS, AppSettings
 from .storage.channel_settings import SqlAlchemyChannelSettingsRepository
 from .storage.database import Database
 
@@ -100,28 +111,53 @@ class BotApplication:
             selection_repository,
         )
         channel_settings = SqlAlchemyChannelSettingsRepository(self.database.session_factory)
-        self.agent_tool_registry = ToolRegistry(
-            (
-                GetAgentStatusTool(
-                    timeout_seconds=settings.agent.tool_timeout_seconds,
-                    max_output_characters=settings.agent.max_tool_result_characters,
-                ),
-                GetChannelSettingsTool(
-                    channel_settings,
-                    timeout_seconds=settings.agent.tool_timeout_seconds,
-                    max_output_characters=settings.agent.max_tool_result_characters,
-                ),
-                ReactToMessageTool(
-                    OopzReactionGateway(self.bot),
-                    timeout_seconds=settings.agent.tool_timeout_seconds,
-                    max_output_characters=settings.agent.max_tool_result_characters,
-                ),
+        agent_tools = [
+            GetAgentStatusTool(
+                timeout_seconds=settings.agent.tool_timeout_seconds,
+                max_output_characters=settings.agent.max_tool_result_characters,
+            ),
+            GetChannelSettingsTool(
+                channel_settings,
+                timeout_seconds=settings.agent.tool_timeout_seconds,
+                max_output_characters=settings.agent.max_tool_result_characters,
+            ),
+            ReactToMessageTool(
+                OopzReactionGateway(self.bot),
+                timeout_seconds=settings.agent.tool_timeout_seconds,
+                max_output_characters=settings.agent.max_tool_result_characters,
+            ),
+        ]
+        self.music: MusicRequestService | None = None
+        enabled_agent_tools = settings.agent.enabled_tools
+        if settings.music.enabled:
+            self.music = MusicRequestService(
+                settings.music,
+                NeteaseMusicCatalog(settings.music),
+                OopzMusicVoiceGateway(self.bot),
             )
-        )
+            music_tool_options = {
+                "timeout_seconds": settings.agent.tool_timeout_seconds,
+                "max_output_characters": settings.agent.max_tool_result_characters,
+            }
+            agent_tools.extend(
+                (
+                    SearchMusicCatalogTool(self.music, **music_tool_options),
+                    EnqueueMusicTool(self.music, **music_tool_options),
+                    GetMusicQueueTool(self.music, **music_tool_options),
+                    SkipMusicTool(self.music, **music_tool_options),
+                    PauseMusicTool(self.music, **music_tool_options),
+                    ResumeMusicTool(self.music, **music_tool_options),
+                )
+            )
+        else:
+            enabled_agent_tools = tuple(
+                name for name in enabled_agent_tools if name not in MUSIC_AGENT_TOOLS
+            )
+        self.agent_tool_registry = ToolRegistry(agent_tools)
         self.agent_tool_availability = ToolAvailabilityService(
             self.agent_tool_registry,
             channel_settings,
-            settings.agent.enabled_tools,
+            enabled_agent_tools,
         )
         self.agent_tool_executor = ToolExecutor(
             self.agent_tool_registry,
@@ -237,6 +273,8 @@ class BotApplication:
         finally:
             await self.chat_tasks.close()
             await self.agent_summary_tasks.close()
+            if self.music is not None:
+                await self.music.aclose()
             await self.agent_engine.aclose()
             await self._provider.aclose()
             await self.database.close()

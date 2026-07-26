@@ -99,6 +99,12 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
             "get_agent_status",
             "get_channel_settings",
             "react_to_message",
+            "search_music_catalog",
+            "enqueue_music",
+            "get_music_queue",
+            "skip_music",
+            "pause_music",
+            "resume_music",
         ]
 
         provider_id = uuid4()

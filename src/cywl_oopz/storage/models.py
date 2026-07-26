@@ -47,6 +47,12 @@ class ChannelSettingsRecord(Base):
             "get_agent_status",
             "get_channel_settings",
             "react_to_message",
+            "search_music_catalog",
+            "enqueue_music",
+            "get_music_queue",
+            "skip_music",
+            "pause_music",
+            "resume_music",
         ],
         nullable=False,
     )

@@ -3,7 +3,13 @@ from __future__ import annotations
 import pytest
 
 from cywl_oopz.core.errors import ConfigurationError
-from cywl_oopz.settings import AgentMode, AppSettings, ChatSettings, DatabaseSettings
+from cywl_oopz.settings import (
+    AgentMode,
+    AppSettings,
+    ChatSettings,
+    DatabaseSettings,
+    MusicSettings,
+)
 
 
 def valid_environment() -> dict[str, str]:
@@ -36,9 +42,16 @@ def test_app_settings_use_the_injected_oopz_credentials(monkeypatch) -> None:
         "get_agent_status",
         "get_channel_settings",
         "react_to_message",
+        "search_music_catalog",
+        "enqueue_music",
+        "get_music_queue",
+        "skip_music",
+        "pause_music",
+        "resume_music",
     )
     assert settings.agent.summary_enabled is True
     assert settings.agent.memory_enabled_by_default is True
+    assert settings.music.enabled is False
 
 
 def test_agent_mode_uses_database_catalog_without_legacy_llm_credentials() -> None:
@@ -94,6 +107,24 @@ def test_enabled_chat_requires_provider_credentials() -> None:
 
     with pytest.raises(ConfigurationError, match="CYWL_LLM_BASE_URL"):
         ChatSettings.from_mapping(values)
+
+
+def test_enabled_music_requires_http_catalog_and_loads_bounds() -> None:
+    with pytest.raises(ConfigurationError, match="MUSIC_CATALOG_BASE_URL"):
+        MusicSettings.from_mapping({"CYWL_MUSIC_ENABLED": "true"})
+
+    settings = MusicSettings.from_mapping(
+        {
+            "CYWL_MUSIC_ENABLED": "true",
+            "CYWL_MUSIC_CATALOG_BASE_URL": "http://music.example/",
+            "CYWL_MUSIC_SEARCH_LIMIT": "7",
+            "CYWL_MUSIC_MAX_QUEUE_LENGTH": "12",
+        }
+    )
+
+    assert settings.catalog_base_url == "http://music.example"
+    assert settings.search_limit == 7
+    assert settings.max_queue_length == 12
 
 
 def test_from_environment_loads_dotenv_from_the_current_directory(tmp_path, monkeypatch) -> None:

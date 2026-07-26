@@ -29,6 +29,7 @@ from cywl_oopz.features.agent.tools.models import (
     ToolExecution,
     ToolExecutionClaim,
     ToolExecutionContext,
+    ToolExecutionError,
     ToolExecutionStatus,
 )
 from cywl_oopz.features.agent.tools.policy import (
@@ -276,6 +277,33 @@ async def test_executor_bounds_timeout_and_denies_admin_for_normal_identity() ->
     assert timed_out.error_code == "tool_timeout"
     assert denied.error_code == "administrator_required"
     assert admin.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_executor_preserves_expected_tool_error_code() -> None:
+    class ExpectedFailureTool(RecordingTool):
+        async def execute(
+            self,
+            context: ToolExecutionContext,
+            arguments: BaseModel,
+        ) -> BaseModel:
+            del context, arguments
+            raise ToolExecutionError("voice_channel_required")
+
+    tool = ExpectedFailureTool("expected_failure")
+    executor = ToolExecutor(
+        ToolRegistry((tool,)),
+        ToolPolicy(),
+        InMemoryExecutionRepository(),
+    )
+
+    result = await executor.execute(
+        ToolCall("call-expected", "expected_failure", {"value": 1}),
+        tool_context("expected_failure"),
+    )
+
+    assert result.status is ToolExecutionStatus.FAILED
+    assert result.error_code == "voice_channel_required"
 
 
 @pytest.mark.asyncio

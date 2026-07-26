@@ -29,7 +29,7 @@ class FakeOopzBot:
         self.did_run = True
 
 
-def settings(mode: str) -> AppSettings:
+def settings(mode: str, **overrides: str) -> AppSettings:
     return AppSettings.from_mapping(
         {
             "OOPZ_DEVICE_ID": "device",
@@ -38,6 +38,7 @@ def settings(mode: str) -> AppSettings:
             "DATABASE_URL": "postgresql://user:secret@localhost:5432/cywl",
             "CYWL_CHAT_ENABLED": "false",
             "CYWL_AGENT_MODE": mode,
+            **overrides,
         }
     )
 
@@ -60,6 +61,41 @@ async def test_composition_root_routes_chat_and_provider_command_by_agent_flag(
     assert "memory" not in {command.name for command in legacy_application.commands.commands}
 
     for application in (agent_application, legacy_application):
+        if application.music is not None:
+            await application.music.aclose()
+        await application.agent_engine.aclose()
+        await application._provider.aclose()
+        await application.database.close()
+
+
+@pytest.mark.asyncio
+async def test_composition_root_registers_music_tools_only_when_music_is_enabled(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(application_module, "OopzBot", FakeOopzBot)
+    disabled = BotApplication(settings("agent"))
+    enabled = BotApplication(
+        settings(
+            "agent",
+            CYWL_MUSIC_ENABLED="true",
+            CYWL_MUSIC_CATALOG_BASE_URL="https://music.example",
+        )
+    )
+
+    assert disabled.music is None
+    assert "enqueue_music" not in disabled.agent_tool_registry.names
+    assert enabled.music is not None
+    assert {
+        "search_music_catalog",
+        "enqueue_music",
+        "get_music_queue",
+        "skip_music",
+        "pause_music",
+        "resume_music",
+    }.issubset(enabled.agent_tool_registry.names)
+
+    await enabled.music.aclose()
+    for application in (disabled, enabled):
         await application.agent_engine.aclose()
         await application._provider.aclose()
         await application.database.close()
