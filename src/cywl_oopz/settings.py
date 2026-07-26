@@ -81,8 +81,6 @@ def _csv(values: Mapping[str, str], name: str) -> tuple[str, ...]:
 
 def _oopz_config(values: Mapping[str, str]) -> OopzConfig:
     """Build SDK credentials from the same injectable mapping as project settings."""
-    return OopzConfig.from_env()
-    
     options: dict[str, str] = {
         "device_id": _required(values, "OOPZ_DEVICE_ID"),
         "person_uid": _required(values, "OOPZ_PERSON_UID"),
@@ -239,17 +237,22 @@ class AppSettings:
     def from_environment(cls) -> AppSettings:
         """Load ignored `.env` values, then validate the effective environment."""
         load_dotenv(find_dotenv(usecwd=True), override=False)
-        return cls.from_mapping(os.environ)
+        return cls._build(os.environ, OopzConfig.from_env())
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, str]) -> AppSettings:
         """Build settings from an injectable mapping for deterministic tests."""
+        return cls._build(values, _oopz_config(values))
+
+    @classmethod
+    def _build(cls, values: Mapping[str, str], oopz: OopzConfig) -> AppSettings:
+        """Build all settings while keeping the SDK login source explicit."""
         command_prefix = values.get("CYWL_COMMAND_PREFIX", "!").strip()
         if not command_prefix:
             raise ConfigurationError("CYWL_COMMAND_PREFIX must not be empty")
 
         return cls(
-            oopz=_oopz_config(values),
+            oopz=oopz,
             database=DatabaseSettings.from_mapping(values),
             chat=ChatSettings.from_mapping(values),
             command_prefix=command_prefix,
