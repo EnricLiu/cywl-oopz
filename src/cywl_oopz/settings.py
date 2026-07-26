@@ -81,6 +81,8 @@ def _csv(values: Mapping[str, str], name: str) -> tuple[str, ...]:
 
 def _oopz_config(values: Mapping[str, str]) -> OopzConfig:
     """Build SDK credentials from the same injectable mapping as project settings."""
+    return OopzConfig.from_env()
+    
     options: dict[str, str] = {
         "device_id": _required(values, "OOPZ_DEVICE_ID"),
         "person_uid": _required(values, "OOPZ_PERSON_UID"),

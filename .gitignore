@@ -6,3 +6,6 @@ __pycache__/
 .ruff_cache/
 coverage.xml
 htmlcov/
+
+docs/
+impl-logs/
