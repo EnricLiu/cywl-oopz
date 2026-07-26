@@ -14,6 +14,14 @@ from .commands.builtin import HelpCommand, PingCommand, StatusCommand
 from .commands.router import CommandRouter
 from .core.errors import DatabaseError
 from .core.health import HealthRegistry, HealthState
+from .features.agent.catalog import ProviderCatalogAdminService, ReloadableProviderCatalog
+from .features.agent.repository import (
+    SqlAlchemyAgentRunRepository,
+    SqlAlchemyAgentThreadRepository,
+    SqlAlchemyModelSelectionRepository,
+    SqlAlchemyProviderCatalogRepository,
+)
+from .features.agent.selection import ProviderSelectionService
 from .features.chat.commands import (
     AmbientChatHandler,
     CancelChatCommand,
@@ -45,6 +53,18 @@ class BotApplication:
         self.database = Database(settings.database)
         self.bot = OopzBot(settings.oopz)
         self.commands = CommandRouter(settings.command_prefix)
+        catalog_repository = SqlAlchemyProviderCatalogRepository(self.database.session_factory)
+        self.agent_catalog = ReloadableProviderCatalog(catalog_repository)
+        self.agent_catalog_admin = ProviderCatalogAdminService(
+            catalog_repository,
+            self.agent_catalog,
+        )
+        self.agent_threads = SqlAlchemyAgentThreadRepository(self.database.session_factory)
+        self.agent_runs = SqlAlchemyAgentRunRepository(self.database.session_factory)
+        self.agent_selection = ProviderSelectionService(
+            self.agent_catalog,
+            SqlAlchemyModelSelectionRepository(self.database.session_factory),
+        )
         self._provider = self._create_chat_provider()
         self.chat_tasks = ChatTaskSupervisor()
         self.chat = ChatService(

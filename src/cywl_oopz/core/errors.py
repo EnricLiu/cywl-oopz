@@ -27,6 +27,10 @@ class ProviderResponseError(ProviderError):
     """Raised when an upstream AI provider returns an invalid response."""
 
 
+class ProviderSelectionError(ProviderError):
+    """Raised when no configured model can serve a requested run."""
+
+
 class RateLimitExceeded(CywlError):
     """Raised when a user, channel, or process has reached a concurrency limit."""
 

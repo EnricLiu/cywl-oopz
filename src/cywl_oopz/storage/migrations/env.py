@@ -48,8 +48,8 @@ def do_run_migrations(connection: Connection) -> None:
         context.run_migrations()
 
 
-async def run_migrations_online() -> None:
-    """Apply migrations through SQLAlchemy's asyncpg engine."""
+async def run_async_migrations() -> None:
+    """Create an asyncpg connection when the caller did not supply one."""
     configuration = config.get_section(config.config_ini_section) or {}
     configuration["sqlalchemy.url"] = database_url()
     connectable = async_engine_from_config(
@@ -64,7 +64,16 @@ async def run_migrations_online() -> None:
         await connectable.dispose()
 
 
+def run_migrations_online() -> None:
+    """Use an injected sync bridge for tests, or own an asyncpg connection."""
+    supplied_connection = config.attributes.get("connection")
+    if supplied_connection is not None:
+        do_run_migrations(supplied_connection)
+        return
+    asyncio.run(run_async_migrations())
+
+
 if context.is_offline_mode():
     run_migrations_offline()
 else:
-    asyncio.run(run_migrations_online())
+    run_migrations_online()
