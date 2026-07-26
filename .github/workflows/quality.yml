@@ -1,0 +1,36 @@
+name: quality
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: cywl
+          POSTGRES_PASSWORD: test-password
+          POSTGRES_DB: cywl_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U cywl -d cywl_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql+asyncpg://cywl:test-password@127.0.0.1:5432/cywl_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+      - run: uv sync --all-groups
+      - run: uv run ruff format --check .
+      - run: uv run ruff check .
+      - run: uv run pytest
+      - run: uv run alembic upgrade head
