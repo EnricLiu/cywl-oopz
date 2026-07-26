@@ -77,6 +77,16 @@ class AgentThreadRepository(Protocol):
     async def refresh_expiry(self, thread_id: UUID, expires_at: datetime) -> None:
         """Extend one active thread TTL."""
 
+    async def save_summary(
+        self,
+        thread_id: UUID,
+        summary: str,
+        through_sequence: int,
+        *,
+        expected_version: int,
+    ) -> bool:
+        """Save a derived summary with optimistic concurrency."""
+
     async def delete(self, key: ConversationKey) -> None:
         """Delete a thread and its cascading runtime records."""
 
@@ -103,8 +113,23 @@ class AgentRunRepository(Protocol):
 class AgentMessageRepository(Protocol):
     """Persistence boundary for ordered provider-neutral thread messages."""
 
-    async def load(self, thread_id: UUID, *, limit: int) -> tuple[AgentMessage, ...]:
+    async def load(
+        self,
+        thread_id: UUID,
+        *,
+        limit: int,
+        after_sequence: int = 0,
+    ) -> tuple[AgentMessage, ...]:
         """Load the newest messages in chronological order."""
+
+    async def load_after(
+        self,
+        thread_id: UUID,
+        *,
+        after_sequence: int,
+        limit: int,
+    ) -> tuple[AgentMessage, ...]:
+        """Load the oldest messages after a sequence in chronological order."""
 
     async def append(
         self,

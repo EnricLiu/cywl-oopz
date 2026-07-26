@@ -319,6 +319,38 @@ class SqlAlchemyAgentThreadRepository:
         except SQLAlchemyError as exc:
             raise DatabaseError("Failed to refresh Agent thread") from exc
 
+    async def save_summary(
+        self,
+        thread_id: UUID,
+        summary: str,
+        through_sequence: int,
+        *,
+        expected_version: int,
+    ) -> bool:
+        """Replace derived summary only if the thread version is unchanged."""
+        if through_sequence <= 0 or not summary.strip():
+            raise ValueError("Agent summary and sequence must not be empty")
+        try:
+            async with self._sessions() as session:
+                async with session.begin():
+                    result = await session.execute(
+                        update(AgentThreadRecord)
+                        .where(
+                            AgentThreadRecord.id == thread_id,
+                            AgentThreadRecord.version == expected_version,
+                            AgentThreadRecord.summary_through_sequence < through_sequence,
+                        )
+                        .values(
+                            summary=summary.strip(),
+                            summary_through_sequence=through_sequence,
+                            summary_version=AgentThreadRecord.summary_version + 1,
+                            version=AgentThreadRecord.version + 1,
+                        )
+                    )
+                    return result.rowcount == 1
+        except SQLAlchemyError as exc:
+            raise DatabaseError("Failed to save Agent thread summary") from exc
+
     async def delete(self, key: ConversationKey) -> None:
         """Delete one thread and let database cascades remove runtime records."""
         try:
@@ -458,7 +490,13 @@ class SqlAlchemyAgentMessageRepository:
     def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
         self._sessions = sessions
 
-    async def load(self, thread_id: UUID, *, limit: int) -> tuple[AgentMessage, ...]:
+    async def load(
+        self,
+        thread_id: UUID,
+        *,
+        limit: int,
+        after_sequence: int = 0,
+    ) -> tuple[AgentMessage, ...]:
         """Load a bounded suffix and return it in chronological order."""
         try:
             async with self._sessions() as session:
@@ -470,6 +508,7 @@ class SqlAlchemyAgentMessageRepository:
                             AgentRunRecord.id == AgentMessageRecord.run_id,
                         )
                         .where(AgentMessageRecord.thread_id == thread_id)
+                        .where(AgentMessageRecord.sequence > after_sequence)
                         .where(
                             or_(
                                 AgentMessageRecord.run_id.is_(None),
@@ -484,6 +523,41 @@ class SqlAlchemyAgentMessageRepository:
                 return tuple(self._to_domain(record) for record in records)
         except SQLAlchemyError as exc:
             raise DatabaseError("Failed to load Agent messages") from exc
+
+    async def load_after(
+        self,
+        thread_id: UUID,
+        *,
+        after_sequence: int,
+        limit: int,
+    ) -> tuple[AgentMessage, ...]:
+        """Load an oldest-first bounded window for deterministic summarization."""
+        try:
+            async with self._sessions() as session:
+                records = (
+                    await session.scalars(
+                        select(AgentMessageRecord)
+                        .outerjoin(
+                            AgentRunRecord,
+                            AgentRunRecord.id == AgentMessageRecord.run_id,
+                        )
+                        .where(
+                            AgentMessageRecord.thread_id == thread_id,
+                            AgentMessageRecord.sequence > after_sequence,
+                        )
+                        .where(
+                            or_(
+                                AgentMessageRecord.run_id.is_(None),
+                                AgentRunRecord.status == AgentRunStatus.SUCCEEDED.value,
+                            )
+                        )
+                        .order_by(AgentMessageRecord.sequence)
+                        .limit(limit)
+                    )
+                ).all()
+                return tuple(self._to_domain(record) for record in records)
+        except SQLAlchemyError as exc:
+            raise DatabaseError("Failed to load Agent summary messages") from exc
 
     async def append(
         self,
@@ -559,6 +633,7 @@ class SqlAlchemyAgentMessageRepository:
             content=_mapping(record.content),
             input_tokens=record.input_tokens,
             output_tokens=record.output_tokens,
+            sequence=record.sequence,
         )
 
 

@@ -37,6 +37,8 @@ def test_app_settings_use_the_injected_oopz_credentials(monkeypatch) -> None:
         "get_channel_settings",
         "react_to_message",
     )
+    assert settings.agent.summary_enabled is True
+    assert settings.agent.memory_enabled_by_default is True
 
 
 def test_agent_mode_uses_database_catalog_without_legacy_llm_credentials() -> None:
@@ -56,6 +58,25 @@ def test_agent_tools_can_be_disabled_independently() -> None:
     )
 
     assert settings.agent.enabled_tools == ()
+
+
+def test_agent_summary_and_memory_limits_are_consistent() -> None:
+    with pytest.raises(ConfigurationError, match="SUMMARY_RETAIN_MESSAGES"):
+        AppSettings.from_mapping(
+            valid_environment()
+            | {
+                "CYWL_AGENT_SUMMARY_TRIGGER_MESSAGES": "4",
+                "CYWL_AGENT_SUMMARY_RETAIN_MESSAGES": "4",
+            }
+        )
+    with pytest.raises(ConfigurationError, match="MEMORY_CONTEXT_ITEMS"):
+        AppSettings.from_mapping(
+            valid_environment()
+            | {
+                "CYWL_AGENT_MEMORY_MAX_ITEMS": "2",
+                "CYWL_AGENT_MEMORY_CONTEXT_ITEMS": "3",
+            }
+        )
 
 
 def test_settings_require_database_url_without_echoing_secret() -> None:

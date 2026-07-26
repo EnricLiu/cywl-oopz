@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
+from uuid import UUID
+
 from oopz_sdk.events.context import EventContext
 
 from cywl_oopz.commands.router import ParsedCommand
 from cywl_oopz.features.chat.commands import ChatCommandController
 from cywl_oopz.features.chat.tasks import ChatTaskSupervisor
 
+from .memory import (
+    MemoryCapacityError,
+    MemoryDisabledError,
+    MemoryItemTooLongError,
+    MemoryService,
+)
 from .service import AgentConversationService
 
 
@@ -101,4 +109,88 @@ class ToolsCommand(ChatCommandController):
         lines.extend(
             f"- {tool.name}（{effects[tool.effect.value]}）：{tool.description}" for tool in tools
         )
+        await context.reply("\n".join(lines))
+
+
+class MemoryCommand(ChatCommandController):
+    """Let users inspect and control only their own long-term memory."""
+
+    name = "memory"
+    description = "查看、保存、关闭或删除自己的长期记忆。"
+
+    def __init__(
+        self,
+        chat: AgentConversationService,
+        memory: MemoryService,
+    ) -> None:
+        super().__init__(chat)
+        self._memory = memory
+
+    async def execute(self, command: ParsedCommand, context: EventContext) -> None:
+        try:
+            person_id = self._key(context).person_id
+            if not command.arguments or command.arguments == ("status",):
+                status = await self._memory.status(person_id)
+                await context.reply(
+                    "长期记忆："
+                    f"{'已开启' if status.enabled else '已关闭'}；"
+                    f"当前 {status.item_count} 条。"
+                )
+                return
+
+            action, *arguments = command.arguments
+            action = action.casefold()
+            if action == "list" and not arguments:
+                await self._list(person_id, context)
+                return
+            if action in {"on", "off"} and not arguments:
+                enabled = action == "on"
+                await self._memory.set_enabled(person_id, enabled)
+                message = (
+                    "长期记忆已开启。"
+                    if enabled
+                    else "长期记忆已关闭；已有内容仍保留，可使用 !memory forget all 删除。"
+                )
+                await context.reply(message)
+                return
+            if action == "remember" and arguments:
+                item = await self._memory.remember(person_id, " ".join(arguments))
+                await context.reply(f"已记住。记忆 ID：{item.id}")
+                return
+            if action == "forget" and len(arguments) == 1:
+                if arguments[0].casefold() == "all":
+                    count = await self._memory.forget_all(person_id)
+                    await context.reply(f"已删除 {count} 条长期记忆。")
+                    return
+                try:
+                    item_id = UUID(arguments[0])
+                except ValueError:
+                    await context.reply("记忆 ID 格式不正确。")
+                    return
+                deleted = await self._memory.forget(person_id, item_id)
+                await context.reply("已删除该记忆。" if deleted else "没有找到该记忆。")
+                return
+            await context.reply(
+                "用法：!memory [status|list|on|off|remember <内容>|forget <ID|all>]"
+            )
+        except MemoryDisabledError:
+            await context.reply("长期记忆当前已关闭；请先使用 !memory on。")
+        except MemoryCapacityError:
+            await context.reply("长期记忆条目已满；请先删除不需要的内容。")
+        except MemoryItemTooLongError:
+            await context.reply("这条记忆太长，请缩短后再保存。")
+        except Exception as exc:
+            await self._reply_error(context, exc)
+
+    async def _list(self, person_id: str, context: EventContext) -> None:
+        items = await self._memory.list(person_id)
+        if not items:
+            await context.reply("当前没有长期记忆。")
+            return
+        lines = ["你的长期记忆："]
+        for item in items:
+            text = item.content.get("text")
+            if isinstance(text, str):
+                display = text if len(text) <= 240 else f"{text[:237]}..."
+                lines.append(f"- {item.id}: {display}")
         await context.reply("\n".join(lines))

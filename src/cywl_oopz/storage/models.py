@@ -209,6 +209,60 @@ class AgentThreadRecord(Base):
     )
 
 
+class AgentMemoryPreferenceRecord(Base):
+    """One user's explicit long-term-memory on/off choice."""
+
+    __tablename__ = "agent_memory_preferences"
+
+    person_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    enabled: Mapped[bool] = mapped_column(default=True, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        onupdate=utc_now,
+    )
+
+
+class AgentMemoryItemRecord(Base):
+    """One expiring long-term memory item owned by exactly one OOPZ person."""
+
+    __tablename__ = "agent_memory_items"
+    __table_args__ = (
+        Index(
+            "ix_agent_memory_items_owner_updated",
+            "owner_person_id",
+            "updated_at",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    owner_person_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    namespace: Mapped[str] = mapped_column(String(64), nullable=False)
+    content: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
+    source_thread_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("agent_threads.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    source_message_sequence: Mapped[int | None] = mapped_column(
+        BigInteger,
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        onupdate=utc_now,
+    )
+    last_used_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+
 class AgentRunRecord(Base):
     """One pinned and bounded Agent execution."""
 

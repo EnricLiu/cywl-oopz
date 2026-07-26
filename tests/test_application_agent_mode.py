@@ -53,9 +53,11 @@ async def test_composition_root_routes_chat_and_provider_command_by_agent_flag(
     assert agent_application.chat is agent_application.agent_chat
     assert "provider" in {command.name for command in agent_application.commands.commands}
     assert "tools" in {command.name for command in agent_application.commands.commands}
+    assert "memory" in {command.name for command in agent_application.commands.commands}
     assert legacy_application.chat is legacy_application.legacy_chat
     assert "provider" not in {command.name for command in legacy_application.commands.commands}
     assert "tools" not in {command.name for command in legacy_application.commands.commands}
+    assert "memory" not in {command.name for command in legacy_application.commands.commands}
 
     for application in (agent_application, legacy_application):
         await application.agent_engine.aclose()

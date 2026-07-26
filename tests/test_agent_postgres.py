@@ -14,6 +14,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from cywl_oopz.features.agent.catalog import ReloadableProviderCatalog
+from cywl_oopz.features.agent.memory import MemoryItem
+from cywl_oopz.features.agent.memory_repository import SqlAlchemyMemoryRepository
 from cywl_oopz.features.agent.models import (
     AgentMessage,
     AgentRun,
@@ -266,6 +268,49 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
             "question",
             "answer",
         ]
+        assert [message.sequence for message in loaded_messages] == [1, 2]
+        assert await thread_repository.save_summary(
+            thread.id,
+            "question and answer",
+            2,
+            expected_version=thread.version,
+        )
+        summarized_thread = await thread_repository.get(key)
+        assert summarized_thread is not None
+        assert summarized_thread.summary == "question and answer"
+        assert summarized_thread.summary_through_sequence == 2
+        assert summarized_thread.summary_version == 1
+        assert (
+            await message_repository.load(
+                thread.id,
+                limit=10,
+                after_sequence=2,
+            )
+            == ()
+        )
+
+        memory_repository = SqlAlchemyMemoryRepository(sessions)
+        memory_id = uuid4()
+        memory_item = MemoryItem(
+            id=memory_id,
+            owner_person_id="person",
+            namespace="explicit",
+            content={"text": "likes jazz"},
+            source_thread_id=thread.id,
+            source_message_sequence=2,
+            created_at=now,
+            updated_at=now,
+            last_used_at=None,
+            expires_at=now + timedelta(days=30),
+        )
+        await memory_repository.add(memory_item)
+        await memory_repository.set_preference("person", False)
+        assert await memory_repository.preference("person") is False
+        assert await memory_repository.count_active("person", now) == 1
+        assert await memory_repository.count_active("other", now) == 0
+        assert await memory_repository.list_active("person", now, limit=10) == (memory_item,)
+        assert await memory_repository.delete("other", memory_id) is False
+        await memory_repository.touch("person", (memory_id,), now)
 
         stale_id = uuid4()
         stale_at = now - timedelta(hours=2)
@@ -317,6 +362,15 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
                         pricing={},
                     )
                 )
+
+        await thread_repository.delete(key)
+        memory_after_thread_delete = await memory_repository.list_active(
+            "person",
+            now,
+            limit=10,
+        )
+        assert len(memory_after_thread_delete) == 1
+        assert memory_after_thread_delete[0].source_thread_id is None
 
         await _migrate(test_engine, "downgrade", "base")
     finally:

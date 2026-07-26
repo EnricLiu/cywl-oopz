@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
@@ -15,6 +14,7 @@ from cywl_oopz.core.errors import (
     ProviderTimeoutError,
 )
 from cywl_oopz.core.health import HealthRegistry, HealthState
+from cywl_oopz.core.tasks import TaskSupervisor
 from cywl_oopz.features.chat.history import HistoryTrimmer
 from cywl_oopz.features.chat.locks import ConversationLockPool
 from cywl_oopz.features.chat.models import (
@@ -27,6 +27,7 @@ from cywl_oopz.features.chat.rate_limit import RateLimitService
 from cywl_oopz.settings import AgentSettings, ChatSettings
 
 from .catalog import ReloadableProviderCatalog
+from .context import AgentContextBuilder
 from .models import (
     AgentIdentity,
     AgentMessage,
@@ -48,6 +49,7 @@ from .ports import (
     ModelSelectionRepository,
 )
 from .selection import ProviderSelectionService
+from .summarization import ThreadSummaryService
 from .tools.policy import AvailableTool, ToolAvailabilityService
 
 
@@ -66,6 +68,9 @@ class AgentConversationService:
         runs: AgentRunRepository,
         messages: AgentMessageRepository,
         tool_availability: ToolAvailabilityService | None = None,
+        context_builder: AgentContextBuilder | None = None,
+        summary_service: ThreadSummaryService | None = None,
+        summary_tasks: TaskSupervisor[UUID] | None = None,
         *,
         rate_limits: RateLimitService | None = None,
         locks: ConversationLockPool | None = None,
@@ -80,6 +85,9 @@ class AgentConversationService:
         self._runs = runs
         self._messages = messages
         self._tool_availability = tool_availability
+        self._context_builder = context_builder or AgentContextBuilder(settings, messages)
+        self._summary_service = summary_service
+        self._summary_tasks = summary_tasks
         self._required_capabilities = (
             frozenset({ModelCapability.TOOL_CALLING}) if settings.enabled_tools else frozenset()
         )
@@ -132,10 +140,7 @@ class AgentConversationService:
                     if self._tool_availability is not None
                     else ()
                 )
-                history = await self._messages.load(
-                    thread.id,
-                    limit=self._settings.max_history_messages,
-                )
+                context = await self._context_builder.build(thread, identity)
                 run_id = uuid4()
                 state = AgentRunState(run_id).start(now)
                 limits = self._run_limits()
@@ -162,14 +167,7 @@ class AgentConversationService:
                     identity=identity,
                     model=selection.model,
                     prompt=content,
-                    context=(
-                        AgentMessage(
-                            "system",
-                            "text",
-                            {"text": self._settings.system_prompt},
-                        ),
-                    )
-                    + self._trim_history(history),
+                    context=context,
                     enabled_tools=enabled_tools,
                     limits=limits,
                 )
@@ -230,6 +228,14 @@ class AgentConversationService:
                     thread.id,
                     finished_at + timedelta(seconds=self._settings.session_ttl_seconds),
                 )
+                if self._summary_service is not None and self._summary_tasks is not None:
+                    self._summary_tasks.start(
+                        thread.id,
+                        self._summary_service.maybe_summarize(
+                            thread,
+                            selection.model,
+                        ),
+                    )
                 self._mark_health(HealthState.HEALTHY, "last Agent run succeeded")
                 return ChatResponse(
                     content=result.output,
@@ -374,49 +380,6 @@ class AgentConversationService:
             await self._threads.delete(key)
             return None
         return thread
-
-    def _trim_history(
-        self,
-        history: tuple[AgentMessage, ...],
-    ) -> tuple[AgentMessage, ...]:
-        selected: list[AgentMessage] = []
-        characters = 0
-        for message in reversed(history):
-            text = message.content.get("text")
-            size = (
-                len(text)
-                if isinstance(text, str)
-                else len(
-                    json.dumps(
-                        dict(message.content),
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                    )
-                )
-            )
-            if len(selected) >= self._settings.max_history_messages:
-                break
-            if characters + size > self._settings.max_history_characters:
-                break
-            selected.append(message)
-            characters += size
-        selected.reverse()
-        call_ids = {
-            item.content.get("tool_call_id") for item in selected if item.kind == "tool_call"
-        }
-        result_ids = {
-            item.content.get("tool_call_id") for item in selected if item.kind == "tool_result"
-        }
-        paired_ids = call_ids.intersection(result_ids)
-        filtered = [
-            item
-            for item in selected
-            if item.kind not in {"tool_call", "tool_result"}
-            or item.content.get("tool_call_id") in paired_ids
-        ]
-        while filtered and filtered[0].role != "user":
-            filtered.pop(0)
-        return tuple(filtered)
 
     def _run_limits(self) -> AgentRunLimits:
         return AgentRunLimits(

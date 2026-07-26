@@ -15,8 +15,12 @@ from .commands.builtin import HelpCommand, PingCommand, StatusCommand
 from .commands.router import CommandRouter
 from .core.errors import ConfigurationError, DatabaseError
 from .core.health import HealthRegistry, HealthState
+from .core.tasks import TaskSupervisor
 from .features.agent.catalog import ProviderCatalogAdminService, ReloadableProviderCatalog
-from .features.agent.commands import ProviderCommand, ToolsCommand
+from .features.agent.commands import MemoryCommand, ProviderCommand, ToolsCommand
+from .features.agent.context import AgentContextBuilder
+from .features.agent.memory import MemoryService
+from .features.agent.memory_repository import SqlAlchemyMemoryRepository
 from .features.agent.models import ModelCapability
 from .features.agent.pydantic_ai_engine import PydanticAiAgentEngine
 from .features.agent.registry import AgentModelRegistry
@@ -30,6 +34,10 @@ from .features.agent.repository import (
 )
 from .features.agent.selection import ProviderSelectionService
 from .features.agent.service import AgentConversationService
+from .features.agent.summarization import (
+    PydanticAiThreadSummarizer,
+    ThreadSummaryService,
+)
 from .features.agent.tools.builtin import (
     GetAgentStatusTool,
     GetChannelSettingsTool,
@@ -79,6 +87,13 @@ class BotApplication:
         self.agent_threads = SqlAlchemyAgentThreadRepository(self.database.session_factory)
         self.agent_runs = SqlAlchemyAgentRunRepository(self.database.session_factory)
         self.agent_messages = SqlAlchemyAgentMessageRepository(self.database.session_factory)
+        self.agent_memory_repository = SqlAlchemyMemoryRepository(self.database.session_factory)
+        self.agent_memory = MemoryService(settings.agent, self.agent_memory_repository)
+        self.agent_context = AgentContextBuilder(
+            settings.agent,
+            self.agent_messages,
+            self.agent_memory,
+        )
         selection_repository = SqlAlchemyModelSelectionRepository(self.database.session_factory)
         self.agent_selection = ProviderSelectionService(
             self.agent_catalog,
@@ -114,6 +129,13 @@ class BotApplication:
             SqlAlchemyToolExecutionRepository(self.database.session_factory),
         )
         self.agent_models = AgentModelRegistry(self.agent_catalog)
+        self.agent_summary_tasks = TaskSupervisor(lambda thread_id: f"agent-summary:{thread_id}")
+        self.agent_summary_service = ThreadSummaryService(
+            settings.agent,
+            PydanticAiThreadSummarizer(self.agent_models, settings.agent),
+            self.agent_threads,
+            self.agent_messages,
+        )
         self.agent_engine = PydanticAiAgentEngine(
             self.agent_models,
             self.agent_tool_executor,
@@ -129,6 +151,9 @@ class BotApplication:
             self.agent_runs,
             self.agent_messages,
             self.agent_tool_availability,
+            context_builder=self.agent_context,
+            summary_service=self.agent_summary_service,
+            summary_tasks=self.agent_summary_tasks,
             health=self.health,
         )
         self._provider = self._create_chat_provider()
@@ -171,6 +196,7 @@ class BotApplication:
         if self.settings.agent.enabled:
             self.commands.register(ProviderCommand(self.agent_chat, self.chat_tasks))
             self.commands.register(ToolsCommand(self.agent_chat))
+            self.commands.register(MemoryCommand(self.agent_chat, self.agent_memory))
 
     async def run(self) -> None:
         """Start the database check before entering the long-running OOPZ client."""
@@ -210,6 +236,7 @@ class BotApplication:
             await self.bot.run()
         finally:
             await self.chat_tasks.close()
+            await self.agent_summary_tasks.close()
             await self.agent_engine.aclose()
             await self._provider.aclose()
             await self.database.close()

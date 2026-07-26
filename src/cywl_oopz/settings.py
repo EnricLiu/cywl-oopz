@@ -254,6 +254,16 @@ class AgentSettings:
     enabled_tools: tuple[str, ...]
     tool_timeout_seconds: float
     max_tool_result_characters: int
+    summary_enabled: bool
+    summary_trigger_messages: int
+    summary_retain_messages: int
+    summary_timeout_seconds: float
+    summary_max_characters: int
+    memory_enabled_by_default: bool
+    memory_default_ttl_days: int
+    memory_max_items: int
+    memory_context_items: int
+    memory_max_item_characters: int
     stale_run_after_seconds: int
 
     @property
@@ -269,7 +279,7 @@ class AgentSettings:
             mode = AgentMode(raw_mode)
         except ValueError as exc:
             raise ConfigurationError("CYWL_AGENT_MODE must be legacy or agent") from exc
-        return cls(
+        settings = cls(
             mode=mode,
             system_prompt=values.get("CYWL_AGENT_SYSTEM_PROMPT", "").strip()
             or "你是 CYWL，一个友好、简洁、善于使用工具的 OOPZ 社区助手。",
@@ -320,12 +330,72 @@ class AgentSettings:
                 "CYWL_AGENT_MAX_TOOL_RESULT_CHARACTERS",
                 32768,
             ),
+            summary_enabled=_boolean(
+                values,
+                "CYWL_AGENT_SUMMARY_ENABLED",
+                True,
+            ),
+            summary_trigger_messages=_positive_integer(
+                values,
+                "CYWL_AGENT_SUMMARY_TRIGGER_MESSAGES",
+                24,
+            ),
+            summary_retain_messages=_positive_integer(
+                values,
+                "CYWL_AGENT_SUMMARY_RETAIN_MESSAGES",
+                12,
+            ),
+            summary_timeout_seconds=_positive_float(
+                values,
+                "CYWL_AGENT_SUMMARY_TIMEOUT_SECONDS",
+                20.0,
+            ),
+            summary_max_characters=_positive_integer(
+                values,
+                "CYWL_AGENT_SUMMARY_MAX_CHARACTERS",
+                4000,
+            ),
+            memory_enabled_by_default=_boolean(
+                values,
+                "CYWL_AGENT_MEMORY_ENABLED_BY_DEFAULT",
+                True,
+            ),
+            memory_default_ttl_days=_positive_integer(
+                values,
+                "CYWL_AGENT_MEMORY_DEFAULT_TTL_DAYS",
+                180,
+            ),
+            memory_max_items=_positive_integer(
+                values,
+                "CYWL_AGENT_MEMORY_MAX_ITEMS",
+                20,
+            ),
+            memory_context_items=_positive_integer(
+                values,
+                "CYWL_AGENT_MEMORY_CONTEXT_ITEMS",
+                6,
+            ),
+            memory_max_item_characters=_positive_integer(
+                values,
+                "CYWL_AGENT_MEMORY_MAX_ITEM_CHARACTERS",
+                1000,
+            ),
             stale_run_after_seconds=_positive_integer(
                 values,
                 "CYWL_AGENT_STALE_RUN_AFTER_SECONDS",
                 90,
             ),
         )
+        if settings.summary_retain_messages >= settings.summary_trigger_messages:
+            raise ConfigurationError(
+                "CYWL_AGENT_SUMMARY_RETAIN_MESSAGES must be smaller than "
+                "CYWL_AGENT_SUMMARY_TRIGGER_MESSAGES"
+            )
+        if settings.memory_context_items > settings.memory_max_items:
+            raise ConfigurationError(
+                "CYWL_AGENT_MEMORY_CONTEXT_ITEMS must not exceed CYWL_AGENT_MEMORY_MAX_ITEMS"
+            )
+        return settings
 
 
 @dataclass(frozen=True, slots=True)

@@ -187,6 +187,7 @@ class AgentMessage:
     content: Mapping[str, Any]
     input_tokens: int | None = None
     output_tokens: int | None = None
+    sequence: int | None = None
 
     def __post_init__(self) -> None:
         if not self.role.strip() or not self.kind.strip():

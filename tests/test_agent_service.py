@@ -93,6 +93,27 @@ class InMemoryThreads:
         key = next(key for key, thread in self.values.items() if thread.id == thread_id)
         self.values[key] = replace(self.values[key], expires_at=expires_at)
 
+    async def save_summary(
+        self,
+        thread_id: UUID,
+        summary: str,
+        through_sequence: int,
+        *,
+        expected_version: int,
+    ) -> bool:
+        key = next(key for key, thread in self.values.items() if thread.id == thread_id)
+        thread = self.values[key]
+        if thread.version != expected_version:
+            return False
+        self.values[key] = replace(
+            thread,
+            summary=summary,
+            summary_through_sequence=through_sequence,
+            summary_version=thread.summary_version + 1,
+            version=thread.version + 1,
+        )
+        return True
+
     async def delete(self, key: ConversationKey) -> None:
         self.values.pop(key, None)
 
@@ -140,8 +161,28 @@ class InMemoryMessages:
     def __init__(self) -> None:
         self.values: dict[UUID, list[AgentMessage]] = {}
 
-    async def load(self, thread_id: UUID, *, limit: int) -> tuple[AgentMessage, ...]:
-        return tuple(self.values.get(thread_id, [])[-limit:])
+    async def load(
+        self,
+        thread_id: UUID,
+        *,
+        limit: int,
+        after_sequence: int = 0,
+    ) -> tuple[AgentMessage, ...]:
+        messages = [
+            item for item in self.values.get(thread_id, []) if (item.sequence or 0) > after_sequence
+        ]
+        return tuple(messages[-limit:])
+
+    async def load_after(
+        self,
+        thread_id: UUID,
+        *,
+        after_sequence: int,
+        limit: int,
+    ) -> tuple[AgentMessage, ...]:
+        return tuple(
+            item for item in self.values.get(thread_id, []) if (item.sequence or 0) > after_sequence
+        )[:limit]
 
     async def append(
         self,
@@ -149,7 +190,11 @@ class InMemoryMessages:
         run_id: UUID,
         messages: tuple[AgentMessage, ...],
     ) -> None:
-        self.values.setdefault(thread_id, []).extend(messages)
+        stored = self.values.setdefault(thread_id, [])
+        stored.extend(
+            replace(message, sequence=len(stored) + offset)
+            for offset, message in enumerate(messages, start=1)
+        )
 
     async def count(self, thread_id: UUID) -> int:
         return len(self.values.get(thread_id, []))
@@ -195,6 +240,16 @@ def agent_settings() -> AgentSettings:
         enabled_tools=(),
         tool_timeout_seconds=1,
         max_tool_result_characters=1000,
+        summary_enabled=True,
+        summary_trigger_messages=6,
+        summary_retain_messages=2,
+        summary_timeout_seconds=1,
+        summary_max_characters=1000,
+        memory_enabled_by_default=True,
+        memory_default_ttl_days=30,
+        memory_max_items=20,
+        memory_context_items=6,
+        memory_max_item_characters=1000,
         stale_run_after_seconds=30,
     )
 
@@ -387,4 +442,4 @@ async def test_agent_service_persists_and_reuses_only_paired_tool_messages(
         ),
         AgentMessage("assistant", "text", {"text": "orphan answer"}),
     )
-    assert service._trim_history(unpaired) == ()
+    assert service._context_builder.trim_history(unpaired) == ()
