@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
@@ -33,8 +34,14 @@ from cywl_oopz.features.agent.repository import (
     SqlAlchemyAgentThreadRepository,
     SqlAlchemyModelSelectionRepository,
     SqlAlchemyProviderCatalogRepository,
+    SqlAlchemyToolExecutionRepository,
 )
 from cywl_oopz.features.agent.selection import ProviderSelectionService
+from cywl_oopz.features.agent.tools.models import (
+    ToolEffect,
+    ToolExecution,
+    ToolExecutionStatus,
+)
 from cywl_oopz.features.chat.models import ConversationKey
 from cywl_oopz.storage.models import (
     AgentRunRecord,
@@ -86,6 +93,11 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
         assert legacy_record is not None
         assert legacy_record.chat_enabled is True
         assert legacy_record.default_model_id is None
+        assert legacy_record.enabled_agent_tools == [
+            "get_agent_status",
+            "get_channel_settings",
+            "react_to_message",
+        ]
 
         provider_id = uuid4()
         application_model_id = uuid4()
@@ -185,6 +197,42 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
                 heartbeat_at=now,
             )
         )
+        tool_execution_repository = SqlAlchemyToolExecutionRepository(sessions)
+        tool_execution = ToolExecution(
+            id=uuid4(),
+            run_id=run_id,
+            call_id="call-status",
+            tool_name="get_agent_status",
+            tool_version="1",
+            effect=ToolEffect.READ,
+            status=ToolExecutionStatus.STARTED,
+            idempotency_key=f"{run_id}:call-status",
+            input_payload={},
+            output_payload=None,
+            error_code="",
+            started_at=now,
+        )
+        first_claim = await tool_execution_repository.claim(tool_execution)
+        duplicate_claim = await tool_execution_repository.claim(tool_execution)
+        semantic_duplicate = await tool_execution_repository.claim(
+            replace(
+                tool_execution,
+                id=uuid4(),
+                call_id="call-status-repeated",
+            )
+        )
+        assert first_claim.created is True
+        assert duplicate_claim.created is False
+        assert semantic_duplicate.created is False
+        assert semantic_duplicate.execution.call_id == "call-status"
+        completed_tool = await tool_execution_repository.finish(
+            run_id,
+            "call-status",
+            ToolExecutionStatus.SUCCEEDED,
+            output={"mode": "agent"},
+            error_code="",
+        )
+        assert completed_tool.output_payload == {"mode": "agent"}
         await run_repository.finish(
             running.finish(AgentStopReason.COMPLETED, now + timedelta(seconds=1)),
             usage={"input_tokens": 10, "output_tokens": 5},

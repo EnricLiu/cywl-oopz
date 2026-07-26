@@ -152,6 +152,8 @@ class AgentIdentity:
     person_id: str
     conversation: ConversationKey
     is_administrator: bool = False
+    source_message_id: str = ""
+    transport_channel_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -278,6 +280,7 @@ class AgentRunResult:
     output_tokens: int = 0
     model_requests: int = 0
     tool_calls: int = 0
+    intermediate_messages: tuple[AgentMessage, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

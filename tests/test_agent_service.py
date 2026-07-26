@@ -192,6 +192,9 @@ def agent_settings() -> AgentSettings:
         max_tool_calls=2,
         max_total_tokens=1000,
         max_parallel_tools=1,
+        enabled_tools=(),
+        tool_timeout_seconds=1,
+        max_tool_result_characters=1000,
         stale_run_after_seconds=30,
     )
 
@@ -313,3 +316,75 @@ async def test_agent_service_cancellation_marks_run_and_releases_lock(chat_setti
     state = next(iter(runs.states.values()))
     assert state.status is AgentRunStatus.CANCELLED
     assert state.stop_reason is AgentStopReason.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_agent_service_persists_and_reuses_only_paired_tool_messages(
+    chat_settings,
+) -> None:
+    pair = (
+        AgentMessage(
+            "assistant",
+            "tool_call",
+            {
+                "version": 1,
+                "tool_call_id": "call-1",
+                "tool_name": "get_agent_status",
+                "arguments": {},
+            },
+        ),
+        AgentMessage(
+            "tool",
+            "tool_result",
+            {
+                "version": 1,
+                "tool_call_id": "call-1",
+                "tool_name": "get_agent_status",
+                "result": {"ok": True},
+            },
+        ),
+    )
+
+    class PairingEngine(RecordingEngine):
+        async def run(self, request):
+            self.requests.append(request)
+            return AgentRunResult(
+                output="answer",
+                stop_reason=AgentStopReason.COMPLETED,
+                intermediate_messages=pair if len(self.requests) == 1 else (),
+            )
+
+    engine = PairingEngine()
+    service, threads, _, _, messages = await build_service(chat_settings, engine)
+
+    await service.ask(key(), "first")
+    await service.ask(key(), "second")
+
+    assert [item.kind for item in engine.requests[1].context] == [
+        "text",
+        "text",
+        "tool_call",
+        "tool_result",
+        "text",
+    ]
+    thread = threads.values[key()]
+    assert [item.kind for item in messages.values[thread.id]][:4] == [
+        "text",
+        "tool_call",
+        "tool_result",
+        "text",
+    ]
+
+    unpaired = (
+        AgentMessage(
+            "tool",
+            "tool_result",
+            {
+                "tool_call_id": "orphan",
+                "tool_name": "missing",
+                "result": {},
+            },
+        ),
+        AgentMessage("assistant", "text", {"text": "orphan answer"}),
+    )
+    assert service._trim_history(unpaired) == ()

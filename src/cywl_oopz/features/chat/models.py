@@ -83,6 +83,26 @@ class ConversationKey:
 
 
 @dataclass(frozen=True, slots=True)
+class ChatInvocation:
+    """Provider-neutral metadata for side effects targeting the source message."""
+
+    source_message_id: str
+    transport_channel_id: str
+
+    @classmethod
+    def from_oopz_context(cls, context: Any) -> ChatInvocation:
+        """Extract only stable message targeting values from the SDK boundary."""
+        event = getattr(context, "event", None)
+        message = getattr(event, "message", None)
+        if message is None:
+            raise ValueError("A chat invocation requires an OOPZ message event")
+        return cls(
+            source_message_id=str(getattr(message, "message_id", "")).strip(),
+            transport_channel_id=str(getattr(message, "channel", "")).strip(),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class ConversationSession:
     """Persisted, expiring chat state for one conversation key."""
 

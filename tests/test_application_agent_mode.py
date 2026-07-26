@@ -52,8 +52,10 @@ async def test_composition_root_routes_chat_and_provider_command_by_agent_flag(
 
     assert agent_application.chat is agent_application.agent_chat
     assert "provider" in {command.name for command in agent_application.commands.commands}
+    assert "tools" in {command.name for command in agent_application.commands.commands}
     assert legacy_application.chat is legacy_application.legacy_chat
     assert "provider" not in {command.name for command in legacy_application.commands.commands}
+    assert "tools" not in {command.name for command in legacy_application.commands.commands}
 
     for application in (agent_application, legacy_application):
         await application.agent_engine.aclose()
@@ -120,6 +122,50 @@ async def test_agent_mode_rejects_disabled_application_default(monkeypatch) -> N
     monkeypatch.setattr(application.agent_models, "reload", no_op)
 
     with pytest.raises(ConfigurationError, match="enabled application-default"):
+        await application.run()
+
+    assert not hasattr(application.bot, "did_run")
+
+
+@pytest.mark.asyncio
+async def test_agent_tools_require_a_tool_calling_application_default(monkeypatch) -> None:
+    monkeypatch.setattr(application_module, "OopzBot", FakeOopzBot)
+    application = BotApplication(settings("agent"))
+    application.agent_catalog._catalog = ProviderCatalog.build(
+        (
+            LlmProvider(
+                id=PROVIDER_ID,
+                alias="text-only",
+                display_name="Text only",
+                protocol=ProviderProtocol.OPENAI_CHAT_COMPATIBLE,
+                base_url="https://llm.example/v1",
+                api_key="database-key",
+                user_selectable=True,
+                enabled=True,
+            ),
+        ),
+        (
+            LlmModel(
+                id=MODEL_ID,
+                provider_id=PROVIDER_ID,
+                alias="model",
+                remote_model_name="model",
+                display_name="Model",
+                enabled=True,
+                is_provider_default=True,
+                is_application_default=True,
+            ),
+        ),
+    )
+
+    async def no_op() -> None:
+        return None
+
+    monkeypatch.setattr(application.database, "start", no_op)
+    monkeypatch.setattr(application.database, "close", no_op)
+    monkeypatch.setattr(application.agent_models, "reload", no_op)
+
+    with pytest.raises(ConfigurationError, match="application-default"):
         await application.run()
 
     assert not hasattr(application.bot, "did_run")

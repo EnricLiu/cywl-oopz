@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import asdict
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
 from sqlalchemy import func, or_, select, update
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -18,6 +19,7 @@ from cywl_oopz.storage.models import (
     AgentMessageRecord,
     AgentRunRecord,
     AgentThreadRecord,
+    AgentToolExecutionRecord,
     ChannelSettingsRecord,
     LlmModelRecord,
     LlmProviderRecord,
@@ -36,6 +38,12 @@ from .models import (
     ModelCapability,
     ModelSelectionCandidates,
     ProviderProtocol,
+)
+from .tools.models import (
+    ToolEffect,
+    ToolExecution,
+    ToolExecutionClaim,
+    ToolExecutionStatus,
 )
 
 
@@ -551,6 +559,119 @@ class SqlAlchemyAgentMessageRepository:
             content=_mapping(record.content),
             input_tokens=record.input_tokens,
             output_tokens=record.output_tokens,
+        )
+
+
+class SqlAlchemyToolExecutionRepository:
+    """Persist idempotent tool call claims and terminal results."""
+
+    def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
+        self._sessions = sessions
+
+    async def claim(self, execution: ToolExecution) -> ToolExecutionClaim:
+        """Insert one run/tool-call identity or return the existing record."""
+        try:
+            async with self._sessions() as session:
+                async with session.begin():
+                    result = await session.execute(
+                        postgresql_insert(AgentToolExecutionRecord)
+                        .values(
+                            id=execution.id,
+                            run_id=execution.run_id,
+                            tool_call_id=execution.call_id,
+                            tool_name=execution.tool_name,
+                            tool_version=execution.tool_version,
+                            effect=execution.effect.value,
+                            status=execution.status.value,
+                            idempotency_key=execution.idempotency_key,
+                            input_payload=dict(execution.input_payload),
+                            output_payload=None,
+                            error_code="",
+                            started_at=execution.started_at,
+                            finished_at=None,
+                        )
+                        .on_conflict_do_nothing()
+                    )
+                    if result.rowcount == 1:
+                        return ToolExecutionClaim(execution, created=True)
+                    record = await session.scalar(
+                        select(AgentToolExecutionRecord).where(
+                            AgentToolExecutionRecord.run_id == execution.run_id,
+                            or_(
+                                AgentToolExecutionRecord.tool_call_id == execution.call_id,
+                                AgentToolExecutionRecord.idempotency_key
+                                == execution.idempotency_key,
+                            ),
+                        )
+                    )
+                    if record is None:
+                        raise DatabaseError("Tool execution claim was not persisted")
+                    return ToolExecutionClaim(self._to_domain(record), created=False)
+        except SQLAlchemyError as exc:
+            raise DatabaseError("Failed to claim Agent tool execution") from exc
+
+    async def finish(
+        self,
+        run_id: UUID,
+        call_id: str,
+        status: ToolExecutionStatus,
+        *,
+        output: dict[str, object] | None,
+        error_code: str,
+    ) -> ToolExecution:
+        """Finish a claimed call exactly once."""
+        if status is ToolExecutionStatus.STARTED:
+            raise ValueError("Tool execution finish requires a terminal status")
+        try:
+            async with self._sessions() as session:
+                async with session.begin():
+                    finished_at = datetime.now(UTC)
+                    result = await session.execute(
+                        update(AgentToolExecutionRecord)
+                        .where(
+                            AgentToolExecutionRecord.run_id == run_id,
+                            AgentToolExecutionRecord.tool_call_id == call_id,
+                            AgentToolExecutionRecord.status == ToolExecutionStatus.STARTED.value,
+                        )
+                        .values(
+                            status=status.value,
+                            output_payload=output,
+                            error_code=error_code,
+                            finished_at=finished_at,
+                        )
+                    )
+                    if result.rowcount != 1:
+                        raise DatabaseError("Tool execution is missing or already finished")
+                    record = await session.scalar(
+                        select(AgentToolExecutionRecord).where(
+                            AgentToolExecutionRecord.run_id == run_id,
+                            AgentToolExecutionRecord.tool_call_id == call_id,
+                        )
+                    )
+                    if record is None:
+                        raise DatabaseError("Finished tool execution is missing")
+                    return self._to_domain(record)
+        except SQLAlchemyError as exc:
+            raise DatabaseError("Failed to finish Agent tool execution") from exc
+
+    @staticmethod
+    def _to_domain(record: AgentToolExecutionRecord) -> ToolExecution:
+        return ToolExecution(
+            id=record.id,
+            run_id=record.run_id,
+            call_id=record.tool_call_id,
+            tool_name=record.tool_name,
+            tool_version=record.tool_version,
+            effect=ToolEffect(record.effect),
+            status=ToolExecutionStatus(record.status),
+            idempotency_key=record.idempotency_key,
+            input_payload=_mapping(record.input_payload),
+            output_payload=(
+                _mapping(record.output_payload) if record.output_payload is not None else None
+            ),
+            error_code=record.error_code,
+            started_at=record.started_at,
+            finished_at=record.finished_at,
         )
 
 

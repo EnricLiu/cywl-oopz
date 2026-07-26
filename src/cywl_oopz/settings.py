@@ -14,6 +14,12 @@ from oopz_sdk import OopzConfig
 from .core.errors import ConfigurationError
 from .storage.url import normalize_asyncpg_url
 
+DEFAULT_AGENT_TOOLS = (
+    "get_agent_status",
+    "get_channel_settings",
+    "react_to_message",
+)
+
 
 def _required(values: Mapping[str, str], name: str) -> str:
     value = values.get(name, "").strip()
@@ -245,6 +251,9 @@ class AgentSettings:
     max_tool_calls: int
     max_total_tokens: int
     max_parallel_tools: int
+    enabled_tools: tuple[str, ...]
+    tool_timeout_seconds: float
+    max_tool_result_characters: int
     stale_run_after_seconds: int
 
     @property
@@ -295,6 +304,21 @@ class AgentSettings:
                 values,
                 "CYWL_AGENT_MAX_PARALLEL_TOOLS",
                 3,
+            ),
+            enabled_tools=(
+                _csv(values, "CYWL_AGENT_ENABLED_TOOLS")
+                if "CYWL_AGENT_ENABLED_TOOLS" in values
+                else DEFAULT_AGENT_TOOLS
+            ),
+            tool_timeout_seconds=_positive_float(
+                values,
+                "CYWL_AGENT_TOOL_TIMEOUT_SECONDS",
+                10.0,
+            ),
+            max_tool_result_characters=_positive_integer(
+                values,
+                "CYWL_AGENT_MAX_TOOL_RESULT_CHARACTERS",
+                32768,
             ),
             stale_run_after_seconds=_positive_integer(
                 values,

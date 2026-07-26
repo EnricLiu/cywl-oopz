@@ -41,6 +41,15 @@ class ChannelSettingsRecord(Base):
     area_id: Mapped[str] = mapped_column(String(128), nullable=False)
     channel_id: Mapped[str] = mapped_column(String(128), nullable=False)
     chat_enabled: Mapped[bool] = mapped_column(default=False, nullable=False)
+    enabled_agent_tools: Mapped[list[str]] = mapped_column(
+        JSONB,
+        default=lambda: [
+            "get_agent_status",
+            "get_channel_settings",
+            "react_to_message",
+        ],
+        nullable=False,
+    )
     default_model_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("llm_models.id", ondelete="SET NULL"),
         nullable=True,
@@ -257,7 +266,15 @@ class AgentToolExecutionRecord(Base):
     """Idempotent record for one model-requested tool call."""
 
     __tablename__ = "agent_tool_executions"
-    __table_args__ = (UniqueConstraint("run_id", "tool_call_id"),)
+    __table_args__ = (
+        UniqueConstraint("run_id", "tool_call_id"),
+        Index(
+            "uq_agent_tool_executions_idempotency",
+            "run_id",
+            "idempotency_key",
+            unique=True,
+        ),
+    )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
     run_id: Mapped[UUID] = mapped_column(

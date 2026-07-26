@@ -11,6 +11,7 @@ from cywl_oopz.settings import ChatSettings
 from .history import HistoryTrimmer
 from .locks import ConversationLockPool
 from .models import (
+    ChatInvocation,
     ChatMessage,
     ChatRequest,
     ChatResponse,
@@ -54,8 +55,15 @@ class ChatService:
         """Expose the feature flag without exposing provider credentials."""
         return self._settings.enabled
 
-    async def ask(self, key: ConversationKey, prompt: str) -> ChatResponse:
+    async def ask(
+        self,
+        key: ConversationKey,
+        prompt: str,
+        *,
+        invocation: ChatInvocation | None = None,
+    ) -> ChatResponse:
         """Answer one prompt while keeping the same session strictly ordered."""
+        del invocation
         self._ensure_enabled()
         content = prompt.strip()
         if not content:

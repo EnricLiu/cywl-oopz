@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
@@ -16,7 +17,12 @@ from cywl_oopz.core.errors import (
 from cywl_oopz.core.health import HealthRegistry, HealthState
 from cywl_oopz.features.chat.history import HistoryTrimmer
 from cywl_oopz.features.chat.locks import ConversationLockPool
-from cywl_oopz.features.chat.models import ChatResponse, ChatStatus, ConversationKey
+from cywl_oopz.features.chat.models import (
+    ChatInvocation,
+    ChatResponse,
+    ChatStatus,
+    ConversationKey,
+)
 from cywl_oopz.features.chat.rate_limit import RateLimitService
 from cywl_oopz.settings import AgentSettings, ChatSettings
 
@@ -27,9 +33,11 @@ from .models import (
     AgentRun,
     AgentRunLimits,
     AgentRunRequest,
+    AgentRunResult,
     AgentRunState,
     AgentStopReason,
     AgentThread,
+    ModelCapability,
     ModelSelection,
 )
 from .ports import (
@@ -40,6 +48,7 @@ from .ports import (
     ModelSelectionRepository,
 )
 from .selection import ProviderSelectionService
+from .tools.policy import AvailableTool, ToolAvailabilityService
 
 
 class AgentConversationService:
@@ -56,6 +65,7 @@ class AgentConversationService:
         threads: AgentThreadRepository,
         runs: AgentRunRepository,
         messages: AgentMessageRepository,
+        tool_availability: ToolAvailabilityService | None = None,
         *,
         rate_limits: RateLimitService | None = None,
         locks: ConversationLockPool | None = None,
@@ -69,6 +79,10 @@ class AgentConversationService:
         self._threads = threads
         self._runs = runs
         self._messages = messages
+        self._tool_availability = tool_availability
+        self._required_capabilities = (
+            frozenset({ModelCapability.TOOL_CALLING}) if settings.enabled_tools else frozenset()
+        )
         self._rate_limits = rate_limits or RateLimitService(chat_settings)
         self._locks = locks or ConversationLockPool()
         self._input_validator = HistoryTrimmer(
@@ -82,8 +96,14 @@ class AgentConversationService:
         """Agent mode is itself the text-chat feature flag."""
         return self._settings.enabled
 
-    async def ask(self, key: ConversationKey, prompt: str) -> ChatResponse:
-        """Run one no-tool Agent turn with durable thread/run/message records."""
+    async def ask(
+        self,
+        key: ConversationKey,
+        prompt: str,
+        *,
+        invocation: ChatInvocation | None = None,
+    ) -> ChatResponse:
+        """Run one bounded Agent turn with durable run, message, and tool records."""
         content = prompt.strip()
         if not content:
             raise ValueError("Agent prompt must not be empty")
@@ -93,7 +113,25 @@ class AgentConversationService:
             async with await self._rate_limits.acquire(key):
                 now = datetime.now(UTC)
                 thread = await self._get_or_create_thread(key, now)
-                selection = await self._selection.resolve(key)
+                selection = await self._selection.resolve(
+                    key,
+                    required_capabilities=self._required_capabilities,
+                )
+                identity = AgentIdentity(
+                    key.person_id,
+                    key,
+                    source_message_id=(
+                        invocation.source_message_id if invocation is not None else ""
+                    ),
+                    transport_channel_id=(
+                        invocation.transport_channel_id if invocation is not None else ""
+                    ),
+                )
+                enabled_tools = (
+                    await self._tool_availability.names(identity, selection.model)
+                    if self._tool_availability is not None
+                    else ()
+                )
                 history = await self._messages.load(
                     thread.id,
                     limit=self._settings.max_history_messages,
@@ -121,7 +159,7 @@ class AgentConversationService:
                 request = AgentRunRequest(
                     run_id=run_id,
                     thread_id=thread.id,
-                    identity=AgentIdentity(key.person_id, key),
+                    identity=identity,
                     model=selection.model,
                     prompt=content,
                     context=(
@@ -132,7 +170,7 @@ class AgentConversationService:
                         ),
                     )
                     + self._trim_history(history),
-                    enabled_tools=(),
+                    enabled_tools=enabled_tools,
                     limits=limits,
                 )
                 try:
@@ -173,7 +211,8 @@ class AgentConversationService:
                 await self._messages.append(
                     thread.id,
                     run_id,
-                    (
+                    result.intermediate_messages
+                    + (
                         AgentMessage(
                             "assistant",
                             "text",
@@ -213,11 +252,17 @@ class AgentConversationService:
         snapshot = self._catalog.snapshot
         if "/" in choice:
             provider_alias, model_alias = choice.split("/", 1)
-            reference = snapshot.find_selectable(provider_alias, model_alias)
+            reference = snapshot.find_selectable(
+                provider_alias,
+                model_alias,
+                required_capabilities=self._required_capabilities,
+            )
         else:
             matches = tuple(
                 item
-                for item in snapshot.selectable_models()
+                for item in snapshot.selectable_models(
+                    required_capabilities=self._required_capabilities,
+                )
                 if item.model_alias.casefold() == choice.casefold()
             )
             reference = matches[0] if len(matches) == 1 else None
@@ -235,7 +280,11 @@ class AgentConversationService:
         user_default: bool,
     ) -> str:
         """Select a Provider default or named model for a thread or user."""
-        reference = self._catalog.snapshot.find_selectable(provider_alias, model_alias)
+        reference = self._catalog.snapshot.find_selectable(
+            provider_alias,
+            model_alias,
+            required_capabilities=self._required_capabilities,
+        )
         if reference is None:
             raise ValueError("The requested Provider/model is not available")
         if user_default:
@@ -248,19 +297,37 @@ class AgentConversationService:
         """List safe aliases only; endpoints and API keys never enter chat replies."""
         return tuple(
             f"{model.provider_alias}/{model.model_alias}"
-            for model in self._catalog.snapshot.selectable_models()
+            for model in self._catalog.snapshot.selectable_models(
+                required_capabilities=self._required_capabilities,
+            )
         )
 
     async def current_selection(self, key: ConversationKey) -> ModelSelection:
         """Resolve current selection for status and Provider commands."""
-        return await self._selection.resolve(key)
+        return await self._selection.resolve(
+            key,
+            required_capabilities=self._required_capabilities,
+        )
+
+    async def available_tools(self, key: ConversationKey) -> tuple[AvailableTool, ...]:
+        """Return the exact safe tool set visible to a run in this conversation."""
+        if self._tool_availability is None:
+            return ()
+        selection = await self.current_selection(key)
+        return await self._tool_availability.resolve(
+            AgentIdentity(key.person_id, key),
+            selection.model,
+        )
 
     async def status(self, key: ConversationKey) -> ChatStatus:
         """Return safe thread metadata compatible with existing chat controllers."""
         now = datetime.now(UTC)
         thread = await self._load_active_thread(key, now)
         try:
-            selection = await self._selection.resolve(key)
+            selection = await self._selection.resolve(
+                key,
+                required_capabilities=self._required_capabilities,
+            )
             model_name = f"{selection.model.provider_alias}/{selection.model.model_alias}"
         except ProviderSelectionError:
             model_name = ""
@@ -315,19 +382,41 @@ class AgentConversationService:
         selected: list[AgentMessage] = []
         characters = 0
         for message in reversed(history):
-            text = message.content.get("text", "")
-            if not isinstance(text, str):
-                continue
+            text = message.content.get("text")
+            size = (
+                len(text)
+                if isinstance(text, str)
+                else len(
+                    json.dumps(
+                        dict(message.content),
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                )
+            )
             if len(selected) >= self._settings.max_history_messages:
                 break
-            if characters + len(text) > self._settings.max_history_characters:
+            if characters + size > self._settings.max_history_characters:
                 break
             selected.append(message)
-            characters += len(text)
+            characters += size
         selected.reverse()
-        while selected and selected[0].role == "assistant":
-            selected.pop(0)
-        return tuple(selected)
+        call_ids = {
+            item.content.get("tool_call_id") for item in selected if item.kind == "tool_call"
+        }
+        result_ids = {
+            item.content.get("tool_call_id") for item in selected if item.kind == "tool_result"
+        }
+        paired_ids = call_ids.intersection(result_ids)
+        filtered = [
+            item
+            for item in selected
+            if item.kind not in {"tool_call", "tool_result"}
+            or item.content.get("tool_call_id") in paired_ids
+        ]
+        while filtered and filtered[0].role != "user":
+            filtered.pop(0)
+        return tuple(filtered)
 
     def _run_limits(self) -> AgentRunLimits:
         return AgentRunLimits(
@@ -352,7 +441,7 @@ class AgentConversationService:
             )
 
     @staticmethod
-    def _usage(result) -> dict[str, object]:
+    def _usage(result: AgentRunResult) -> dict[str, object]:
         return {
             "input_tokens": result.input_tokens,
             "output_tokens": result.output_tokens,

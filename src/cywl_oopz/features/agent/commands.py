@@ -72,3 +72,33 @@ class ProviderCommand(ChatCommandController):
             await context.reply(f"后续新对话的默认模型已切换为：{selected}")
         else:
             await context.reply(f"当前对话模型已切换为：{selected}")
+
+
+class ToolsCommand(ChatCommandController):
+    """List the exact server-authorized tools visible in this conversation."""
+
+    name = "tools"
+    description = "查看当前 Agent 实际可用的工具。"
+
+    def __init__(self, service: AgentConversationService) -> None:
+        super().__init__(service)
+        self._agent = service
+
+    async def execute(self, command: ParsedCommand, context: EventContext) -> None:
+        if command.arguments:
+            await context.reply("用法：!tools")
+            return
+        try:
+            tools = await self._agent.available_tools(self._key(context))
+        except Exception as exc:
+            await self._reply_error(context, exc)
+            return
+        if not tools:
+            await context.reply("当前对话没有可用的 Agent 工具。")
+            return
+        effects = {"read": "只读", "write": "写操作", "admin": "管理"}
+        lines = ["当前可用 Agent 工具："]
+        lines.extend(
+            f"- {tool.name}（{effects[tool.effect.value]}）：{tool.description}" for tool in tools
+        )
+        await context.reply("\n".join(lines))

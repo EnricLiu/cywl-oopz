@@ -19,6 +19,13 @@ class ChannelSettingsRepository(Protocol):
     async def is_chat_enabled(self, area_id: str, channel_id: str) -> bool:
         """Return whether ordinary non-mention messages should trigger text chat."""
 
+    async def enabled_agent_tools(
+        self,
+        area_id: str,
+        channel_id: str,
+    ) -> frozenset[str]:
+        """Return explicitly enabled Agent tool names."""
+
 
 class SqlAlchemyChannelSettingsRepository:
     """PostgreSQL implementation of channel-level feature policy."""
@@ -38,3 +45,25 @@ class SqlAlchemyChannelSettingsRepository:
                 return bool(enabled)
         except SQLAlchemyError as exc:
             raise DatabaseError("Failed to load channel settings") from exc
+
+    async def enabled_agent_tools(
+        self,
+        area_id: str,
+        channel_id: str,
+    ) -> frozenset[str]:
+        """Load the channel tool allow-list without exposing other settings."""
+        try:
+            async with self._sessions() as session:
+                raw = await session.scalar(
+                    select(ChannelSettingsRecord.enabled_agent_tools).where(
+                        ChannelSettingsRecord.area_id == area_id,
+                        ChannelSettingsRecord.channel_id == channel_id,
+                    )
+                )
+                if not isinstance(raw, list):
+                    return frozenset()
+                return frozenset(
+                    item.strip() for item in raw if isinstance(item, str) and item.strip()
+                )
+        except SQLAlchemyError as exc:
+            raise DatabaseError("Failed to load channel Agent tools") from exc

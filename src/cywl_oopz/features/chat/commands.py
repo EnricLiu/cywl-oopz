@@ -20,7 +20,7 @@ from cywl_oopz.core.errors import (
 from cywl_oopz.storage.channel_settings import ChannelSettingsRepository
 
 from .history import ChatInputTooLongError
-from .models import ConversationKey
+from .models import ChatInvocation, ConversationKey
 from .tasks import ChatTaskSupervisor
 from .use_case import ChatUseCase
 
@@ -75,7 +75,11 @@ class ChatCommand(ChatCommandController):
             await context.reply("用法：!chat <想说的话>")
             return
         try:
-            response = await self._service.ask(self._key(context), prompt)
+            response = await self._service.ask(
+                self._key(context),
+                prompt,
+                invocation=ChatInvocation.from_oopz_context(context),
+            )
         except Exception as exc:
             await self._reply_error(context, exc)
             return
@@ -98,7 +102,11 @@ class MentionChatHandler(ChatCommandController):
             await context.reply("你好！请在提及我后附上想问的内容，或使用 !chat <内容>。")
             return True
         try:
-            response = await self._service.ask(self._key(context), prompt)
+            response = await self._service.ask(
+                self._key(context),
+                prompt,
+                invocation=ChatInvocation.from_oopz_context(context),
+            )
         except Exception as exc:
             await self._reply_error(context, exc)
             return True
@@ -139,7 +147,11 @@ class AmbientChatHandler(ChatCommandController):
         if not prompt:
             return False
         try:
-            response = await self._service.ask(self._key(context), prompt)
+            response = await self._service.ask(
+                self._key(context),
+                prompt,
+                invocation=ChatInvocation.from_oopz_context(context),
+            )
         except Exception as exc:
             await self._reply_error(context, exc)
             return True

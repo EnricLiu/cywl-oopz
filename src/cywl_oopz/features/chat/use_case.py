@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from .models import ChatResponse, ChatStatus, ConversationKey
+from .models import ChatInvocation, ChatResponse, ChatStatus, ConversationKey
 
 
 class ChatUseCase(Protocol):
@@ -14,7 +14,13 @@ class ChatUseCase(Protocol):
     def enabled(self) -> bool:
         """Return whether incoming chat triggers should be active."""
 
-    async def ask(self, key: ConversationKey, prompt: str) -> ChatResponse:
+    async def ask(
+        self,
+        key: ConversationKey,
+        prompt: str,
+        *,
+        invocation: ChatInvocation | None = None,
+    ) -> ChatResponse:
         """Answer one prompt."""
 
     async def clear(self, key: ConversationKey) -> None:

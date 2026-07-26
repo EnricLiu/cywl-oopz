@@ -7,13 +7,15 @@ from uuid import uuid4
 import pytest
 
 from cywl_oopz.commands.router import ParsedCommand
-from cywl_oopz.features.agent.commands import ProviderCommand
+from cywl_oopz.features.agent.commands import ProviderCommand, ToolsCommand
 from cywl_oopz.features.agent.models import (
     AgentModelRef,
     ModelSelection,
     ModelSelectionSource,
     ProviderProtocol,
 )
+from cywl_oopz.features.agent.tools.models import ToolEffect
+from cywl_oopz.features.agent.tools.policy import AvailableTool
 from cywl_oopz.features.chat.tasks import ChatTaskSupervisor
 
 
@@ -52,6 +54,21 @@ class FakeProviderService:
         self.selections.append((provider_alias, model_alias, user_default))
         return f"{provider_alias}/{model_alias or 'default'}"
 
+    async def available_tools(self, key) -> tuple[AvailableTool, ...]:
+        del key
+        return (
+            AvailableTool(
+                "get_agent_status",
+                "查看 Agent 状态。",
+                ToolEffect.READ,
+            ),
+            AvailableTool(
+                "react_to_message",
+                "添加表情。",
+                ToolEffect.WRITE,
+            ),
+        )
+
 
 @dataclass
 class FakeContext:
@@ -83,3 +100,16 @@ async def test_provider_command_lists_and_switches_thread_model() -> None:
     assert "primary/chat" in list_context.replies[0]
     assert use_context.replies == ["当前对话模型已切换为：secondary/fast"]
     assert service.selections == [("secondary", "fast", False)]
+
+
+@pytest.mark.asyncio
+async def test_tools_command_lists_effects_without_internal_configuration() -> None:
+    context = FakeContext()
+
+    await ToolsCommand(FakeProviderService()).execute(
+        ParsedCommand("tools", ()),
+        context,
+    )
+
+    assert "get_agent_status（只读）" in context.replies[0]
+    assert "react_to_message（写操作）" in context.replies[0]

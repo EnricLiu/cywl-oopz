@@ -16,7 +16,8 @@ from .commands.router import CommandRouter
 from .core.errors import ConfigurationError, DatabaseError
 from .core.health import HealthRegistry, HealthState
 from .features.agent.catalog import ProviderCatalogAdminService, ReloadableProviderCatalog
-from .features.agent.commands import ProviderCommand
+from .features.agent.commands import ProviderCommand, ToolsCommand
+from .features.agent.models import ModelCapability
 from .features.agent.pydantic_ai_engine import PydanticAiAgentEngine
 from .features.agent.registry import AgentModelRegistry
 from .features.agent.repository import (
@@ -25,9 +26,18 @@ from .features.agent.repository import (
     SqlAlchemyAgentThreadRepository,
     SqlAlchemyModelSelectionRepository,
     SqlAlchemyProviderCatalogRepository,
+    SqlAlchemyToolExecutionRepository,
 )
 from .features.agent.selection import ProviderSelectionService
 from .features.agent.service import AgentConversationService
+from .features.agent.tools.builtin import (
+    GetAgentStatusTool,
+    GetChannelSettingsTool,
+    ReactToMessageTool,
+)
+from .features.agent.tools.executor import ToolExecutor
+from .features.agent.tools.policy import ToolAvailabilityService, ToolPolicy
+from .features.agent.tools.registry import ToolRegistry
 from .features.chat.commands import (
     AmbientChatHandler,
     CancelChatCommand,
@@ -43,6 +53,7 @@ from .features.chat.provider import ChatProvider, DisabledChatProvider
 from .features.chat.repository import SqlAlchemyConversationRepository
 from .features.chat.service import ChatService
 from .features.chat.tasks import ChatTaskSupervisor
+from .integrations.oopz.reactions import OopzReactionGateway
 from .settings import AppSettings
 from .storage.channel_settings import SqlAlchemyChannelSettingsRepository
 from .storage.database import Database
@@ -73,8 +84,40 @@ class BotApplication:
             self.agent_catalog,
             selection_repository,
         )
+        channel_settings = SqlAlchemyChannelSettingsRepository(self.database.session_factory)
+        self.agent_tool_registry = ToolRegistry(
+            (
+                GetAgentStatusTool(
+                    timeout_seconds=settings.agent.tool_timeout_seconds,
+                    max_output_characters=settings.agent.max_tool_result_characters,
+                ),
+                GetChannelSettingsTool(
+                    channel_settings,
+                    timeout_seconds=settings.agent.tool_timeout_seconds,
+                    max_output_characters=settings.agent.max_tool_result_characters,
+                ),
+                ReactToMessageTool(
+                    OopzReactionGateway(self.bot),
+                    timeout_seconds=settings.agent.tool_timeout_seconds,
+                    max_output_characters=settings.agent.max_tool_result_characters,
+                ),
+            )
+        )
+        self.agent_tool_availability = ToolAvailabilityService(
+            self.agent_tool_registry,
+            channel_settings,
+            settings.agent.enabled_tools,
+        )
+        self.agent_tool_executor = ToolExecutor(
+            self.agent_tool_registry,
+            ToolPolicy(),
+            SqlAlchemyToolExecutionRepository(self.database.session_factory),
+        )
         self.agent_models = AgentModelRegistry(self.agent_catalog)
-        self.agent_engine = PydanticAiAgentEngine(self.agent_models)
+        self.agent_engine = PydanticAiAgentEngine(
+            self.agent_models,
+            self.agent_tool_executor,
+        )
         self.agent_chat = AgentConversationService(
             settings.agent,
             settings.chat,
@@ -85,6 +128,7 @@ class BotApplication:
             self.agent_threads,
             self.agent_runs,
             self.agent_messages,
+            self.agent_tool_availability,
             health=self.health,
         )
         self._provider = self._create_chat_provider()
@@ -96,7 +140,6 @@ class BotApplication:
             health=self.health,
         )
         self.chat = self.agent_chat if settings.agent.enabled else self.legacy_chat
-        channel_settings = SqlAlchemyChannelSettingsRepository(self.database.session_factory)
         self._mention_handler = MentionChatHandler(self.chat, settings.oopz.person_uid)
         self._ambient_handler = AmbientChatHandler(self.chat, channel_settings)
         self._register_commands()
@@ -127,6 +170,7 @@ class BotApplication:
         self.commands.register(ChatStatusCommand(self.chat))
         if self.settings.agent.enabled:
             self.commands.register(ProviderCommand(self.agent_chat, self.chat_tasks))
+            self.commands.register(ToolsCommand(self.agent_chat))
 
     async def run(self) -> None:
         """Start the database check before entering the long-running OOPZ client."""
@@ -144,7 +188,11 @@ class BotApplication:
                 default_model = (
                     catalog.resolve(
                         default_model_id,
-                        required_capabilities=frozenset(),
+                        required_capabilities=(
+                            frozenset({ModelCapability.TOOL_CALLING})
+                            if self.settings.agent.enabled_tools
+                            else frozenset()
+                        ),
                         require_user_selectable=False,
                     )
                     if default_model_id is not None

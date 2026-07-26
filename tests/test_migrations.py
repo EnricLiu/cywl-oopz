@@ -8,7 +8,7 @@ def test_initial_schema_models_and_migration_head_are_present() -> None:
     config = Config("alembic.ini")
     revisions = ScriptDirectory.from_config(config)
 
-    assert revisions.get_current_head() == "20260726_02"
+    assert revisions.get_current_head() == "20260727_03"
     assert set(Base.metadata.tables) == {
         "agent_messages",
         "agent_runs",

@@ -147,7 +147,7 @@ class FailingChatService:
     def __init__(self, error: Exception) -> None:
         self._error = error
 
-    async def ask(self, *_: object):
+    async def ask(self, *_: object, **__: object):
         raise self._error
 
 

@@ -32,6 +32,11 @@ def test_app_settings_use_the_injected_oopz_credentials(monkeypatch) -> None:
     assert settings.oopz.person_uid == "bot"
     assert settings.oopz.jwt_token == "token"
     assert settings.agent.mode is AgentMode.LEGACY
+    assert settings.agent.enabled_tools == (
+        "get_agent_status",
+        "get_channel_settings",
+        "react_to_message",
+    )
 
 
 def test_agent_mode_uses_database_catalog_without_legacy_llm_credentials() -> None:
@@ -39,6 +44,18 @@ def test_agent_mode_uses_database_catalog_without_legacy_llm_credentials() -> No
 
     assert settings.agent.enabled is True
     assert settings.chat.enabled is False
+
+
+def test_agent_tools_can_be_disabled_independently() -> None:
+    settings = AppSettings.from_mapping(
+        valid_environment()
+        | {
+            "CYWL_AGENT_MODE": "agent",
+            "CYWL_AGENT_ENABLED_TOOLS": "",
+        }
+    )
+
+    assert settings.agent.enabled_tools == ()
 
 
 def test_settings_require_database_url_without_echoing_secret() -> None:

@@ -6,12 +6,34 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from uuid import uuid4
 
 import httpx
 import pytest
+from pydantic import BaseModel
 from pydantic_ai import Agent
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
+
+from cywl_oopz.features.agent.models import (
+    AgentIdentity,
+    AgentModelRef,
+    AgentRunLimits,
+    AgentRunRequest,
+    AgentStopReason,
+    ModelCapability,
+    ProviderProtocol,
+)
+from cywl_oopz.features.agent.pydantic_ai_engine import PydanticAiAgentEngine
+from cywl_oopz.features.agent.tools.models import (
+    ToolCall,
+    ToolDescriptor,
+    ToolEffect,
+    ToolExecutionContext,
+    ToolExecutionResult,
+    ToolExecutionStatus,
+)
+from cywl_oopz.features.chat.models import ConversationKey
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +56,60 @@ class SignallingTransport(httpx.AsyncBaseTransport):
 
     async def aclose(self) -> None:
         await self._transport.aclose()
+
+
+class LiveStatusInput(BaseModel):
+    pass
+
+
+class LiveStatusOutput(BaseModel):
+    status: str
+
+
+class LiveToolRuntime:
+    def __init__(self) -> None:
+        self.called = False
+        self.descriptor = ToolDescriptor(
+            name="live_agent_status",
+            description="返回开发冒烟测试的 Agent 状态。",
+            input_model=LiveStatusInput,
+            output_model=LiveStatusOutput,
+            effect=ToolEffect.READ,
+            timeout_seconds=10,
+            max_output_characters=1000,
+            concurrency_safe=True,
+            idempotent=True,
+        )
+
+    def descriptors(self, names: tuple[str, ...]) -> tuple[ToolDescriptor, ...]:
+        assert names == ("live_agent_status",)
+        return (self.descriptor,)
+
+    async def execute(
+        self,
+        call: ToolCall,
+        context: ToolExecutionContext,
+    ) -> ToolExecutionResult:
+        del context
+        self.called = True
+        return ToolExecutionResult(
+            call.call_id,
+            call.name,
+            ToolExecutionStatus.SUCCEEDED,
+            {"status": "ready"},
+        )
+
+
+class LiveModelRegistry:
+    def __init__(self, model: OpenAIChatModel) -> None:
+        self._model = model
+
+    async def model(self, reference: AgentModelRef) -> OpenAIChatModel:
+        del reference
+        return self._model
+
+    async def aclose(self) -> None:
+        return None
 
 
 @pytest.mark.asyncio
@@ -92,6 +168,39 @@ async def test_live_provider_text_tools_streaming_and_usage() -> None:
         assert tool_result.output.strip()
         assert tool_result.usage.tool_calls == 2
         assert tool_result.usage.requests >= 2
+
+        runtime = LiveToolRuntime()
+        engine = PydanticAiAgentEngine(LiveModelRegistry(model), runtime)
+        key = ConversationKey("private", "", "", "live-person")
+        started_at = time.perf_counter()
+        agent_result = await engine.run(
+            AgentRunRequest(
+                run_id=uuid4(),
+                thread_id=uuid4(),
+                identity=AgentIdentity("live-person", key),
+                model=AgentModelRef(
+                    provider_id=uuid4(),
+                    model_id=uuid4(),
+                    provider_alias="live",
+                    model_alias="live",
+                    remote_model_name=config.model_name,
+                    protocol=ProviderProtocol.OPENAI_CHAT_COMPATIBLE,
+                    capabilities=frozenset({ModelCapability.TOOL_CALLING}),
+                    fallback_model_id=None,
+                ),
+                prompt=("必须调用 live_agent_status 一次；拿到结果后只用一句中文确认状态。"),
+                context=(),
+                enabled_tools=("live_agent_status",),
+                limits=AgentRunLimits(timeout_seconds=90),
+            )
+        )
+        metrics["project_agent_loop_seconds"] = round(
+            time.perf_counter() - started_at,
+            3,
+        )
+        assert runtime.called is True
+        assert agent_result.stop_reason is AgentStopReason.COMPLETED
+        assert agent_result.tool_calls == 1
 
         started_at = time.perf_counter()
         first_delta_at: float | None = None
