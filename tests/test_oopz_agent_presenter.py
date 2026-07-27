@@ -179,6 +179,46 @@ async def test_web_research_loop_uses_one_bounded_message_and_safe_stage_names()
 
 
 @pytest.mark.asyncio
+async def test_running_tool_heartbeats_without_mutating_reducer_state_and_stops_at_terminal() -> (
+    None
+):
+    gateway = FakeGateway()
+    session = OopzAgentLoopMessage(
+        gateway,  # type: ignore[arg-type]
+        address(),
+        OopzMessageRenderer(),
+        edit_interval_seconds=0.01,
+        heartbeat_interval_seconds=0.12,
+    )
+    await session.open()
+    await session.emit(
+        ConversationProgressEvent(
+            ProgressKind.TOOL_STARTED,
+            call_id="read-call",
+            tool_name="read_web_page",
+            tool_display_name="读取网页正文",
+            tool_subject="www.baidu.com",
+        )
+    )
+
+    async with asyncio.timeout(1):
+        while len(gateway.edits) < 2:
+            await asyncio.sleep(0.01)
+
+    assert "· 0.0s" in gateway.edits[0]
+    assert "· 0.1s" in gateway.edits[1]
+    assert session.state.revision == 1
+
+    await session.complete(ChatResponse("读取完成。", "provider/model"))
+    await session.aclose()
+    edit_count = len(gateway.edits)
+    await asyncio.sleep(0.15)
+
+    assert len(gateway.edits) == edit_count
+    assert gateway.edits[-1].startswith("🎵 **初音未来**")
+
+
+@pytest.mark.asyncio
 async def test_revision_arriving_during_edit_flushes_the_latest_terminal_snapshot() -> None:
     gateway = FakeGateway()
     gateway.edit_started = asyncio.Event()

@@ -9,7 +9,11 @@ from typing import Any
 
 from oopz_sdk.exceptions import OopzConnectionError, OopzRateLimitError
 
-from cywl_oopz.features.agent.display import AgentLoopReducer, AgentLoopViewState
+from cywl_oopz.features.agent.display import (
+    AgentLoopReducer,
+    AgentLoopViewState,
+    ToolStepStatus,
+)
 from cywl_oopz.features.chat.models import ChatResponse
 from cywl_oopz.features.chat.progress import (
     ConversationProgressEvent,
@@ -23,7 +27,7 @@ from .editable_messages import (
     MessageAddress,
     OopzEditableMessageGateway,
 )
-from .message_renderer import OopzMessageRenderer
+from .message_renderer import OopzMessageRenderer, OopzRenderContext
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +37,7 @@ _SEMANTIC_KINDS = frozenset(
         ProgressKind.THINKING,
         ProgressKind.TEXT_RESET,
         ProgressKind.TOOL_STARTED,
+        ProgressKind.TOOL_UPDATED,
         ProgressKind.TOOL_SUCCEEDED,
         ProgressKind.TOOL_FAILED,
         ProgressKind.COMPLETED,
@@ -58,15 +63,27 @@ class OopzAgentLoopMessage:
         edit_interval_seconds: float,
         clock: Callable[[], float] | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        heartbeat_interval_seconds: float | None = None,
     ) -> None:
         if edit_interval_seconds <= 0:
             raise ValueError("Edit interval must be positive")
+        heartbeat_interval_seconds = (
+            self.max_refresh_seconds
+            if heartbeat_interval_seconds is None
+            else heartbeat_interval_seconds
+        )
+        if heartbeat_interval_seconds <= 0:
+            raise ValueError("Heartbeat interval must be positive")
         self._gateway = gateway
         self._address = address
         self._renderer = renderer
         self._edit_interval = edit_interval_seconds
         self._clock = clock
         self._sleep = sleep
+        self._heartbeat_interval = max(
+            heartbeat_interval_seconds,
+            edit_interval_seconds,
+        )
         self._reducer = AgentLoopReducer()
         self._state = AgentLoopViewState()
         self._state_lock = asyncio.Lock()
@@ -84,6 +101,8 @@ class OopzAgentLoopMessage:
         self._last_snapshot = ""
         self._next_edit_at = 0.0
         self._retryable_failures = 0
+        self._tool_started_at: dict[str, float] = {}
+        self._activity_frame = 0
 
     @property
     def owns_message(self) -> bool:
@@ -107,6 +126,19 @@ class OopzAgentLoopMessage:
 
     async def emit(self, event: ConversationProgressEvent) -> None:
         async with self._state_lock:
+            if event.kind is ProgressKind.TOOL_STARTED:
+                self._tool_started_at.setdefault(event.call_id, self._now())
+            elif event.kind in {
+                ProgressKind.TOOL_SUCCEEDED,
+                ProgressKind.TOOL_FAILED,
+            }:
+                self._tool_started_at.pop(event.call_id, None)
+            elif event.kind in {
+                ProgressKind.COMPLETED,
+                ProgressKind.FAILED,
+                ProgressKind.CANCELLED,
+            }:
+                self._tool_started_at.clear()
             previous_revision = self._state.revision
             self._state = self._reducer.apply(self._state, event)
             if self._state.revision == previous_revision:
@@ -180,15 +212,19 @@ class OopzAgentLoopMessage:
         while True:
             if self._closing and self._dirty_revision <= self._flushed_revision:
                 return
+            heartbeat_due = False
             try:
                 await asyncio.wait_for(
                     self._wake.wait(),
-                    timeout=self.max_refresh_seconds,
+                    timeout=self._heartbeat_interval,
                 )
             except TimeoutError:
-                pass
+                heartbeat_due = True
             self._wake.clear()
-            if self._dirty_revision <= self._flushed_revision:
+            has_running_step = self._has_running_step()
+            if self._dirty_revision <= self._flushed_revision and not (
+                heartbeat_due and has_running_step
+            ):
                 if self._closing:
                     return
                 continue
@@ -202,7 +238,12 @@ class OopzAgentLoopMessage:
             async with self._state_lock:
                 state = self._state
                 revision = self._dirty_revision
-                snapshot = self._renderer.render(state)
+                if heartbeat_due:
+                    self._activity_frame += 1
+                snapshot = self._renderer.render(
+                    state,
+                    self._render_context(state),
+                )
 
             if snapshot == self._last_snapshot:
                 self._mark_flushed(revision, state.terminal)
@@ -247,6 +288,24 @@ class OopzAgentLoopMessage:
                 return
             if self._dirty_revision > revision:
                 self._wake.set()
+
+    def _has_running_step(self) -> bool:
+        return any(step.status is ToolStepStatus.RUNNING for step in self._state.steps)
+
+    def _render_context(self, state: AgentLoopViewState) -> OopzRenderContext:
+        now = self._now()
+        elapsed = tuple(
+            (
+                step.call_id,
+                max(now - started_at, 0),
+            )
+            for step in state.steps
+            if (started_at := self._tool_started_at.get(step.call_id)) is not None
+        )
+        return OopzRenderContext(
+            running_elapsed_seconds=elapsed,
+            activity_frame=self._activity_frame,
+        )
 
     def _mark_flushed(self, revision: int, terminal: bool) -> None:
         self._flushed_revision = max(self._flushed_revision, revision)

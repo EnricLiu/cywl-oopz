@@ -13,6 +13,7 @@ from cywl_oopz.features.agent.display import (
 from cywl_oopz.integrations.oopz.message_renderer import (
     OopzMarkupNormalizer,
     OopzMessageRenderer,
+    OopzRenderContext,
     OopzTextBudget,
     oopz_units,
 )
@@ -297,6 +298,33 @@ def test_latest_tool_expands_result_urls_without_expanding_older_steps() -> None
     assert "1. https://example.com/one" in rendered
     assert "2. https://example.com/two" in rendered
     assert "3. https://example.com/three" in rendered
+
+
+def test_running_tool_shows_ephemeral_elapsed_time_without_storing_it_in_state() -> None:
+    state = AgentLoopViewState(
+        phase=DisplayPhase.TOOL_RUNNING,
+        steps=(
+            ToolStepView(
+                call_id="private-call-id",
+                tool_name="read_web_page",
+                display_name="读取网页正文",
+                status=ToolStepStatus.RUNNING,
+                subject="www.baidu.com",
+            ),
+        ),
+    )
+
+    rendered = OopzMessageRenderer().render(
+        state,
+        OopzRenderContext(
+            running_elapsed_seconds=(("private-call-id", 2.36),),
+            activity_frame=1,
+        ),
+    )
+
+    assert "⏳ **读取网页正文** www.baidu.com · 2.4s" in rendered
+    assert "private-call-id" not in rendered
+    assert not hasattr(state.steps[0], "elapsed_seconds")
 
 
 def test_success_header_shows_compact_agent_run_statistics() -> None:

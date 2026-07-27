@@ -143,6 +143,20 @@ class OopzTextBudget:
             raise ValueError("Rendered OOPZ message exceeds the safe text budget")
 
 
+@dataclass(frozen=True, slots=True)
+class OopzRenderContext:
+    """Ephemeral activity values that do not belong in reducer state."""
+
+    running_elapsed_seconds: tuple[tuple[str, float], ...] = ()
+    activity_frame: int = 0
+
+    def elapsed_for(self, call_id: str) -> float | None:
+        for current_call_id, elapsed in self.running_elapsed_seconds:
+            if current_call_id == call_id:
+                return elapsed
+        return None
+
+
 class OopzMessageRenderer:
     """Render complete snapshots; never expose raw tool payloads or exceptions."""
 
@@ -157,7 +171,12 @@ class OopzMessageRenderer:
         self._normalizer = normalizer or OopzMarkupNormalizer()
         self._budget = budget or OopzTextBudget()
 
-    def render(self, state: AgentLoopViewState) -> str:
+    def render(
+        self,
+        state: AgentLoopViewState,
+        context: OopzRenderContext | None = None,
+    ) -> str:
+        render_context = context or OopzRenderContext()
         if state.phase is DisplayPhase.SUCCEEDED:
             rendered = self._render_success(state)
         elif state.phase is DisplayPhase.FAILED:
@@ -168,13 +187,17 @@ class OopzMessageRenderer:
         elif state.phase is DisplayPhase.CANCELLED:
             rendered = "⏹ **已取消当前回答**"
         else:
-            rendered = self._render_active(state)
+            rendered = self._render_active(state, render_context)
         if oopz_units(rendered) > self._budget.safe_limit:
             rendered = self._safe_plain_prefix(rendered)
         self._budget.assert_safe(rendered)
         return rendered
 
-    def _render_active(self, state: AgentLoopViewState) -> str:
+    def _render_active(
+        self,
+        state: AgentLoopViewState,
+        context: OopzRenderContext,
+    ) -> str:
         header = {
             DisplayPhase.CREATED: "✨ **初音未来 正在准备回答…**",
             DisplayPhase.ACCEPTED: "✨ **初音未来 正在准备回答…**",
@@ -183,7 +206,7 @@ class OopzMessageRenderer:
             DisplayPhase.DRAFTING: "🎤 **初音未来 正在组织回答…**",
         }.get(state.phase, "♪ **初音未来 正在思考…**")
         lines = [header]
-        lines.extend(self._step_lines(state))
+        lines.extend(self._step_lines(state, context))
         if state.current_draft:
             draft = self._normalizer.normalize(state.current_draft)
             prefix = "\n".join(lines)
@@ -193,7 +216,11 @@ class OopzMessageRenderer:
                 lines = [prefix + self._truncate_tail(draft, available)]
         return "\n".join(lines)
 
-    def _step_lines(self, state: AgentLoopViewState) -> list[str]:
+    def _step_lines(
+        self,
+        state: AgentLoopViewState,
+        context: OopzRenderContext,
+    ) -> list[str]:
         running = [step for step in state.steps if step.status is ToolStepStatus.RUNNING]
         failed = [step for step in state.steps if step.status is ToolStepStatus.FAILED]
         succeeded = [step for step in state.steps if step.status is ToolStepStatus.SUCCEEDED]
@@ -204,6 +231,7 @@ class OopzMessageRenderer:
             lines = self._render_steps(
                 selected,
                 expanded_call_id=self._expanded_call_id(selected),
+                context=context,
             )
             if succeeded:
                 lines.append(f"✅ 已完成 {len(succeeded)} 个步骤")
@@ -220,6 +248,7 @@ class OopzMessageRenderer:
         lines = self._render_steps(
             selected,
             expanded_call_id=self._expanded_call_id(selected),
+            context=context,
         )
         if hidden > 0:
             lines.append(f"… 已折叠 {hidden} 个已完成步骤")
@@ -230,6 +259,7 @@ class OopzMessageRenderer:
         steps: list[ToolStepView],
         *,
         expanded_call_id: str,
+        context: OopzRenderContext,
     ) -> list[str]:
         return [
             line
@@ -237,10 +267,17 @@ class OopzMessageRenderer:
             for line in self._step_lines_for(
                 step,
                 expanded=step.call_id == expanded_call_id,
+                context=context,
             )
         ]
 
-    def _step_lines_for(self, step: ToolStepView, *, expanded: bool) -> list[str]:
+    def _step_lines_for(
+        self,
+        step: ToolStepView,
+        *,
+        expanded: bool,
+        context: OopzRenderContext,
+    ) -> list[str]:
         name = self._normalizer.plain_text(step.display_name)[:48]
         subject = self._normalizer.plain_text(step.subject)[:80]
         summary = self._normalizer.plain_text(step.summary)[:100]
@@ -255,6 +292,11 @@ class OopzMessageRenderer:
             header += f" {subject}"
         if summary:
             header += f" · {summary}"
+        elapsed = (
+            context.elapsed_for(step.call_id) if step.status is ToolStepStatus.RUNNING else None
+        )
+        if elapsed is not None:
+            header += f" · {elapsed:.1f}s"
         if not expanded:
             return [header]
         if step.items:
