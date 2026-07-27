@@ -147,6 +147,7 @@ class OopzMessageRenderer:
     """Render complete snapshots; never expose raw tool payloads or exceptions."""
 
     max_visible_steps = 5
+    max_tool_units = 650
 
     def __init__(
         self,
@@ -199,10 +200,14 @@ class OopzMessageRenderer:
         if state.phase is DisplayPhase.DRAFTING:
             selected = running + failed[-1:]
             visible_limit = self.max_visible_steps - (1 if succeeded else 0)
-            lines = self._render_steps(selected[:visible_limit])
+            selected = selected[:visible_limit]
+            lines = self._render_steps(
+                selected,
+                expanded_call_id=self._expanded_call_id(selected),
+            )
             if succeeded:
                 lines.append(f"✅ 已完成 {len(succeeded)} 个步骤")
-            return lines
+            return self._fit_tool_budget(lines)
 
         selected = running[: self.max_visible_steps]
         remaining = self.max_visible_steps - len(selected)
@@ -212,27 +217,95 @@ class OopzMessageRenderer:
         if remaining:
             selected.extend(reversed(succeeded[-remaining:]))
         hidden = len(state.steps) - len(selected)
-        lines = self._render_steps(selected)
+        lines = self._render_steps(
+            selected,
+            expanded_call_id=self._expanded_call_id(selected),
+        )
         if hidden > 0:
             lines.append(f"… 已折叠 {hidden} 个已完成步骤")
-        return lines
+        return self._fit_tool_budget(lines)
 
-    def _render_steps(self, steps: list[ToolStepView]) -> list[str]:
-        return [line for step in steps for line in self._step_lines_for(step)]
+    def _render_steps(
+        self,
+        steps: list[ToolStepView],
+        *,
+        expanded_call_id: str,
+    ) -> list[str]:
+        return [
+            line
+            for step in steps
+            for line in self._step_lines_for(
+                step,
+                expanded=step.call_id == expanded_call_id,
+            )
+        ]
 
-    def _step_lines_for(self, step: ToolStepView) -> list[str]:
+    def _step_lines_for(self, step: ToolStepView, *, expanded: bool) -> list[str]:
         name = self._normalizer.plain_text(step.display_name)[:48]
+        subject = self._normalizer.plain_text(step.subject)[:80]
+        summary = self._normalizer.plain_text(step.summary)[:100]
         if step.status is ToolStepStatus.RUNNING:
-            header = f"⏳ *{name}…*"
+            icon = "⏳"
         elif step.status is ToolStepStatus.FAILED:
-            header = f"⚠️ {name}未完成，正在调整"
+            icon = "⚠️"
         else:
-            header = f"✅ {name}"
-        details = [detail for detail in (step.request_detail, step.result_detail) if detail]
-        if not details:
+            icon = "✅"
+        header = f"{icon} **{name}**"
+        if subject:
+            header += f" {subject}"
+        if summary:
+            header += f" · {summary}"
+        if not expanded:
             return [header]
-        normalized = "；".join(self._normalizer.plain_text(detail) for detail in details)[:180]
-        return [header, f"  ↳ {normalized}"]
+        if step.items:
+            details = [
+                f"{index}. {self._normalizer.plain_text(item)[:180]}"
+                for index, item in enumerate(step.items, start=1)
+            ]
+        else:
+            details = [self._normalizer.plain_text(line)[:120] for line in step.preview_lines]
+        return [header, *(detail for detail in details if detail)]
+
+    @staticmethod
+    def _expanded_call_id(steps: list[ToolStepView]) -> str:
+        expandable = [step for step in steps if step.items or step.preview_lines]
+        if not expandable:
+            return ""
+        running = [step for step in expandable if step.status is ToolStepStatus.RUNNING]
+        candidates = running or expandable
+        return max(candidates, key=lambda step: step.updated_revision).call_id
+
+    def _fit_tool_budget(self, lines: list[str]) -> list[str]:
+        if oopz_units("\n".join(lines)) <= self.max_tool_units:
+            return lines
+        fitted = list(lines)
+        hidden_details = 0
+        while len(fitted) > 1 and oopz_units("\n".join(fitted)) > self.max_tool_units:
+            removable = next(
+                (
+                    index
+                    for index in range(len(fitted) - 1, 0, -1)
+                    if not self._is_tool_header(fitted[index])
+                ),
+                None,
+            )
+            if removable is None:
+                break
+            fitted.pop(removable)
+            hidden_details += 1
+        if hidden_details:
+            marker = f"… 已折叠 {hidden_details} 条工具详情"
+            while (
+                len(fitted) > 1 and oopz_units("\n".join([*fitted, marker])) > self.max_tool_units
+            ):
+                fitted.pop()
+            if oopz_units("\n".join([*fitted, marker])) <= self.max_tool_units:
+                fitted.append(marker)
+        return fitted
+
+    @staticmethod
+    def _is_tool_header(line: str) -> bool:
+        return line.startswith(("⏳ **", "✅ **", "⚠️ **"))
 
     def _render_success(self, state: AgentLoopViewState) -> str:
         header = self._success_header(state)

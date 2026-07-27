@@ -232,25 +232,71 @@ def test_tool_step_shows_request_result_and_readable_error_details() -> None:
                     tool_name="search_web",
                     display_name="搜索公开网页",
                     status=ToolStepStatus.SUCCEEDED,
-                    request_detail="查询：「初音未来 新闻」",
-                    result_detail="找到 3 条结果",
+                    subject="「初音未来 新闻」",
+                    summary="找到 3 条结果",
+                    items=(
+                        "https://example.com/one",
+                        "https://example.com/two",
+                        "https://example.com/three",
+                    ),
+                    updated_revision=1,
                 ),
                 ToolStepView(
                     call_id="two",
                     tool_name="read_web_page",
                     display_name="读取网页正文",
                     status=ToolStepStatus.FAILED,
-                    request_detail="网址：https://example.com",
-                    result_detail="错误：网页响应超时",
+                    subject="example.com",
+                    summary="网页响应超时",
+                    updated_revision=2,
                 ),
             ),
         )
     )
 
-    assert "✅ 搜索公开网页" in rendered
-    assert "↳ 查询：「初音未来 新闻」；找到 3 条结果" in rendered
-    assert "⚠️ 读取网页正文未完成" in rendered
-    assert "↳ 网址：https://example.com；错误：网页响应超时" in rendered
+    assert "✅ **搜索公开网页** 「初音未来 新闻」 · 找到 3 条结果" in rendered
+    assert "⚠️ **读取网页正文** example.com · 网页响应超时" in rendered
+    assert "查询：" not in rendered
+    assert "网址：" not in rendered
+    assert "错误：" not in rendered
+
+
+def test_latest_tool_expands_result_urls_without_expanding_older_steps() -> None:
+    rendered = OopzMessageRenderer().render(
+        AgentLoopViewState(
+            phase=DisplayPhase.THINKING,
+            steps=(
+                ToolStepView(
+                    call_id="old",
+                    tool_name="search_web",
+                    display_name="搜索公开网页",
+                    status=ToolStepStatus.SUCCEEDED,
+                    subject="「旧查询」",
+                    items=("https://old.example",),
+                    updated_revision=1,
+                ),
+                ToolStepView(
+                    call_id="new",
+                    tool_name="search_web",
+                    display_name="搜索公开网页",
+                    status=ToolStepStatus.SUCCEEDED,
+                    subject="「初音未来 新闻」",
+                    summary="找到 3 条结果",
+                    items=(
+                        "https://example.com/one",
+                        "https://example.com/two",
+                        "https://example.com/three",
+                    ),
+                    updated_revision=2,
+                ),
+            ),
+        )
+    )
+
+    assert "https://old.example" not in rendered
+    assert "1. https://example.com/one" in rendered
+    assert "2. https://example.com/two" in rendered
+    assert "3. https://example.com/three" in rendered
 
 
 def test_success_header_shows_compact_agent_run_statistics() -> None:

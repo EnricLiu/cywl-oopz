@@ -1,10 +1,10 @@
-from cywl_oopz.features.agent.tool_progress import ToolProgressFormatter
+from cywl_oopz.features.agent.tool_progress import ToolProgressCatalog
 
 
 def test_request_summary_keeps_useful_fields_and_redacts_sensitive_values() -> None:
-    formatter = ToolProgressFormatter()
+    catalog = ToolProgressCatalog()
 
-    detail = formatter.request(
+    presentation = catalog.request(
         "search_web",
         {
             "query": "  初音未来 最新演出  ",
@@ -13,47 +13,60 @@ def test_request_summary_keeps_useful_fields_and_redacts_sensitive_values() -> N
         },
     )
 
-    assert detail == "查询：「初音未来 最新演出」 · 时段：w"
-    assert "must-not-leak" not in detail
+    assert presentation.subject == "「初音未来 最新演出」"
+    assert presentation.summary == ""
+    assert "must-not-leak" not in repr(presentation)
 
 
 def test_result_summary_explains_success_and_known_errors_without_raw_payloads() -> None:
-    formatter = ToolProgressFormatter()
+    catalog = ToolProgressCatalog()
 
-    succeeded = formatter.result(
+    succeeded = catalog.result(
         "search_web",
         {
             "ok": True,
             "data": {
                 "results": [
-                    {"title": "one", "snippet": "private body"},
-                    {"title": "two", "snippet": "private body"},
+                    {
+                        "title": "one",
+                        "url": "https://example.com/one",
+                        "snippet": "private body",
+                    },
+                    {
+                        "title": "two",
+                        "url": "https://example.com/two",
+                        "snippet": "private body",
+                    },
                 ]
             },
         },
         succeeded=True,
     )
-    failed = formatter.result(
+    failed = catalog.result(
         "search_web",
         {"ok": False, "error": "web_search_unavailable"},
         succeeded=False,
     )
-    unknown = formatter.result(
+    unknown = catalog.result(
         "lookup",
         {"ok": False, "error": "private_internal_error"},
         succeeded=False,
     )
 
-    assert succeeded == "找到 2 条结果"
-    assert failed == "错误：网页搜索服务暂不可用"
-    assert unknown == "错误：工具执行失败"
-    assert "private" not in succeeded + failed + unknown
+    assert succeeded.summary == "找到 2 条结果"
+    assert succeeded.items == (
+        "https://example.com/one",
+        "https://example.com/two",
+    )
+    assert failed.summary == "网页搜索服务暂不可用"
+    assert unknown.summary == "工具执行失败"
+    assert "private" not in repr((succeeded, failed, unknown))
 
 
 def test_browser_and_music_results_have_compact_human_summaries() -> None:
-    formatter = ToolProgressFormatter()
+    catalog = ToolProgressCatalog()
 
-    page = formatter.result(
+    page = catalog.result(
         "browser_open",
         {
             "ok": True,
@@ -65,7 +78,7 @@ def test_browser_and_music_results_have_compact_human_summaries() -> None:
         },
         succeeded=True,
     )
-    music = formatter.result(
+    music = catalog.result(
         "enqueue_music",
         {
             "ok": True,
@@ -77,7 +90,33 @@ def test_browser_and_music_results_have_compact_human_summaries() -> None:
         succeeded=True,
     )
 
-    assert page == "当前页面「Example Domain」"
-    assert music == "歌曲「Tell Your World」 · 队列第 2 位"
-    assert "snapshot" not in page
-    assert "source_id" not in music
+    assert page.summary == "Example Domain"
+    assert music.summary == "歌曲「Tell Your World」 · 队列第 2 位"
+    assert "snapshot" not in repr(page)
+    assert "source_id" not in repr(music)
+
+
+def test_web_page_request_uses_host_and_result_exposes_bounded_preview() -> None:
+    catalog = ToolProgressCatalog()
+
+    request = catalog.request(
+        "read_web_page",
+        {"url": "https://www.baidu.com/search?q=miku"},
+    )
+    result = catalog.result(
+        "read_web_page",
+        {
+            "ok": True,
+            "data": {
+                "title": "百度一下，你就知道",
+                "url": "https://www.baidu.com/",
+                "content": "第一行\n\n第二行\n第二行\n第三行\n第四行",
+                "truncated": False,
+            },
+        },
+        succeeded=True,
+    )
+
+    assert request.subject == "www.baidu.com"
+    assert result.summary == "百度一下，你就知道"
+    assert result.preview_lines == ("第一行", "第二行", "第三行")

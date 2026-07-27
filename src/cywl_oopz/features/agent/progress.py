@@ -16,7 +16,7 @@ from pydantic_ai.messages import (
 
 from cywl_oopz.features.chat.progress import ConversationProgressEvent, ProgressKind
 
-from .tool_progress import ToolProgressFormatter
+from .tool_progress import ToolProgressCatalog, ToolProgressPresentation
 from .tools.models import ToolDescriptor
 
 
@@ -26,12 +26,12 @@ class PydanticAiProgressMapper:
     def __init__(
         self,
         descriptors: tuple[ToolDescriptor, ...],
-        details: ToolProgressFormatter | None = None,
+        details: ToolProgressCatalog | None = None,
     ) -> None:
         self._display_names = {
             descriptor.name: descriptor.display_name for descriptor in descriptors
         }
-        self._details = details or ToolProgressFormatter()
+        self._details = details or ToolProgressCatalog()
         self._text_generation_active = False
         self._sequence = 0
 
@@ -109,14 +109,17 @@ class PydanticAiProgressMapper:
         kind: ProgressKind,
         call_id: str,
         tool_name: str,
-        tool_detail: str,
+        presentation: ToolProgressPresentation,
     ) -> ConversationProgressEvent:
         return self._event(
             kind,
             call_id=call_id,
             tool_name=tool_name,
             tool_display_name=self._display_names.get(tool_name, "执行操作"),
-            tool_detail=tool_detail,
+            tool_subject=presentation.subject,
+            tool_summary=presentation.summary,
+            tool_items=presentation.items,
+            tool_preview_lines=presentation.preview_lines,
         )
 
     def _event(
@@ -126,7 +129,10 @@ class PydanticAiProgressMapper:
         call_id: str = "",
         tool_name: str = "",
         tool_display_name: str = "",
-        tool_detail: str = "",
+        tool_subject: str = "",
+        tool_summary: str = "",
+        tool_items: tuple[str, ...] = (),
+        tool_preview_lines: tuple[str, ...] = (),
         text: str = "",
     ) -> ConversationProgressEvent:
         self._sequence += 1
@@ -136,6 +142,9 @@ class PydanticAiProgressMapper:
             call_id=call_id,
             tool_name=tool_name,
             tool_display_name=tool_display_name,
-            tool_detail=tool_detail,
+            tool_subject=tool_subject,
+            tool_summary=tool_summary,
+            tool_items=tool_items,
+            tool_preview_lines=tool_preview_lines,
             text=text,
         )

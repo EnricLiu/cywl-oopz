@@ -37,8 +37,11 @@ class ToolStepView:
     tool_name: str
     display_name: str
     status: ToolStepStatus
-    request_detail: str = ""
-    result_detail: str = ""
+    subject: str = ""
+    summary: str = ""
+    items: tuple[str, ...] = ()
+    preview_lines: tuple[str, ...] = ()
+    updated_revision: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,6 +114,8 @@ class AgentLoopReducer:
             )
         if kind is ProgressKind.TOOL_STARTED:
             return self._with_tool(state, event, ToolStepStatus.RUNNING)
+        if kind is ProgressKind.TOOL_UPDATED:
+            return self._with_tool(state, event, ToolStepStatus.RUNNING)
         if kind is ProgressKind.TOOL_SUCCEEDED:
             return self._with_tool(state, event, ToolStepStatus.SUCCEEDED)
         if kind is ProgressKind.TOOL_FAILED:
@@ -159,15 +164,21 @@ class AgentLoopReducer:
                     tool_name=event.tool_name,
                     display_name=event.tool_display_name,
                     status=status,
-                    request_detail=(
-                        event.tool_detail
-                        if status is ToolStepStatus.RUNNING
-                        else current.request_detail
+                    subject=event.tool_subject or current.subject,
+                    summary=event.tool_summary or current.summary,
+                    items=(
+                        () if status is ToolStepStatus.FAILED else event.tool_items or current.items
                     ),
-                    result_detail=("" if status is ToolStepStatus.RUNNING else event.tool_detail),
+                    preview_lines=(
+                        ()
+                        if status is ToolStepStatus.FAILED
+                        else event.tool_preview_lines or current.preview_lines
+                    ),
+                    updated_revision=current.updated_revision,
                 )
                 if current == step:
                     return state
+                step = replace(step, updated_revision=state.revision + 1)
                 steps[index] = step
                 break
         else:
@@ -177,8 +188,11 @@ class AgentLoopReducer:
                     tool_name=event.tool_name,
                     display_name=event.tool_display_name,
                     status=status,
-                    request_detail=(event.tool_detail if status is ToolStepStatus.RUNNING else ""),
-                    result_detail=("" if status is ToolStepStatus.RUNNING else event.tool_detail),
+                    subject=event.tool_subject,
+                    summary=event.tool_summary,
+                    items=event.tool_items,
+                    preview_lines=event.tool_preview_lines,
+                    updated_revision=state.revision + 1,
                 )
             )
         normalized = tuple(steps)

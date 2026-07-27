@@ -108,11 +108,11 @@ def test_tool_events_only_expose_registered_display_identity_and_status() -> Non
 
     assert started.kind is ProgressKind.TOOL_STARTED
     assert started.tool_display_name == "查询资料"
-    assert started.tool_detail == ""
+    assert started.tool_subject == ""
     assert succeeded.kind is ProgressKind.TOOL_SUCCEEDED
-    assert succeeded.tool_detail == "调用完成"
+    assert succeeded.tool_summary == "调用完成"
     assert failed.kind is ProgressKind.TOOL_FAILED
-    assert failed.tool_detail == "错误：工具执行失败"
+    assert failed.tool_summary == "工具执行失败"
     for event in (started, succeeded, failed):
         assert not hasattr(event, "arguments")
         assert not hasattr(event, "output")
@@ -146,7 +146,16 @@ def test_web_tool_events_include_bounded_request_result_and_error_details() -> N
         FunctionToolResultEvent(
             ToolReturnPart(
                 "search_web",
-                {"ok": True, "data": {"results": [{}, {}, {}]}},
+                {
+                    "ok": True,
+                    "data": {
+                        "results": [
+                            {"url": "https://example.com/one"},
+                            {"url": "https://example.com/two"},
+                            {"url": "https://example.com/three"},
+                        ]
+                    },
+                },
                 "search-call",
             )
         )
@@ -161,9 +170,15 @@ def test_web_tool_events_include_bounded_request_result_and_error_details() -> N
         )
     )[0]
 
-    assert started.tool_detail == "查询：「初音未来 新闻」 · 时段：d"
-    assert succeeded.tool_detail == "找到 3 条结果"
-    assert failed.tool_detail == "错误：网页搜索超时"
+    assert started.tool_subject == "「初音未来 新闻」"
+    assert started.tool_summary == ""
+    assert succeeded.tool_summary == "找到 3 条结果"
+    assert succeeded.tool_items == (
+        "https://example.com/one",
+        "https://example.com/two",
+        "https://example.com/three",
+    )
+    assert failed.tool_summary == "网页搜索超时"
 
 
 def test_text_after_tool_call_starts_a_new_draft_generation() -> None:

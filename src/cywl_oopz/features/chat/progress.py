@@ -20,6 +20,7 @@ class ProgressKind(StrEnum):
     TEXT_RESET = "text_reset"
     TEXT_DELTA = "text_delta"
     TOOL_STARTED = "tool_started"
+    TOOL_UPDATED = "tool_updated"
     TOOL_SUCCEEDED = "tool_succeeded"
     TOOL_FAILED = "tool_failed"
     COMPLETED = "completed"
@@ -30,6 +31,7 @@ class ProgressKind(StrEnum):
 _TOOL_KINDS = frozenset(
     {
         ProgressKind.TOOL_STARTED,
+        ProgressKind.TOOL_UPDATED,
         ProgressKind.TOOL_SUCCEEDED,
         ProgressKind.TOOL_FAILED,
     }
@@ -52,7 +54,10 @@ class ConversationProgressEvent:
     call_id: str = ""
     tool_name: str = ""
     tool_display_name: str = ""
-    tool_detail: str = ""
+    tool_subject: str = ""
+    tool_summary: str = ""
+    tool_items: tuple[str, ...] = ()
+    tool_preview_lines: tuple[str, ...] = ()
     text: str = ""
     elapsed_seconds: float | None = None
     input_tokens: int | None = None
@@ -72,9 +77,24 @@ class ConversationProgressEvent:
                 or "\r" in self.tool_display_name
             ):
                 raise ValueError("Tool progress display name must be one short line")
-            if len(self.tool_detail) > 160 or "\n" in self.tool_detail or "\r" in self.tool_detail:
-                raise ValueError("Tool progress detail must be one short line")
-        elif self.call_id or self.tool_name or self.tool_display_name or self.tool_detail:
+            self._validate_tool_text(self.tool_subject, "subject", 80)
+            self._validate_tool_text(self.tool_summary, "summary", 100)
+            self._validate_tool_lines(self.tool_items, "items", maximum=3, line_limit=180)
+            self._validate_tool_lines(
+                self.tool_preview_lines,
+                "preview lines",
+                maximum=3,
+                line_limit=120,
+            )
+        elif (
+            self.call_id
+            or self.tool_name
+            or self.tool_display_name
+            or self.tool_subject
+            or self.tool_summary
+            or self.tool_items
+            or self.tool_preview_lines
+        ):
             raise ValueError("Only tool progress may carry tool identity")
         if self.kind in _TEXT_KINDS and not self.text:
             raise ValueError(f"{self.kind.value} progress requires text")
@@ -93,6 +113,25 @@ class ConversationProgressEvent:
             raise ValueError("Only completed progress may carry run statistics")
         if any(value is not None and value < 0 for value in statistics):
             raise ValueError("Progress statistics must not be negative")
+
+    @staticmethod
+    def _validate_tool_text(value: str, label: str, limit: int) -> None:
+        if len(value) > limit or "\n" in value or "\r" in value:
+            raise ValueError(f"Tool progress {label} must be one bounded line")
+
+    @classmethod
+    def _validate_tool_lines(
+        cls,
+        values: tuple[str, ...],
+        label: str,
+        *,
+        maximum: int,
+        line_limit: int,
+    ) -> None:
+        if not isinstance(values, tuple) or len(values) > maximum:
+            raise ValueError(f"Tool progress {label} must be a bounded tuple")
+        for value in values:
+            cls._validate_tool_text(value, label, line_limit)
 
 
 class ProgressSink(Protocol):

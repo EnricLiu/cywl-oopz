@@ -22,14 +22,20 @@ def tool_event(
     name: str = "search_music_catalog",
     display_name: str = "搜索歌曲",
     event_id: str = "",
-    detail: str = "",
+    subject: str = "",
+    summary: str = "",
+    items: tuple[str, ...] = (),
+    preview_lines: tuple[str, ...] = (),
 ) -> ConversationProgressEvent:
     return event(
         kind,
         call_id=call_id,
         tool_name=name,
         tool_display_name=display_name,
-        tool_detail=detail,
+        tool_subject=subject,
+        tool_summary=summary,
+        tool_items=items,
+        tool_preview_lines=preview_lines,
         event_id=event_id,
     )
 
@@ -74,8 +80,8 @@ def test_tool_run_clears_temporary_draft_and_tracks_safe_metadata_only() -> None
     state = reduce(
         event(ProgressKind.TEXT_RESET),
         event(ProgressKind.TEXT_DELTA, text="临时回答"),
-        tool_event(ProgressKind.TOOL_STARTED, "call-1", detail="查询：「Tell Your World」"),
-        tool_event(ProgressKind.TOOL_SUCCEEDED, "call-1", detail="找到 3 首歌曲"),
+        tool_event(ProgressKind.TOOL_STARTED, "call-1", subject="Tell Your World"),
+        tool_event(ProgressKind.TOOL_SUCCEEDED, "call-1", summary="找到 3 首歌曲"),
         event(ProgressKind.THINKING),
     )
 
@@ -84,8 +90,8 @@ def test_tool_run_clears_temporary_draft_and_tracks_safe_metadata_only() -> None
     assert state.completed_step_count == 1
     assert state.failed_step_count == 0
     assert state.steps[0].status is ToolStepStatus.SUCCEEDED
-    assert state.steps[0].request_detail == "查询：「Tell Your World」"
-    assert state.steps[0].result_detail == "找到 3 首歌曲"
+    assert state.steps[0].subject == "Tell Your World"
+    assert state.steps[0].summary == "找到 3 首歌曲"
     assert not hasattr(state.steps[0], "arguments")
     assert not hasattr(state.steps[0], "output")
 
@@ -189,12 +195,38 @@ def test_progress_event_rejects_raw_or_incomplete_shapes() -> None:
         )
     with pytest.raises(ValueError, match="short line"):
         tool_event(ProgressKind.TOOL_STARTED, "call", display_name="bad\nname")
-    with pytest.raises(ValueError, match="detail"):
-        tool_event(ProgressKind.TOOL_STARTED, "call", detail="bad\ndetail")
+    with pytest.raises(ValueError, match="subject"):
+        tool_event(ProgressKind.TOOL_STARTED, "call", subject="bad\nsubject")
     with pytest.raises(ValueError, match="requires text"):
         event(ProgressKind.COMPLETED)
     with pytest.raises(TypeError):
         ConversationProgressEvent(ProgressKind.TOOL_STARTED, arguments={"secret": True})  # type: ignore[call-arg]
+
+
+def test_tool_update_mutates_the_existing_running_step_with_structured_details() -> None:
+    state = reduce(
+        tool_event(
+            ProgressKind.TOOL_STARTED,
+            "call-1",
+            name="read_web_page",
+            display_name="读取网页正文",
+            subject="www.baidu.com",
+        ),
+        tool_event(
+            ProgressKind.TOOL_UPDATED,
+            "call-1",
+            name="read_web_page",
+            display_name="读取网页正文",
+            summary="正在提取正文",
+            preview_lines=("百度一下，你就知道",),
+        ),
+    )
+
+    assert len(state.steps) == 1
+    assert state.steps[0].status is ToolStepStatus.RUNNING
+    assert state.steps[0].subject == "www.baidu.com"
+    assert state.steps[0].summary == "正在提取正文"
+    assert state.steps[0].preview_lines == ("百度一下，你就知道",)
 
 
 def test_completed_event_carries_terminal_run_statistics() -> None:

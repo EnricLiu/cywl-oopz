@@ -438,7 +438,7 @@ async def test_live_tool_failure_is_visible_then_recovers_in_the_same_message() 
                     call_id="simulated-call",
                     tool_name="simulated_lookup",
                     tool_display_name="模拟查询",
-                    tool_detail="查询：「初音未来 最新消息」",
+                    tool_subject="「初音未来 最新消息」",
                 )
             )
             await asyncio.sleep(0.9)
@@ -448,7 +448,7 @@ async def test_live_tool_failure_is_visible_then_recovers_in_the_same_message() 
                     call_id="simulated-call",
                     tool_name="simulated_lookup",
                     tool_display_name="模拟查询",
-                    tool_detail="错误：网页搜索服务暂不可用",
+                    tool_summary="网页搜索服务暂不可用",
                 )
             )
             async with asyncio.timeout(5):
@@ -466,9 +466,7 @@ async def test_live_tool_failure_is_visible_then_recovers_in_the_same_message() 
         displayed = await harness.displayed_messages()
         assert len(harness.gateway.created) == 1
         assert len(displayed) == 1
-        assert any(
-            "查询：「初音未来 最新消息」" in snapshot for snapshot in harness.gateway.edited_texts
-        )
+        assert any("「初音未来 最新消息」" in snapshot for snapshot in harness.gateway.edited_texts)
         assert any(
             "错误：网页搜索服务暂不可用" in snapshot for snapshot in harness.gateway.edited_texts
         )
