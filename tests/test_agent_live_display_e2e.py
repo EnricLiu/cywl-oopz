@@ -468,7 +468,8 @@ async def test_live_tool_failure_is_visible_then_recovers_in_the_same_message() 
         assert len(displayed) == 1
         assert any("「初音未来 最新消息」" in snapshot for snapshot in harness.gateway.edited_texts)
         assert any(
-            "错误：网页搜索服务暂不可用" in snapshot for snapshot in harness.gateway.edited_texts
+            "⚠️ **模拟查询** 「初音未来 最新消息」 · 网页搜索服务暂不可用" in snapshot
+            for snapshot in harness.gateway.edited_texts
         )
         assert "工具失败后已安全恢复" in (displayed[0].text or displayed[0].content)
     finally:

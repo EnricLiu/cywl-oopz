@@ -162,6 +162,7 @@ class OopzMessageRenderer:
 
     max_visible_steps = 5
     max_tool_units = 650
+    max_step_header_units = 200
 
     def __init__(
         self,
@@ -297,6 +298,15 @@ class OopzMessageRenderer:
         )
         if elapsed is not None:
             header += f" · {elapsed:.1f}s"
+        if oopz_units(header) > self.max_step_header_units:
+            marker = "…"
+            header = (
+                _take_prefix(
+                    header,
+                    self.max_step_header_units - oopz_units(marker),
+                )
+                + marker
+            )
         if not expanded:
             return [header]
         if step.items:
@@ -322,6 +332,7 @@ class OopzMessageRenderer:
             return lines
         fitted = list(lines)
         hidden_details = 0
+        hidden_steps = 0
         while len(fitted) > 1 and oopz_units("\n".join(fitted)) > self.max_tool_units:
             removable = next(
                 (
@@ -335,15 +346,35 @@ class OopzMessageRenderer:
                 break
             fitted.pop(removable)
             hidden_details += 1
-        if hidden_details:
-            marker = f"… 已折叠 {hidden_details} 条工具详情"
+        while len(fitted) > 1 and oopz_units("\n".join(fitted)) > self.max_tool_units:
+            removed = fitted.pop()
+            if self._is_tool_header(removed):
+                hidden_steps += 1
+            else:
+                hidden_details += 1
+        if hidden_steps or hidden_details:
+            marker = self._tool_fold_marker(hidden_steps, hidden_details)
             while (
                 len(fitted) > 1 and oopz_units("\n".join([*fitted, marker])) > self.max_tool_units
             ):
-                fitted.pop()
+                removed = fitted.pop()
+                if self._is_tool_header(removed):
+                    hidden_steps += 1
+                else:
+                    hidden_details += 1
+                marker = self._tool_fold_marker(hidden_steps, hidden_details)
             if oopz_units("\n".join([*fitted, marker])) <= self.max_tool_units:
                 fitted.append(marker)
         return fitted
+
+    @staticmethod
+    def _tool_fold_marker(hidden_steps: int, hidden_details: int) -> str:
+        hidden: list[str] = []
+        if hidden_steps:
+            hidden.append(f"{hidden_steps} 个步骤")
+        if hidden_details:
+            hidden.append(f"{hidden_details} 条详情")
+        return f"… 已折叠 {'、'.join(hidden)}"
 
     @staticmethod
     def _is_tool_header(line: str) -> bool:

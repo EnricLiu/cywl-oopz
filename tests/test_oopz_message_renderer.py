@@ -327,6 +327,38 @@ def test_running_tool_shows_ephemeral_elapsed_time_without_storing_it_in_state()
     assert not hasattr(state.steps[0], "elapsed_seconds")
 
 
+def test_tool_region_keeps_its_budget_with_worst_case_parallel_steps() -> None:
+    long_subject = "主题" * 40
+    long_summary = "摘要" * 50
+    long_item = "https://example.com/" + "path/" * 32
+    steps = tuple(
+        ToolStepView(
+            call_id=f"call-{index}",
+            tool_name=f"tool_{index}",
+            display_name="很长的工具展示名称" * 4,
+            status=(ToolStepStatus.RUNNING if index < 3 else ToolStepStatus.SUCCEEDED),
+            subject=long_subject,
+            summary=long_summary,
+            items=(long_item, long_item + "two", long_item + "three"),
+            updated_revision=index,
+        )
+        for index in range(5)
+    )
+    renderer = OopzMessageRenderer()
+
+    rendered = renderer.render(
+        AgentLoopViewState(
+            phase=DisplayPhase.TOOL_RUNNING,
+            steps=steps,
+        )
+    )
+    tool_region = "\n".join(rendered.splitlines()[1:])
+
+    assert oopz_units(tool_region) <= renderer.max_tool_units
+    assert "**很长的工具展示名称" in rendered
+    assert "已折叠" in rendered
+
+
 def test_success_header_shows_compact_agent_run_statistics() -> None:
     rendered = OopzMessageRenderer().render(
         AgentLoopViewState(
