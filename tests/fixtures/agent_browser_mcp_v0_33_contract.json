@@ -1,0 +1,149 @@
+{
+  "server": {
+    "name": "agent-browser",
+    "version": "0.33.0",
+    "protocol": "2025-11-25",
+    "profile": "core"
+  },
+  "project_tools": {
+    "agent_browser_open": {
+      "required": [],
+      "properties": {
+        "url": "string",
+        "session": "string",
+        "namespace": "string",
+        "timeoutMs": "integer"
+      }
+    },
+    "agent_browser_read": {
+      "required": [],
+      "properties": {
+        "url": "string",
+        "raw": "boolean",
+        "outline": "boolean",
+        "session": "string",
+        "namespace": "string",
+        "timeoutMs": "integer",
+        "readTimeoutMs": "integer"
+      }
+    },
+    "agent_browser_snapshot": {
+      "required": [],
+      "properties": {
+        "interactive": "boolean",
+        "compact": "boolean",
+        "includeUrls": "boolean",
+        "depth": "integer",
+        "selector": "string",
+        "session": "string",
+        "namespace": "string",
+        "timeoutMs": "integer"
+      }
+    },
+    "agent_browser_click": {
+      "required": ["selector"],
+      "properties": {
+        "selector": "string",
+        "newTab": "boolean",
+        "session": "string",
+        "namespace": "string",
+        "timeoutMs": "integer"
+      }
+    },
+    "agent_browser_fill": {
+      "required": ["selector", "text"],
+      "properties": {
+        "selector": "string",
+        "text": "string",
+        "session": "string",
+        "namespace": "string",
+        "timeoutMs": "integer"
+      }
+    },
+    "agent_browser_press": {
+      "required": ["key"],
+      "properties": {
+        "key": "string",
+        "session": "string",
+        "namespace": "string",
+        "timeoutMs": "integer"
+      }
+    },
+    "agent_browser_wait_ms": {
+      "required": ["ms"],
+      "properties": {
+        "ms": "integer",
+        "session": "string",
+        "namespace": "string",
+        "timeoutMs": "integer"
+      }
+    },
+    "agent_browser_wait_for_selector": {
+      "required": ["selector"],
+      "properties": {
+        "selector": "string",
+        "waitTimeoutMs": "integer",
+        "session": "string",
+        "namespace": "string",
+        "timeoutMs": "integer"
+      }
+    },
+    "agent_browser_wait_for_text": {
+      "required": ["text"],
+      "properties": {
+        "text": "string",
+        "waitTimeoutMs": "integer",
+        "session": "string",
+        "namespace": "string",
+        "timeoutMs": "integer"
+      }
+    },
+    "agent_browser_wait_for_load": {
+      "required": ["state"],
+      "properties": {
+        "state": "string",
+        "waitTimeoutMs": "integer",
+        "session": "string",
+        "namespace": "string",
+        "timeoutMs": "integer"
+      }
+    },
+    "agent_browser_get_url": {
+      "required": [],
+      "properties": {
+        "session": "string",
+        "namespace": "string",
+        "timeoutMs": "integer"
+      }
+    },
+    "agent_browser_get_title": {
+      "required": [],
+      "properties": {
+        "session": "string",
+        "namespace": "string",
+        "timeoutMs": "integer"
+      }
+    },
+    "agent_browser_close": {
+      "required": [],
+      "properties": {
+        "all": "boolean",
+        "session": "string",
+        "namespace": "string",
+        "timeoutMs": "integer"
+      }
+    }
+  },
+  "never_expose": [
+    "agent_browser_eval",
+    "agent_browser_screenshot",
+    "agent_browser_type",
+    "agent_browser_check",
+    "agent_browser_uncheck",
+    "agent_browser_select",
+    "agent_browser_scroll",
+    "agent_browser_tab_new",
+    "agent_browser_tab_switch",
+    "agent_browser_tab_close"
+  ]
+}
