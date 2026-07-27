@@ -95,7 +95,6 @@ async def test_engine_maps_context_usage_and_output_without_framework_leakage() 
         ProgressKind.TEXT_RESET,
         ProgressKind.TEXT_DELTA,
         ProgressKind.TEXT_DELTA,
-        ProgressKind.COMPLETED,
     ]
     assert (
         "".join(event.text for event in progress.events if event.kind is ProgressKind.TEXT_DELTA)

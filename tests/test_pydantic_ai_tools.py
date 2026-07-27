@@ -412,7 +412,6 @@ async def test_engine_runs_tool_loop_and_maps_provider_neutral_pairs() -> None:
         ProgressKind.TOOL_SUCCEEDED,
         ProgressKind.TEXT_RESET,
         ProgressKind.TEXT_DELTA,
-        ProgressKind.COMPLETED,
     ]
     assert progress.events[1].tool_display_name == "double"
 

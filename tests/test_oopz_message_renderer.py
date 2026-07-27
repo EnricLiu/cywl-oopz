@@ -112,7 +112,7 @@ def test_terminal_success_removes_tool_chrome_and_keeps_the_answer() -> None:
         )
     )
 
-    assert rendered == "🎵 **CYWL**\n这是最终回答♪"
+    assert rendered == "🎵 **初音未来**\n这是最终回答♪"
     assert "步骤 1" not in rendered
 
 
@@ -126,7 +126,7 @@ def test_long_final_answer_keeps_head_tail_and_omission_marker() -> None:
         )
     )
 
-    assert rendered.startswith("🎵 **CYWL**\n开")
+    assert rendered.startswith("🎵 **初音未来**\n开")
     assert "因 OOPZ 长度限制已折叠" in rendered
     assert rendered.endswith("结")
     assert oopz_units(rendered) <= 1950
@@ -220,6 +220,54 @@ def test_renderer_never_includes_raw_tool_data() -> None:
     assert "查询状态" in rendered
     assert "secret-call-id" not in rendered
     assert "internal_tool_name" not in rendered
+
+
+def test_tool_step_shows_request_result_and_readable_error_details() -> None:
+    rendered = OopzMessageRenderer().render(
+        AgentLoopViewState(
+            phase=DisplayPhase.TOOL_RUNNING,
+            steps=(
+                ToolStepView(
+                    call_id="one",
+                    tool_name="search_web",
+                    display_name="搜索公开网页",
+                    status=ToolStepStatus.SUCCEEDED,
+                    request_detail="查询：「初音未来 新闻」",
+                    result_detail="找到 3 条结果",
+                ),
+                ToolStepView(
+                    call_id="two",
+                    tool_name="read_web_page",
+                    display_name="读取网页正文",
+                    status=ToolStepStatus.FAILED,
+                    request_detail="网址：https://example.com",
+                    result_detail="错误：网页响应超时",
+                ),
+            ),
+        )
+    )
+
+    assert "✅ 搜索公开网页" in rendered
+    assert "↳ 查询：「初音未来 新闻」；找到 3 条结果" in rendered
+    assert "⚠️ 读取网页正文未完成" in rendered
+    assert "↳ 网址：https://example.com；错误：网页响应超时" in rendered
+
+
+def test_success_header_shows_compact_agent_run_statistics() -> None:
+    rendered = OopzMessageRenderer().render(
+        AgentLoopViewState(
+            phase=DisplayPhase.SUCCEEDED,
+            final_text="完成啦♪",
+            elapsed_seconds=12.34,
+            input_tokens=1800,
+            output_tokens=345,
+            model_requests=3,
+            tool_calls=2,
+            terminal=True,
+        )
+    )
+
+    assert rendered == "🎵 **初音未来** · 12.3s · 2 次工具 · 2.1k tokens\n完成啦♪"
 
 
 def test_random_unicode_is_always_bounded_and_balanced() -> None:

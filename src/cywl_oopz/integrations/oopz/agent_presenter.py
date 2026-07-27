@@ -130,6 +130,11 @@ class OopzAgentLoopMessage:
             ConversationProgressEvent(
                 ProgressKind.COMPLETED,
                 text=response.content,
+                elapsed_seconds=response.elapsed_seconds,
+                input_tokens=response.input_tokens,
+                output_tokens=response.output_tokens,
+                model_requests=response.model_requests,
+                tool_calls=response.tool_calls,
             )
         )
 

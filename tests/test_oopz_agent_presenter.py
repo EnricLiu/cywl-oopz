@@ -107,12 +107,22 @@ async def test_many_text_deltas_coalesce_into_one_serial_terminal_edit() -> None
     await session.emit(ConversationProgressEvent(ProgressKind.TEXT_RESET))
     for _ in range(100):
         await session.emit(ConversationProgressEvent(ProgressKind.TEXT_DELTA, text="字"))
-    await session.complete(ChatResponse("最终回答", "provider/model"))
+    await session.complete(
+        ChatResponse(
+            "最终回答",
+            "provider/model",
+            input_tokens=1200,
+            output_tokens=345,
+            elapsed_seconds=12.34,
+            model_requests=2,
+            tool_calls=1,
+        )
+    )
     await session.aclose()
 
     assert len(gateway.created) == 1
     assert 1 <= len(gateway.edits) <= 3
-    assert gateway.edits[-1] == "🎵 **CYWL**\n最终回答"
+    assert gateway.edits[-1] == "🎵 **初音未来** · 12.3s · 1 次工具 · 1.5k tokens\n最终回答"
     assert gateway.max_active_edits == 1
     assert session.state.terminal is True
 
@@ -163,7 +173,7 @@ async def test_web_research_loop_uses_one_bounded_message_and_safe_stage_names()
     assert all("secret-id" not in snapshot for snapshot in snapshots)
     assert all("search_web" not in snapshot for snapshot in snapshots)
     assert all("read_web_page" not in snapshot for snapshot in snapshots)
-    assert gateway.edits[-1].startswith("🎵 **CYWL**")
+    assert gateway.edits[-1].startswith("🎵 **初音未来**")
     assert gateway.edits[-1].endswith("https://example.com/docs/current）")
     assert session.state.terminal is True
 

@@ -216,6 +216,7 @@ class RecordingEngine:
             input_tokens=4,
             output_tokens=2,
             model_requests=1,
+            tool_calls=2,
         )
 
     async def aclose(self) -> None:
@@ -296,6 +297,12 @@ async def test_agent_service_persists_turns_and_reuses_provider_neutral_history(
     second = await service.ask(key(), "second question")
 
     assert first.content == "first answer"
+    assert first.elapsed_seconds is not None
+    assert first.elapsed_seconds >= 0
+    assert first.input_tokens == 4
+    assert first.output_tokens == 2
+    assert first.model_requests == 1
+    assert first.tool_calls == 2
     assert second.model == "provider/default"
     assert [message.role for message in engine.requests[1].context] == [
         "system",

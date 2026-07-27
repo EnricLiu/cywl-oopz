@@ -29,12 +29,7 @@ from pydantic_ai.messages import (
 )
 
 from cywl_oopz.core.errors import ProviderError, ProviderResponseError, ProviderTimeoutError
-from cywl_oopz.features.chat.progress import (
-    ConversationProgressEvent,
-    ProgressKind,
-    ProgressSink,
-    emit_progress,
-)
+from cywl_oopz.features.chat.progress import ProgressSink, emit_progress
 
 from .models import AgentMessage, AgentRunRequest, AgentRunResult, AgentStopReason
 from .progress import PydanticAiProgressMapper
@@ -126,13 +121,6 @@ class PydanticAiAgentEngine:
             exhausted = AgentRunResult(
                 output="本次对话已达到运行预算，请缩短问题或开始新的对话。",
                 stop_reason=reason,
-            )
-            await emit_progress(
-                progress,
-                ConversationProgressEvent(
-                    ProgressKind.COMPLETED,
-                    text=exhausted.output,
-                ),
             )
             return exhausted
         except (ModelAPIError, ModelHTTPError) as exc:

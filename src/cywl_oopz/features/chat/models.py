@@ -135,10 +135,22 @@ class ChatResponse:
     finish_reason: str = ""
     input_tokens: int | None = None
     output_tokens: int | None = None
+    elapsed_seconds: float | None = None
+    model_requests: int | None = None
+    tool_calls: int | None = None
 
     def __post_init__(self) -> None:
         if not self.content.strip():
             raise ProviderResponseError("LLM response is empty")
+        numeric_values = (
+            self.input_tokens,
+            self.output_tokens,
+            self.elapsed_seconds,
+            self.model_requests,
+            self.tool_calls,
+        )
+        if any(value is not None and value < 0 for value in numeric_values):
+            raise ProviderResponseError("LLM response metrics must not be negative")
 
 
 @dataclass(frozen=True, slots=True)

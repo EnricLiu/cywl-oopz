@@ -325,7 +325,11 @@ async def test_live_agent_run_uses_exactly_one_edited_oopz_message(
         assert len(harness.gateway.created) == 1
         assert len(displayed) == 1
         assert harness.gateway.edited_texts
-        assert (displayed[0].text or displayed[0].content).startswith("🎵 **CYWL**")
+        terminal = displayed[0].text or displayed[0].content
+        assert terminal.startswith("🎵 **初音未来**")
+        assert "s · " in terminal
+        assert f"{len(expected_tools)} 次工具" in terminal
+        assert " tokens\n" in terminal
         assert displayed[0].edit_time > 0
         tool_names = await harness.persisted_tool_names()
         if not expected_tools:
@@ -407,7 +411,7 @@ async def test_live_long_terminal_is_folded_in_the_original_display_message() ->
         assert len(harness.gateway.created) == 1
         assert len(displayed) == 1
         terminal = displayed[0].text or displayed[0].content
-        assert terminal.startswith("🎵 **CYWL**")
+        assert terminal.startswith("🎵 **初音未来**")
         assert terminal.endswith("https://example.com/docs/current）")
         assert "因 OOPZ 长度限制已折叠" in terminal
         assert oopz_units(terminal) <= 1950
@@ -434,6 +438,7 @@ async def test_live_tool_failure_is_visible_then_recovers_in_the_same_message() 
                     call_id="simulated-call",
                     tool_name="simulated_lookup",
                     tool_display_name="模拟查询",
+                    tool_detail="查询：「初音未来 最新消息」",
                 )
             )
             await asyncio.sleep(0.9)
@@ -443,11 +448,12 @@ async def test_live_tool_failure_is_visible_then_recovers_in_the_same_message() 
                     call_id="simulated-call",
                     tool_name="simulated_lookup",
                     tool_display_name="模拟查询",
+                    tool_detail="错误：网页搜索服务暂不可用",
                 )
             )
             async with asyncio.timeout(5):
                 while not any(
-                    "模拟查询未完成" in snapshot for snapshot in harness.gateway.edited_texts
+                    "网页搜索服务暂不可用" in snapshot for snapshot in harness.gateway.edited_texts
                 ):
                     await asyncio.sleep(0.1)
             return ChatResponse("工具失败后已安全恢复。", "simulated/model")
@@ -460,7 +466,12 @@ async def test_live_tool_failure_is_visible_then_recovers_in_the_same_message() 
         displayed = await harness.displayed_messages()
         assert len(harness.gateway.created) == 1
         assert len(displayed) == 1
-        assert any("模拟查询未完成" in snapshot for snapshot in harness.gateway.edited_texts)
+        assert any(
+            "查询：「初音未来 最新消息」" in snapshot for snapshot in harness.gateway.edited_texts
+        )
+        assert any(
+            "错误：网页搜索服务暂不可用" in snapshot for snapshot in harness.gateway.edited_texts
+        )
         assert "工具失败后已安全恢复" in (displayed[0].text or displayed[0].content)
     finally:
         await harness.aclose()

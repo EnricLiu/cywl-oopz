@@ -37,6 +37,8 @@ class ToolStepView:
     tool_name: str
     display_name: str
     status: ToolStepStatus
+    request_detail: str = ""
+    result_detail: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +50,11 @@ class AgentLoopViewState:
     current_draft: str = ""
     final_text: str = ""
     terminal_message: str = ""
+    elapsed_seconds: float | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    model_requests: int | None = None
+    tool_calls: int | None = None
     completed_step_count: int = 0
     failed_step_count: int = 0
     terminal: bool = False
@@ -114,6 +121,11 @@ class AgentLoopReducer:
                 phase=DisplayPhase.SUCCEEDED,
                 current_draft="",
                 final_text=event.text,
+                elapsed_seconds=event.elapsed_seconds,
+                input_tokens=event.input_tokens,
+                output_tokens=event.output_tokens,
+                model_requests=event.model_requests,
+                tool_calls=event.tool_calls,
                 terminal=True,
             )
         if kind is ProgressKind.FAILED:
@@ -139,21 +151,36 @@ class AgentLoopReducer:
         event: ConversationProgressEvent,
         status: ToolStepStatus,
     ) -> AgentLoopViewState:
-        step = ToolStepView(
-            call_id=event.call_id,
-            tool_name=event.tool_name,
-            display_name=event.tool_display_name,
-            status=status,
-        )
         steps = list(state.steps)
         for index, current in enumerate(steps):
             if current.call_id == event.call_id:
+                step = ToolStepView(
+                    call_id=event.call_id,
+                    tool_name=event.tool_name,
+                    display_name=event.tool_display_name,
+                    status=status,
+                    request_detail=(
+                        event.tool_detail
+                        if status is ToolStepStatus.RUNNING
+                        else current.request_detail
+                    ),
+                    result_detail=("" if status is ToolStepStatus.RUNNING else event.tool_detail),
+                )
                 if current == step:
                     return state
                 steps[index] = step
                 break
         else:
-            steps.append(step)
+            steps.append(
+                ToolStepView(
+                    call_id=event.call_id,
+                    tool_name=event.tool_name,
+                    display_name=event.tool_display_name,
+                    status=status,
+                    request_detail=(event.tool_detail if status is ToolStepStatus.RUNNING else ""),
+                    result_detail=("" if status is ToolStepStatus.RUNNING else event.tool_detail),
+                )
+            )
         normalized = tuple(steps)
         completed = sum(item.status is ToolStepStatus.SUCCEEDED for item in normalized)
         failed = sum(item.status is ToolStepStatus.FAILED for item in normalized)

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from pydantic_ai import AgentRunResultEvent
 from pydantic_ai.messages import (
     FunctionToolCallEvent,
     FunctionToolResultEvent,
@@ -17,16 +16,22 @@ from pydantic_ai.messages import (
 
 from cywl_oopz.features.chat.progress import ConversationProgressEvent, ProgressKind
 
+from .tool_progress import ToolProgressFormatter
 from .tools.models import ToolDescriptor
 
 
 class PydanticAiProgressMapper:
     """Stateful mapper for model turns without exposing reasoning or tool data."""
 
-    def __init__(self, descriptors: tuple[ToolDescriptor, ...]) -> None:
+    def __init__(
+        self,
+        descriptors: tuple[ToolDescriptor, ...],
+        details: ToolProgressFormatter | None = None,
+    ) -> None:
         self._display_names = {
             descriptor.name: descriptor.display_name for descriptor in descriptors
         }
+        self._details = details or ToolProgressFormatter()
         self._text_generation_active = False
         self._sequence = 0
 
@@ -69,6 +74,7 @@ class PydanticAiProgressMapper:
                     ProgressKind.TOOL_STARTED,
                     part.tool_call_id,
                     part.tool_name,
+                    self._details.request(part.tool_name, part.args),
                 ),
             )
         if isinstance(event, FunctionToolResultEvent):
@@ -83,13 +89,13 @@ class PydanticAiProgressMapper:
                     (ProgressKind.TOOL_SUCCEEDED if succeeded else ProgressKind.TOOL_FAILED),
                     part.tool_call_id,
                     part.tool_name,
+                    self._details.result(
+                        part.tool_name,
+                        part.content,
+                        succeeded=succeeded,
+                    ),
                 ),
             )
-        if isinstance(event, AgentRunResultEvent):
-            self._text_generation_active = False
-            output = event.result.output
-            if isinstance(output, str) and output.strip():
-                return (self._event(ProgressKind.COMPLETED, text=output.strip()),)
         return ()
 
     @staticmethod
@@ -103,12 +109,14 @@ class PydanticAiProgressMapper:
         kind: ProgressKind,
         call_id: str,
         tool_name: str,
+        tool_detail: str,
     ) -> ConversationProgressEvent:
         return self._event(
             kind,
             call_id=call_id,
             tool_name=tool_name,
             tool_display_name=self._display_names.get(tool_name, "执行操作"),
+            tool_detail=tool_detail,
         )
 
     def _event(
@@ -118,6 +126,7 @@ class PydanticAiProgressMapper:
         call_id: str = "",
         tool_name: str = "",
         tool_display_name: str = "",
+        tool_detail: str = "",
         text: str = "",
     ) -> ConversationProgressEvent:
         self._sequence += 1
@@ -127,5 +136,6 @@ class PydanticAiProgressMapper:
             call_id=call_id,
             tool_name=tool_name,
             tool_display_name=tool_display_name,
+            tool_detail=tool_detail,
             text=text,
         )

@@ -108,13 +108,62 @@ def test_tool_events_only_expose_registered_display_identity_and_status() -> Non
 
     assert started.kind is ProgressKind.TOOL_STARTED
     assert started.tool_display_name == "查询资料"
+    assert started.tool_detail == ""
     assert succeeded.kind is ProgressKind.TOOL_SUCCEEDED
+    assert succeeded.tool_detail == "调用完成"
     assert failed.kind is ProgressKind.TOOL_FAILED
+    assert failed.tool_detail == "错误：工具执行失败"
     for event in (started, succeeded, failed):
         assert not hasattr(event, "arguments")
         assert not hasattr(event, "output")
         assert "must-not-leak" not in repr(event)
         assert "private_error" not in repr(event)
+
+
+def test_web_tool_events_include_bounded_request_result_and_error_details() -> None:
+    descriptor = ToolDescriptor(
+        name="search_web",
+        display_name="搜索公开网页",
+        description="Search public pages.",
+        input_model=EmptyModel,
+        output_model=EmptyModel,
+        effect=ToolEffect.READ,
+        concurrency_safe=True,
+        idempotent=True,
+    )
+    progress = PydanticAiProgressMapper((descriptor,))
+
+    started = progress.map(
+        FunctionToolCallEvent(
+            ToolCallPart(
+                "search_web",
+                {"query": "初音未来 新闻", "time_range": "d"},
+                "search-call",
+            )
+        )
+    )[0]
+    succeeded = progress.map(
+        FunctionToolResultEvent(
+            ToolReturnPart(
+                "search_web",
+                {"ok": True, "data": {"results": [{}, {}, {}]}},
+                "search-call",
+            )
+        )
+    )[0]
+    failed = progress.map(
+        FunctionToolResultEvent(
+            ToolReturnPart(
+                "search_web",
+                {"ok": False, "error": "web_search_timeout"},
+                "failed-call",
+            )
+        )
+    )[0]
+
+    assert started.tool_detail == "查询：「初音未来 新闻」 · 时段：d"
+    assert succeeded.tool_detail == "找到 3 条结果"
+    assert failed.tool_detail == "错误：网页搜索超时"
 
 
 def test_text_after_tool_call_starts_a_new_draft_generation() -> None:

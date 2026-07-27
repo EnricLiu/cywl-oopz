@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
@@ -119,6 +120,7 @@ class AgentConversationService:
         progress: ProgressSink | None = None,
     ) -> ChatResponse:
         """Run one bounded Agent turn with durable run, message, and tool records."""
+        started_at = time.perf_counter()
         content = prompt.strip()
         if not content:
             raise ValueError("Agent prompt must not be empty")
@@ -251,6 +253,9 @@ class AgentConversationService:
                     finish_reason=result.stop_reason.value,
                     input_tokens=result.input_tokens,
                     output_tokens=result.output_tokens,
+                    elapsed_seconds=time.perf_counter() - started_at,
+                    model_requests=result.model_requests,
+                    tool_calls=result.tool_calls,
                 )
 
     async def clear(self, key: ConversationKey) -> None:

@@ -158,10 +158,10 @@ class OopzMessageRenderer:
 
     def render(self, state: AgentLoopViewState) -> str:
         if state.phase is DisplayPhase.SUCCEEDED:
-            rendered = self._render_success(state.final_text)
+            rendered = self._render_success(state)
         elif state.phase is DisplayPhase.FAILED:
             rendered = self._render_terminal(
-                "⚠️ **这次没有顺利完成**",
+                "⚠️ **失败了(┬┬﹏┬┬)**",
                 state.terminal_message or "模型服务暂时不可用，请稍后再试。",
             )
         elif state.phase is DisplayPhase.CANCELLED:
@@ -175,12 +175,12 @@ class OopzMessageRenderer:
 
     def _render_active(self, state: AgentLoopViewState) -> str:
         header = {
-            DisplayPhase.CREATED: "✨ **CYWL 正在准备回答…**",
-            DisplayPhase.ACCEPTED: "✨ **CYWL 正在准备回答…**",
-            DisplayPhase.THINKING: "♪ **CYWL 正在思考…**",
-            DisplayPhase.TOOL_RUNNING: "🛠 **CYWL 正在处理…**",
-            DisplayPhase.DRAFTING: "🎤 **CYWL 正在组织回答…**",
-        }.get(state.phase, "♪ **CYWL 正在思考…**")
+            DisplayPhase.CREATED: "✨ **初音未来 正在准备回答…**",
+            DisplayPhase.ACCEPTED: "✨ **初音未来 正在准备回答…**",
+            DisplayPhase.THINKING: "♪ **初音未来 正在思考…**",
+            DisplayPhase.TOOL_RUNNING: "🛠 **初音未来 正在处理…**",
+            DisplayPhase.DRAFTING: "🎤 **初音未来 正在组织回答…**",
+        }.get(state.phase, "♪ **初音未来 正在思考…**")
         lines = [header]
         lines.extend(self._step_lines(state))
         if state.current_draft:
@@ -199,7 +199,7 @@ class OopzMessageRenderer:
         if state.phase is DisplayPhase.DRAFTING:
             selected = running + failed[-1:]
             visible_limit = self.max_visible_steps - (1 if succeeded else 0)
-            lines = [self._step_line(step) for step in selected[:visible_limit]]
+            lines = self._render_steps(selected[:visible_limit])
             if succeeded:
                 lines.append(f"✅ 已完成 {len(succeeded)} 个步骤")
             return lines
@@ -212,27 +212,56 @@ class OopzMessageRenderer:
         if remaining:
             selected.extend(reversed(succeeded[-remaining:]))
         hidden = len(state.steps) - len(selected)
-        lines = [self._step_line(step) for step in selected]
+        lines = self._render_steps(selected)
         if hidden > 0:
             lines.append(f"… 已折叠 {hidden} 个已完成步骤")
         return lines
 
-    def _step_line(self, step: ToolStepView) -> str:
+    def _render_steps(self, steps: list[ToolStepView]) -> list[str]:
+        return [line for step in steps for line in self._step_lines_for(step)]
+
+    def _step_lines_for(self, step: ToolStepView) -> list[str]:
         name = self._normalizer.plain_text(step.display_name)[:48]
         if step.status is ToolStepStatus.RUNNING:
-            return f"⏳ *{name}…*"
-        if step.status is ToolStepStatus.FAILED:
-            return f"⚠️ {name}未完成，正在调整"
-        return f"✅ {name}"
+            header = f"⏳ *{name}…*"
+        elif step.status is ToolStepStatus.FAILED:
+            header = f"⚠️ {name}未完成，正在调整"
+        else:
+            header = f"✅ {name}"
+        details = [detail for detail in (step.request_detail, step.result_detail) if detail]
+        if not details:
+            return [header]
+        normalized = "；".join(self._normalizer.plain_text(detail) for detail in details)[:180]
+        return [header, f"  ↳ {normalized}"]
 
-    def _render_success(self, answer: str) -> str:
-        header = "🎵 **CYWL**\n"
-        normalized = self._normalizer.normalize(answer)
+    def _render_success(self, state: AgentLoopViewState) -> str:
+        header = self._success_header(state)
+        normalized = self._normalizer.normalize(state.final_text)
         if oopz_units(header + normalized) <= self._budget.safe_limit:
             return header + normalized
-        plain = self._normalizer.plain_text(answer)
+        plain = self._normalizer.plain_text(state.final_text)
         available = self._budget.safe_limit - oopz_units(header)
         return header + self._middle_fold(plain, available)
+
+    @staticmethod
+    def _success_header(state: AgentLoopViewState) -> str:
+        statistics: list[str] = []
+        if state.elapsed_seconds is not None:
+            statistics.append(f"{state.elapsed_seconds:.1f}s")
+        if state.tool_calls is not None:
+            statistics.append(f"{state.tool_calls} 次工具")
+        if state.input_tokens is not None or state.output_tokens is not None:
+            total_tokens = (state.input_tokens or 0) + (state.output_tokens or 0)
+            statistics.append(f"{OopzMessageRenderer._compact_number(total_tokens)} tokens")
+        suffix = f" · {' · '.join(statistics)}" if statistics else ""
+        return f"🎵 **初音未来**{suffix}\n"
+
+    @staticmethod
+    def _compact_number(value: int) -> str:
+        if value < 1000:
+            return str(value)
+        rendered = f"{value / 1000:.1f}".rstrip("0").rstrip(".")
+        return f"{rendered}k"
 
     def _render_terminal(self, header: str, message: str) -> str:
         prefix = f"{header}\n"

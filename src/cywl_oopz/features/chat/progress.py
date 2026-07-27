@@ -45,14 +45,20 @@ _TEXT_KINDS = frozenset(
 
 @dataclass(frozen=True, slots=True)
 class ConversationProgressEvent:
-    """A deliberately safe event with no raw tool arguments or outputs."""
+    """A deliberately bounded event with display-safe tool and run summaries."""
 
     kind: ProgressKind
     event_id: str = ""
     call_id: str = ""
     tool_name: str = ""
     tool_display_name: str = ""
+    tool_detail: str = ""
     text: str = ""
+    elapsed_seconds: float | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    model_requests: int | None = None
+    tool_calls: int | None = None
 
     def __post_init__(self) -> None:
         if self.kind in _TOOL_KINDS:
@@ -66,12 +72,27 @@ class ConversationProgressEvent:
                 or "\r" in self.tool_display_name
             ):
                 raise ValueError("Tool progress display name must be one short line")
-        elif self.call_id or self.tool_name or self.tool_display_name:
+            if len(self.tool_detail) > 160 or "\n" in self.tool_detail or "\r" in self.tool_detail:
+                raise ValueError("Tool progress detail must be one short line")
+        elif self.call_id or self.tool_name or self.tool_display_name or self.tool_detail:
             raise ValueError("Only tool progress may carry tool identity")
         if self.kind in _TEXT_KINDS and not self.text:
             raise ValueError(f"{self.kind.value} progress requires text")
         if self.kind not in _TEXT_KINDS and self.text:
             raise ValueError(f"{self.kind.value} progress must not carry text")
+        statistics = (
+            self.elapsed_seconds,
+            self.input_tokens,
+            self.output_tokens,
+            self.model_requests,
+            self.tool_calls,
+        )
+        if self.kind is not ProgressKind.COMPLETED and any(
+            value is not None for value in statistics
+        ):
+            raise ValueError("Only completed progress may carry run statistics")
+        if any(value is not None and value < 0 for value in statistics):
+            raise ValueError("Progress statistics must not be negative")
 
 
 class ProgressSink(Protocol):
