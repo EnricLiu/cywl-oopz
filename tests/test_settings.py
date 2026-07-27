@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from oopz_sdk import OopzConfig
 
 from cywl_oopz.core.errors import ConfigurationError
 from cywl_oopz.settings import (
@@ -182,4 +183,37 @@ def test_from_environment_loads_dotenv_from_the_current_directory(tmp_path, monk
 
     settings = AppSettings.from_environment()
 
+    assert settings.database.url.startswith("postgresql+asyncpg://")
+
+
+@pytest.mark.asyncio
+async def test_from_environment_async_uses_async_oopz_loading(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    (tmp_path / ".env").write_text(
+        "\n".join(
+            [
+                "DATABASE_URL=postgresql://user:secret@localhost:5432/cywl",
+                "CYWL_CHAT_ENABLED=false",
+            ]
+        )
+    )
+    for name in valid_environment():
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.chdir(tmp_path)
+    expected = AppSettings.from_mapping(valid_environment()).oopz
+    called = False
+
+    async def load_oopz() -> OopzConfig:
+        nonlocal called
+        called = True
+        return expected
+
+    monkeypatch.setattr(OopzConfig, "from_env_async", staticmethod(load_oopz))
+
+    settings = await AppSettings.from_environment_async()
+
+    assert called is True
+    assert settings.oopz is expected
     assert settings.database.url.startswith("postgresql+asyncpg://")

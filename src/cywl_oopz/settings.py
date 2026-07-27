@@ -507,6 +507,12 @@ class AppSettings:
         return cls._build(os.environ, OopzConfig.from_env())
 
     @classmethod
+    async def from_environment_async(cls) -> AppSettings:
+        """Async variant for tests and runtimes already inside an event loop."""
+        load_dotenv(find_dotenv(usecwd=True), override=False)
+        return cls._build(os.environ, await OopzConfig.from_env_async())
+
+    @classmethod
     def from_mapping(cls, values: Mapping[str, str]) -> AppSettings:
         """Build settings from an injectable mapping for deterministic tests."""
         return cls._build(values, _oopz_config(values))
