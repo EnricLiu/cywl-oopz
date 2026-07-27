@@ -11,6 +11,11 @@ from typing import Any
 from urllib.parse import urlparse
 from uuid import UUID
 
+from cywl_oopz.core.lifecycle import (
+    AgentRunStatus,
+    AgentStopReason,
+    ModelSelectionSource,
+)
 from cywl_oopz.features.chat.models import ConversationKey
 
 
@@ -104,15 +109,6 @@ class AgentModelRef:
     protocol: ProviderProtocol
     capabilities: frozenset[ModelCapability]
     fallback_model_id: UUID | None
-
-
-class ModelSelectionSource(StrEnum):
-    """Precedence source that selected a model for a run."""
-
-    THREAD = "thread"
-    USER = "user"
-    CHANNEL = "channel"
-    APPLICATION = "application"
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,33 +207,6 @@ class AgentRunRequest:
     def __post_init__(self) -> None:
         if not self.prompt.strip():
             raise ValueError("Agent prompt must not be empty")
-
-
-class AgentRunStatus(StrEnum):
-    """Persisted lifecycle states for one Agent run."""
-
-    PENDING = "pending"
-    RUNNING = "running"
-    SUCCEEDED = "succeeded"
-    FAILED = "failed"
-    CANCELLED = "cancelled"
-    ABANDONED = "abandoned"
-
-
-class AgentStopReason(StrEnum):
-    """Framework-neutral reason that stopped an Agent loop."""
-
-    COMPLETED = "completed"
-    CANCELLED = "cancelled"
-    TIMEOUT = "timeout"
-    MODEL_REQUEST_LIMIT = "model_request_limit"
-    TOOL_CALL_LIMIT = "tool_call_limit"
-    TOKEN_LIMIT = "token_limit"
-    TOOL_DENIED = "tool_denied"
-    PROVIDER_ERROR = "provider_error"
-    TOOL_ERROR = "tool_error"
-    INVALID_OUTPUT = "invalid_output"
-    STALE_RUN_ABANDONED = "stale_run_abandoned"
 
 
 _STOP_STATUS = {

@@ -6,13 +6,13 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import StrEnum
 from types import MappingProxyType
 from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel
 
+from cywl_oopz.core.lifecycle import ToolEffect, ToolExecutionStatus
 from cywl_oopz.features.agent.models import AgentIdentity, AgentRunLimits
 
 _TOOL_NAME = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
@@ -27,24 +27,6 @@ class ToolExecutionError(Exception):
             raise ValueError("Tool error code must be a stable snake_case identifier")
         self.error_code = normalized
         super().__init__(normalized)
-
-
-class ToolEffect(StrEnum):
-    """Observable side-effect class used by deterministic policy."""
-
-    READ = "read"
-    WRITE = "write"
-    ADMIN = "admin"
-
-
-class ToolExecutionStatus(StrEnum):
-    """Persisted lifecycle of one model-issued tool call."""
-
-    STARTED = "started"
-    SUCCEEDED = "succeeded"
-    FAILED = "failed"
-    DENIED = "denied"
-    CANCELLED = "cancelled"
 
 
 @dataclass(frozen=True, slots=True)

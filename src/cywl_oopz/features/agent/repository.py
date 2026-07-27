@@ -40,7 +40,6 @@ from .models import (
     ProviderProtocol,
 )
 from .tools.models import (
-    ToolEffect,
     ToolExecution,
     ToolExecutionClaim,
     ToolExecutionStatus,
@@ -411,11 +410,11 @@ class SqlAlchemyAgentRunRepository:
                         AgentRunRecord(
                             id=run.id,
                             thread_id=run.thread_id,
-                            status=run.state.status.value,
+                            status=run.state.status,
                             stop_reason=None,
                             provider_id=run.provider_id,
                             model_id=run.model_id,
-                            selection_source=run.selection_source.value,
+                            selection_source=run.selection_source,
                             limits=asdict(run.limits),
                             usage=dict(run.usage),
                             error_code=run.error_code,
@@ -445,11 +444,11 @@ class SqlAlchemyAgentRunRepository:
                         update(AgentRunRecord)
                         .where(
                             AgentRunRecord.id == state.run_id,
-                            AgentRunRecord.status == AgentRunStatus.RUNNING.value,
+                            AgentRunRecord.status == AgentRunStatus.RUNNING,
                         )
                         .values(
-                            status=state.status.value,
-                            stop_reason=state.stop_reason.value,
+                            status=state.status,
+                            stop_reason=state.stop_reason,
                             usage=usage,
                             error_code=error_code,
                             finished_at=state.finished_at,
@@ -469,12 +468,12 @@ class SqlAlchemyAgentRunRepository:
                     result = await session.execute(
                         update(AgentRunRecord)
                         .where(
-                            AgentRunRecord.status == AgentRunStatus.RUNNING.value,
+                            AgentRunRecord.status == AgentRunStatus.RUNNING,
                             AgentRunRecord.heartbeat_at < before,
                         )
                         .values(
-                            status=AgentRunStatus.ABANDONED.value,
-                            stop_reason=AgentStopReason.STALE_RUN_ABANDONED.value,
+                            status=AgentRunStatus.ABANDONED,
+                            stop_reason=AgentStopReason.STALE_RUN_ABANDONED,
                             finished_at=now,
                             heartbeat_at=now,
                         )
@@ -512,7 +511,7 @@ class SqlAlchemyAgentMessageRepository:
                         .where(
                             or_(
                                 AgentMessageRecord.run_id.is_(None),
-                                AgentRunRecord.status == AgentRunStatus.SUCCEEDED.value,
+                                AgentRunRecord.status == AgentRunStatus.SUCCEEDED,
                             )
                         )
                         .order_by(AgentMessageRecord.sequence.desc())
@@ -548,7 +547,7 @@ class SqlAlchemyAgentMessageRepository:
                         .where(
                             or_(
                                 AgentMessageRecord.run_id.is_(None),
-                                AgentRunRecord.status == AgentRunStatus.SUCCEEDED.value,
+                                AgentRunRecord.status == AgentRunStatus.SUCCEEDED,
                             )
                         )
                         .order_by(AgentMessageRecord.sequence)
@@ -614,7 +613,7 @@ class SqlAlchemyAgentMessageRepository:
                                 AgentMessageRecord.run_id.is_(None),
                                 AgentMessageRecord.run_id.in_(
                                     select(AgentRunRecord.id).where(
-                                        AgentRunRecord.status == AgentRunStatus.SUCCEEDED.value
+                                        AgentRunRecord.status == AgentRunStatus.SUCCEEDED
                                     )
                                 ),
                             ),
@@ -656,8 +655,8 @@ class SqlAlchemyToolExecutionRepository:
                             tool_call_id=execution.call_id,
                             tool_name=execution.tool_name,
                             tool_version=execution.tool_version,
-                            effect=execution.effect.value,
-                            status=execution.status.value,
+                            effect=execution.effect,
+                            status=execution.status,
                             idempotency_key=execution.idempotency_key,
                             input_payload=dict(execution.input_payload),
                             output_payload=None,
@@ -706,10 +705,10 @@ class SqlAlchemyToolExecutionRepository:
                         .where(
                             AgentToolExecutionRecord.run_id == run_id,
                             AgentToolExecutionRecord.tool_call_id == call_id,
-                            AgentToolExecutionRecord.status == ToolExecutionStatus.STARTED.value,
+                            AgentToolExecutionRecord.status == ToolExecutionStatus.STARTED,
                         )
                         .values(
-                            status=status.value,
+                            status=status,
                             output_payload=output,
                             error_code=error_code,
                             finished_at=finished_at,
@@ -737,8 +736,8 @@ class SqlAlchemyToolExecutionRepository:
             call_id=record.tool_call_id,
             tool_name=record.tool_name,
             tool_version=record.tool_version,
-            effect=ToolEffect(record.effect),
-            status=ToolExecutionStatus(record.status),
+            effect=record.effect,
+            status=record.status,
             idempotency_key=record.idempotency_key,
             input_payload=_mapping(record.input_payload),
             output_payload=(

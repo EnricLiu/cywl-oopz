@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from enum import StrEnum
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
     JSON,
     BigInteger,
     DateTime,
+    Enum,
+    FetchedValue,
     ForeignKey,
     Index,
     Integer,
@@ -20,6 +23,72 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.types import Uuid
+
+from cywl_oopz.core.lifecycle import (
+    AgentRunStatus,
+    AgentStopReason,
+    ModelSelectionSource,
+    ToolEffect,
+    ToolExecutionStatus,
+)
+
+CURRENT_TIMESTAMP = text("CURRENT_TIMESTAMP")
+GENERATED_UUID = text("gen_random_uuid()")
+EMPTY_STRING = text("''")
+EMPTY_JSON = text("'[]'::json")
+EMPTY_JSONB_ARRAY = text("'[]'::jsonb")
+EMPTY_JSONB_OBJECT = text("'{}'::jsonb")
+DEFAULT_AGENT_TOOLS = text(
+    "'["
+    '"get_agent_status",'
+    '"get_channel_settings",'
+    '"react_to_message",'
+    '"search_music_catalog",'
+    '"enqueue_music",'
+    '"get_music_queue",'
+    '"skip_music",'
+    '"pause_music",'
+    '"resume_music"'
+    "]'::jsonb"
+)
+TRUE = text("true")
+FALSE = text("false")
+
+
+def _enum_values(enum_type: type[StrEnum]) -> list[str]:
+    return [member.value for member in enum_type]
+
+
+AGENT_RUN_STATUS_ENUM = Enum(
+    AgentRunStatus,
+    name="agent_run_status",
+    values_callable=_enum_values,
+    validate_strings=True,
+)
+AGENT_STOP_REASON_ENUM = Enum(
+    AgentStopReason,
+    name="agent_stop_reason",
+    values_callable=_enum_values,
+    validate_strings=True,
+)
+MODEL_SELECTION_SOURCE_ENUM = Enum(
+    ModelSelectionSource,
+    name="model_selection_source",
+    values_callable=_enum_values,
+    validate_strings=True,
+)
+TOOL_EFFECT_ENUM = Enum(
+    ToolEffect,
+    name="tool_effect",
+    values_callable=_enum_values,
+    validate_strings=True,
+)
+TOOL_EXECUTION_STATUS_ENUM = Enum(
+    ToolExecutionStatus,
+    name="tool_execution_status",
+    values_callable=_enum_values,
+    validate_strings=True,
+)
 
 
 def utc_now() -> datetime:
@@ -37,10 +106,19 @@ class ChannelSettingsRecord(Base):
     __tablename__ = "channel_settings"
     __table_args__ = (UniqueConstraint("area_id", "channel_id"),)
 
-    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    id: Mapped[UUID] = mapped_column(
+        Uuid,
+        primary_key=True,
+        default=uuid4,
+        server_default=GENERATED_UUID,
+    )
     area_id: Mapped[str] = mapped_column(String(128), nullable=False)
     channel_id: Mapped[str] = mapped_column(String(128), nullable=False)
-    chat_enabled: Mapped[bool] = mapped_column(default=False, nullable=False)
+    chat_enabled: Mapped[bool] = mapped_column(
+        default=False,
+        server_default=FALSE,
+        nullable=False,
+    )
     enabled_agent_tools: Mapped[list[str]] = mapped_column(
         JSONB,
         default=lambda: [
@@ -54,17 +132,23 @@ class ChannelSettingsRecord(Base):
             "pause_music",
             "resume_music",
         ],
+        server_default=DEFAULT_AGENT_TOOLS,
         nullable=False,
     )
     default_model_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("llm_models.id", ondelete="SET NULL"),
         nullable=True,
     )
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        server_default=CURRENT_TIMESTAMP,
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=utc_now,
-        onupdate=utc_now,
+        server_default=CURRENT_TIMESTAMP,
+        server_onupdate=FetchedValue(),
     )
 
 
@@ -74,19 +158,44 @@ class ConversationSessionRecord(Base):
     __tablename__ = "conversation_sessions"
     __table_args__ = (UniqueConstraint("scope", "area_id", "channel_id", "person_id"),)
 
-    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    id: Mapped[UUID] = mapped_column(
+        Uuid,
+        primary_key=True,
+        default=uuid4,
+        server_default=GENERATED_UUID,
+    )
     scope: Mapped[str] = mapped_column(String(32), nullable=False)
-    area_id: Mapped[str] = mapped_column(String(128), nullable=False, default="")
-    channel_id: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    area_id: Mapped[str] = mapped_column(
+        String(128),
+        nullable=False,
+        default="",
+        server_default=EMPTY_STRING,
+    )
+    channel_id: Mapped[str] = mapped_column(
+        String(128),
+        nullable=False,
+        default="",
+        server_default=EMPTY_STRING,
+    )
     person_id: Mapped[str] = mapped_column(String(128), nullable=False)
     selected_model: Mapped[str | None] = mapped_column(String(256), nullable=True)
-    messages: Mapped[list[dict[str, str]]] = mapped_column(JSON, default=list, nullable=False)
+    messages: Mapped[list[dict[str, str]]] = mapped_column(
+        JSON,
+        default=list,
+        server_default=EMPTY_JSON,
+        nullable=False,
+    )
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        server_default=CURRENT_TIMESTAMP,
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=utc_now,
-        onupdate=utc_now,
+        server_default=CURRENT_TIMESTAMP,
+        server_onupdate=FetchedValue(),
     )
 
 
@@ -97,9 +206,24 @@ class RateLimitBucketRecord(Base):
 
     bucket_key: Mapped[str] = mapped_column(String(256), primary_key=True)
     available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
-    hit_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    reason: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        server_default=CURRENT_TIMESTAMP,
+        server_onupdate=FetchedValue(),
+    )
+    hit_count: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default=text("0"),
+        nullable=False,
+    )
+    reason: Mapped[str] = mapped_column(
+        Text,
+        default="",
+        server_default=EMPTY_STRING,
+        nullable=False,
+    )
 
 
 class LlmProviderRecord(Base):
@@ -107,20 +231,43 @@ class LlmProviderRecord(Base):
 
     __tablename__ = "llm_providers"
 
-    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    id: Mapped[UUID] = mapped_column(
+        Uuid,
+        primary_key=True,
+        default=uuid4,
+        server_default=GENERATED_UUID,
+    )
     alias: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
     display_name: Mapped[str] = mapped_column(String(256), nullable=False)
     protocol: Mapped[str] = mapped_column(String(64), nullable=False)
     base_url: Mapped[str] = mapped_column(String(2048), nullable=False)
     api_key: Mapped[str] = mapped_column(Text, nullable=False)
-    user_selectable: Mapped[bool] = mapped_column(default=True, nullable=False)
-    enabled: Mapped[bool] = mapped_column(default=True, nullable=False)
-    config: Mapped[dict[str, object]] = mapped_column(JSONB, default=dict, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    user_selectable: Mapped[bool] = mapped_column(
+        default=True,
+        server_default=TRUE,
+        nullable=False,
+    )
+    enabled: Mapped[bool] = mapped_column(
+        default=True,
+        server_default=TRUE,
+        nullable=False,
+    )
+    config: Mapped[dict[str, object]] = mapped_column(
+        JSONB,
+        default=dict,
+        server_default=EMPTY_JSONB_OBJECT,
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        server_default=CURRENT_TIMESTAMP,
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=utc_now,
-        onupdate=utc_now,
+        server_default=CURRENT_TIMESTAMP,
+        server_onupdate=FetchedValue(),
     )
 
 
@@ -144,7 +291,12 @@ class LlmModelRecord(Base):
         ),
     )
 
-    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    id: Mapped[UUID] = mapped_column(
+        Uuid,
+        primary_key=True,
+        default=uuid4,
+        server_default=GENERATED_UUID,
+    )
     provider_id: Mapped[UUID] = mapped_column(
         ForeignKey("llm_providers.id", ondelete="CASCADE"),
         nullable=False,
@@ -152,21 +304,53 @@ class LlmModelRecord(Base):
     alias: Mapped[str] = mapped_column(String(128), nullable=False)
     remote_model_name: Mapped[str] = mapped_column(String(256), nullable=False)
     display_name: Mapped[str] = mapped_column(String(256), nullable=False)
-    enabled: Mapped[bool] = mapped_column(default=True, nullable=False)
-    is_provider_default: Mapped[bool] = mapped_column(default=False, nullable=False)
-    is_application_default: Mapped[bool] = mapped_column(default=False, nullable=False)
-    capabilities: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
-    limits: Mapped[dict[str, object]] = mapped_column(JSONB, default=dict, nullable=False)
+    enabled: Mapped[bool] = mapped_column(
+        default=True,
+        server_default=TRUE,
+        nullable=False,
+    )
+    is_provider_default: Mapped[bool] = mapped_column(
+        default=False,
+        server_default=FALSE,
+        nullable=False,
+    )
+    is_application_default: Mapped[bool] = mapped_column(
+        default=False,
+        server_default=FALSE,
+        nullable=False,
+    )
+    capabilities: Mapped[list[str]] = mapped_column(
+        JSONB,
+        default=list,
+        server_default=EMPTY_JSONB_ARRAY,
+        nullable=False,
+    )
+    limits: Mapped[dict[str, object]] = mapped_column(
+        JSONB,
+        default=dict,
+        server_default=EMPTY_JSONB_OBJECT,
+        nullable=False,
+    )
     fallback_model_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("llm_models.id", ondelete="SET NULL"),
         nullable=True,
     )
-    pricing: Mapped[dict[str, object]] = mapped_column(JSONB, default=dict, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    pricing: Mapped[dict[str, object]] = mapped_column(
+        JSONB,
+        default=dict,
+        server_default=EMPTY_JSONB_OBJECT,
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        server_default=CURRENT_TIMESTAMP,
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=utc_now,
-        onupdate=utc_now,
+        server_default=CURRENT_TIMESTAMP,
+        server_onupdate=FetchedValue(),
     )
 
 
@@ -183,7 +367,8 @@ class UserLlmPreferenceRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=utc_now,
-        onupdate=utc_now,
+        server_default=CURRENT_TIMESTAMP,
+        server_onupdate=FetchedValue(),
     )
 
 
@@ -193,25 +378,65 @@ class AgentThreadRecord(Base):
     __tablename__ = "agent_threads"
     __table_args__ = (UniqueConstraint("scope", "area_id", "channel_id", "person_id"),)
 
-    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    id: Mapped[UUID] = mapped_column(
+        Uuid,
+        primary_key=True,
+        default=uuid4,
+        server_default=GENERATED_UUID,
+    )
     scope: Mapped[str] = mapped_column(String(32), nullable=False)
-    area_id: Mapped[str] = mapped_column(String(128), nullable=False, default="")
-    channel_id: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    area_id: Mapped[str] = mapped_column(
+        String(128),
+        nullable=False,
+        default="",
+        server_default=EMPTY_STRING,
+    )
+    channel_id: Mapped[str] = mapped_column(
+        String(128),
+        nullable=False,
+        default="",
+        server_default=EMPTY_STRING,
+    )
     person_id: Mapped[str] = mapped_column(String(128), nullable=False)
     selected_model_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("llm_models.id", ondelete="SET NULL"),
         nullable=True,
     )
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    summary: Mapped[str] = mapped_column(Text, default="", nullable=False)
-    summary_through_sequence: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
-    summary_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    summary: Mapped[str] = mapped_column(
+        Text,
+        default="",
+        server_default=EMPTY_STRING,
+        nullable=False,
+    )
+    summary_through_sequence: Mapped[int] = mapped_column(
+        BigInteger,
+        default=0,
+        server_default=text("0"),
+        nullable=False,
+    )
+    summary_version: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default=text("0"),
+        nullable=False,
+    )
+    version: Mapped[int] = mapped_column(
+        Integer,
+        default=1,
+        server_default=text("1"),
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        server_default=CURRENT_TIMESTAMP,
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=utc_now,
-        onupdate=utc_now,
+        server_default=CURRENT_TIMESTAMP,
+        server_onupdate=FetchedValue(),
     )
 
 
@@ -221,11 +446,16 @@ class AgentMemoryPreferenceRecord(Base):
     __tablename__ = "agent_memory_preferences"
 
     person_id: Mapped[str] = mapped_column(String(128), primary_key=True)
-    enabled: Mapped[bool] = mapped_column(default=True, nullable=False)
+    enabled: Mapped[bool] = mapped_column(
+        default=True,
+        server_default=TRUE,
+        nullable=False,
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=utc_now,
-        onupdate=utc_now,
+        server_default=CURRENT_TIMESTAMP,
+        server_onupdate=FetchedValue(),
     )
 
 
@@ -241,9 +471,19 @@ class AgentMemoryItemRecord(Base):
         ),
     )
 
-    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    id: Mapped[UUID] = mapped_column(
+        Uuid,
+        primary_key=True,
+        default=uuid4,
+        server_default=GENERATED_UUID,
+    )
     owner_person_id: Mapped[str] = mapped_column(String(128), nullable=False)
-    namespace: Mapped[str] = mapped_column(String(64), nullable=False)
+    namespace: Mapped[str] = mapped_column(
+        String(64),
+        default="explicit",
+        server_default=text("'explicit'"),
+        nullable=False,
+    )
     content: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
     source_thread_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("agent_threads.id", ondelete="SET NULL"),
@@ -253,11 +493,16 @@ class AgentMemoryItemRecord(Base):
         BigInteger,
         nullable=True,
     )
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        server_default=CURRENT_TIMESTAMP,
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=utc_now,
-        onupdate=utc_now,
+        server_default=CURRENT_TIMESTAMP,
+        server_onupdate=FetchedValue(),
     )
     last_used_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
@@ -274,13 +519,26 @@ class AgentRunRecord(Base):
 
     __tablename__ = "agent_runs"
 
-    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    id: Mapped[UUID] = mapped_column(
+        Uuid,
+        primary_key=True,
+        default=uuid4,
+        server_default=GENERATED_UUID,
+    )
     thread_id: Mapped[UUID] = mapped_column(
         ForeignKey("agent_threads.id", ondelete="CASCADE"),
         nullable=False,
     )
-    status: Mapped[str] = mapped_column(String(32), nullable=False)
-    stop_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    status: Mapped[AgentRunStatus] = mapped_column(
+        AGENT_RUN_STATUS_ENUM,
+        default=AgentRunStatus.PENDING,
+        server_default=text("'pending'"),
+        nullable=False,
+    )
+    stop_reason: Mapped[AgentStopReason | None] = mapped_column(
+        AGENT_STOP_REASON_ENUM,
+        nullable=True,
+    )
     provider_id: Mapped[UUID] = mapped_column(
         ForeignKey("llm_providers.id", ondelete="RESTRICT"),
         nullable=False,
@@ -289,13 +547,41 @@ class AgentRunRecord(Base):
         ForeignKey("llm_models.id", ondelete="RESTRICT"),
         nullable=False,
     )
-    selection_source: Mapped[str] = mapped_column(String(32), nullable=False)
-    limits: Mapped[dict[str, object]] = mapped_column(JSONB, default=dict, nullable=False)
-    usage: Mapped[dict[str, object]] = mapped_column(JSONB, default=dict, nullable=False)
-    error_code: Mapped[str] = mapped_column(String(128), default="", nullable=False)
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    selection_source: Mapped[ModelSelectionSource] = mapped_column(
+        MODEL_SELECTION_SOURCE_ENUM,
+        nullable=False,
+    )
+    limits: Mapped[dict[str, object]] = mapped_column(
+        JSONB,
+        default=dict,
+        server_default=EMPTY_JSONB_OBJECT,
+        nullable=False,
+    )
+    usage: Mapped[dict[str, object]] = mapped_column(
+        JSONB,
+        default=dict,
+        server_default=EMPTY_JSONB_OBJECT,
+        nullable=False,
+    )
+    error_code: Mapped[str] = mapped_column(
+        String(128),
+        default="",
+        server_default=EMPTY_STRING,
+        nullable=False,
+    )
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        server_default=CURRENT_TIMESTAMP,
+        nullable=False,
+    )
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    heartbeat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    heartbeat_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        server_default=CURRENT_TIMESTAMP,
+        nullable=False,
+    )
 
 
 class AgentMessageRecord(Base):
@@ -304,7 +590,12 @@ class AgentMessageRecord(Base):
     __tablename__ = "agent_messages"
     __table_args__ = (UniqueConstraint("thread_id", "sequence"),)
 
-    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    id: Mapped[UUID] = mapped_column(
+        Uuid,
+        primary_key=True,
+        default=uuid4,
+        server_default=GENERATED_UUID,
+    )
     thread_id: Mapped[UUID] = mapped_column(
         ForeignKey("agent_threads.id", ondelete="CASCADE"),
         nullable=False,
@@ -319,7 +610,11 @@ class AgentMessageRecord(Base):
     content: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
     input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        server_default=CURRENT_TIMESTAMP,
+    )
 
 
 class AgentToolExecutionRecord(Base):
@@ -336,7 +631,12 @@ class AgentToolExecutionRecord(Base):
         ),
     )
 
-    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    id: Mapped[UUID] = mapped_column(
+        Uuid,
+        primary_key=True,
+        default=uuid4,
+        server_default=GENERATED_UUID,
+    )
     run_id: Mapped[UUID] = mapped_column(
         ForeignKey("agent_runs.id", ondelete="CASCADE"),
         nullable=False,
@@ -344,8 +644,13 @@ class AgentToolExecutionRecord(Base):
     tool_call_id: Mapped[str] = mapped_column(String(256), nullable=False)
     tool_name: Mapped[str] = mapped_column(String(128), nullable=False)
     tool_version: Mapped[str] = mapped_column(String(64), nullable=False)
-    effect: Mapped[str] = mapped_column(String(32), nullable=False)
-    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    effect: Mapped[ToolEffect] = mapped_column(TOOL_EFFECT_ENUM, nullable=False)
+    status: Mapped[ToolExecutionStatus] = mapped_column(
+        TOOL_EXECUTION_STATUS_ENUM,
+        default=ToolExecutionStatus.STARTED,
+        server_default=text("'started'"),
+        nullable=False,
+    )
     idempotency_key: Mapped[str] = mapped_column(String(256), nullable=False)
     input_payload: Mapped[dict[str, object]] = mapped_column("input", JSONB, nullable=False)
     output_payload: Mapped[dict[str, object] | None] = mapped_column(
@@ -353,6 +658,16 @@ class AgentToolExecutionRecord(Base):
         JSONB,
         nullable=True,
     )
-    error_code: Mapped[str] = mapped_column(String(128), default="", nullable=False)
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    error_code: Mapped[str] = mapped_column(
+        String(128),
+        default="",
+        server_default=EMPTY_STRING,
+        nullable=False,
+    )
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        server_default=CURRENT_TIMESTAMP,
+        nullable=False,
+    )
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

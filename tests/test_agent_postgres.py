@@ -10,7 +10,7 @@ from alembic import command
 from alembic.config import Config
 from dotenv import find_dotenv, load_dotenv
 from sqlalchemy import select, text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from cywl_oopz.features.agent.catalog import ReloadableProviderCatalog
@@ -106,6 +106,87 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
             "pause_music",
             "resume_music",
         ]
+
+        async with test_engine.begin() as connection:
+            defaulted = (
+                (
+                    await connection.execute(
+                        text(
+                            """
+                        INSERT INTO channel_settings (area_id, channel_id)
+                        VALUES ('default-area', 'default-channel')
+                        RETURNING
+                            id,
+                            chat_enabled,
+                            enabled_agent_tools,
+                            created_at,
+                            updated_at
+                        """
+                        )
+                    )
+                )
+                .mappings()
+                .one()
+            )
+        assert defaulted["id"] is not None
+        assert defaulted["chat_enabled"] is False
+        assert defaulted["enabled_agent_tools"] == [
+            "get_agent_status",
+            "get_channel_settings",
+            "react_to_message",
+            "search_music_catalog",
+            "enqueue_music",
+            "get_music_queue",
+            "skip_music",
+            "pause_music",
+            "resume_music",
+        ]
+        assert defaulted["created_at"] == defaulted["updated_at"]
+
+        async with test_engine.begin() as connection:
+            triggered_updated_at = await connection.scalar(
+                text(
+                    """
+                    UPDATE channel_settings
+                    SET chat_enabled = true
+                    WHERE id = :id
+                    RETURNING updated_at
+                    """
+                ),
+                {"id": defaulted["id"]},
+            )
+            enum_columns = (
+                (
+                    await connection.execute(
+                        text(
+                            """
+                        SELECT table_name, column_name, udt_name
+                        FROM information_schema.columns
+                        WHERE table_schema = current_schema()
+                          AND (table_name, column_name) IN (
+                            ('agent_runs', 'status'),
+                            ('agent_runs', 'stop_reason'),
+                            ('agent_runs', 'selection_source'),
+                            ('agent_tool_executions', 'effect'),
+                            ('agent_tool_executions', 'status')
+                          )
+                        """
+                        )
+                    )
+                )
+                .mappings()
+                .all()
+            )
+        assert triggered_updated_at > defaulted["updated_at"]
+        assert {
+            (row["table_name"], row["column_name"]): row["udt_name"] for row in enum_columns
+        } == {
+            ("agent_runs", "status"): "agent_run_status",
+            ("agent_runs", "stop_reason"): "agent_stop_reason",
+            ("agent_runs", "selection_source"): "model_selection_source",
+            ("agent_tool_executions", "effect"): "tool_effect",
+            ("agent_tool_executions", "status"): "tool_execution_status",
+        }
 
         provider_id = uuid4()
         application_model_id = uuid4()
@@ -252,6 +333,12 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
         assert completed is not None
         assert completed.status == AgentRunStatus.SUCCEEDED
         assert completed.stop_reason == AgentStopReason.COMPLETED
+        with pytest.raises(DBAPIError):
+            async with test_engine.begin() as connection:
+                await connection.execute(
+                    text("UPDATE agent_runs SET status = 'unknown' WHERE id = :id"),
+                    {"id": run_id},
+                )
 
         message_repository = SqlAlchemyAgentMessageRepository(sessions)
         await message_repository.append(
