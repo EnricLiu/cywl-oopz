@@ -57,6 +57,9 @@ def test_app_settings_use_the_injected_oopz_credentials(monkeypatch) -> None:
         "browser_snapshot",
         "browser_wait",
         "browser_close",
+        "browser_click",
+        "browser_fill",
+        "browser_press",
     )
     assert settings.agent.summary_enabled is True
     assert settings.agent.memory_enabled_by_default is True

@@ -30,6 +30,9 @@ DEFAULT_AGENT_TOOLS = (
     "browser_snapshot",
     "browser_wait",
     "browser_close",
+    "browser_click",
+    "browser_fill",
+    "browser_press",
 )
 
 MUSIC_AGENT_TOOLS = frozenset(

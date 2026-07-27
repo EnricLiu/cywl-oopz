@@ -492,3 +492,197 @@ class BrowserCloseTool(_BrowserTool):
         except BrowserError as exc:
             self._raise_tool_error(exc)
         return BrowserCloseOutput(closed=closed)
+
+
+class BrowserRefInput(BaseModel):
+    """One element reference from the latest accessibility snapshot."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ref: str = Field(
+        pattern=r"^@e[1-9][0-9]*$",
+        max_length=32,
+        description="最新 browser snapshot 中的 @eN 元素引用",
+    )
+
+
+class BrowserFillInput(BrowserRefInput):
+    """A snapshot ref and bounded plain text to place in it."""
+
+    text: str = Field(
+        min_length=1,
+        max_length=1000,
+        description="要填写的普通文本；不会自动提交表单",
+    )
+
+
+class BrowserPressInput(BaseModel):
+    """A deliberately small set of ordinary keyboard operations."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    key: Literal[
+        "Enter",
+        "Tab",
+        "Escape",
+        "Space",
+        "Backspace",
+        "ArrowUp",
+        "ArrowDown",
+        "ArrowLeft",
+        "ArrowRight",
+        "Control+a",
+    ]
+
+
+class BrowserActionOutput(BaseModel):
+    """Provider-confirmed result for a non-navigating browser action."""
+
+    title: str
+    url: str
+    applied: bool
+
+
+class BrowserClickTool(_BrowserTool):
+    """Click one element ref without automatic retry."""
+
+    def __init__(
+        self,
+        browser: BrowserSessionManager,
+        *,
+        timeout_seconds: float,
+        max_output_characters: int,
+    ) -> None:
+        super().__init__(browser)
+        self._descriptor = ToolDescriptor(
+            name="browser_click",
+            display_name="点击网页元素",
+            description=(
+                "点击最新 browser snapshot 中的 @eN 元素，并返回页面变化后的新快照；"
+                "页面变化后不要复用旧 ref。"
+            ),
+            input_model=BrowserRefInput,
+            output_model=BrowserPageOutput,
+            effect=ToolEffect.WRITE,
+            timeout_seconds=timeout_seconds,
+            max_retries=0,
+            max_output_characters=max_output_characters,
+            concurrency_safe=False,
+            idempotent=True,
+        )
+
+    @property
+    def descriptor(self) -> ToolDescriptor:
+        return self._descriptor
+
+    async def execute(
+        self,
+        context: ToolExecutionContext,
+        arguments: BaseModel,
+    ) -> BaseModel:
+        values = BrowserRefInput.model_validate(arguments)
+        try:
+            page = await self._browser.click(
+                context.identity.conversation,
+                values.ref,
+            )
+        except BrowserError as exc:
+            self._raise_tool_error(exc)
+        return BrowserPageOutput.from_page(page)
+
+
+class BrowserFillTool(_BrowserTool):
+    """Fill one element ref without submitting or automatic retry."""
+
+    def __init__(
+        self,
+        browser: BrowserSessionManager,
+        *,
+        timeout_seconds: float,
+        max_output_characters: int,
+    ) -> None:
+        super().__init__(browser)
+        self._descriptor = ToolDescriptor(
+            name="browser_fill",
+            display_name="填写网页内容",
+            description=("清空并填写最新 snapshot 中的 @eN 输入框；只填写普通文本，不会自动提交。"),
+            input_model=BrowserFillInput,
+            output_model=BrowserActionOutput,
+            effect=ToolEffect.WRITE,
+            timeout_seconds=timeout_seconds,
+            max_retries=0,
+            max_output_characters=max_output_characters,
+            concurrency_safe=False,
+            idempotent=True,
+        )
+
+    @property
+    def descriptor(self) -> ToolDescriptor:
+        return self._descriptor
+
+    async def execute(
+        self,
+        context: ToolExecutionContext,
+        arguments: BaseModel,
+    ) -> BaseModel:
+        values = BrowserFillInput.model_validate(arguments)
+        try:
+            result = await self._browser.fill(
+                context.identity.conversation,
+                values.ref,
+                values.text,
+            )
+        except BrowserError as exc:
+            self._raise_tool_error(exc)
+        return BrowserActionOutput(
+            title=result.title,
+            url=result.url,
+            applied=result.applied,
+        )
+
+
+class BrowserPressTool(_BrowserTool):
+    """Press one allowed key without automatic retry."""
+
+    def __init__(
+        self,
+        browser: BrowserSessionManager,
+        *,
+        timeout_seconds: float,
+        max_output_characters: int,
+    ) -> None:
+        super().__init__(browser)
+        self._descriptor = ToolDescriptor(
+            name="browser_press",
+            display_name="操作网页按键",
+            description=(
+                "在当前焦点按下一个常用按键，并返回页面变化后的新快照；不会执行任意键序列。"
+            ),
+            input_model=BrowserPressInput,
+            output_model=BrowserPageOutput,
+            effect=ToolEffect.WRITE,
+            timeout_seconds=timeout_seconds,
+            max_retries=0,
+            max_output_characters=max_output_characters,
+            concurrency_safe=False,
+            idempotent=True,
+        )
+
+    @property
+    def descriptor(self) -> ToolDescriptor:
+        return self._descriptor
+
+    async def execute(
+        self,
+        context: ToolExecutionContext,
+        arguments: BaseModel,
+    ) -> BaseModel:
+        values = BrowserPressInput.model_validate(arguments)
+        try:
+            page = await self._browser.press(
+                context.identity.conversation,
+                values.key,
+            )
+        except BrowserError as exc:
+            self._raise_tool_error(exc)
+        return BrowserPageOutput.from_page(page)

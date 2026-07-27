@@ -58,6 +58,15 @@ class BrowserPageView:
     truncated: bool
 
 
+@dataclass(frozen=True, slots=True)
+class BrowserActionResult:
+    """Provider-confirmed result for an action that does not navigate."""
+
+    title: str
+    url: str
+    applied: bool
+
+
 class BrowserWaitKind(StrEnum):
     """Supported high-level wait conditions."""
 

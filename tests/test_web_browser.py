@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import re
+import shutil
 from collections import defaultdict
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
@@ -18,8 +22,14 @@ from cywl_oopz.features.agent.tools.models import (
     ToolExecutionError,
 )
 from cywl_oopz.features.agent.tools.web import (
+    BrowserClickTool,
     BrowserCloseTool,
+    BrowserFillInput,
+    BrowserFillTool,
     BrowserOpenTool,
+    BrowserPressInput,
+    BrowserPressTool,
+    BrowserRefInput,
     BrowserSnapshotInput,
     BrowserSnapshotTool,
     BrowserWaitInput,
@@ -32,10 +42,12 @@ from cywl_oopz.features.web.browser import BrowserSessionManager, PublicWebUrlPo
 from cywl_oopz.features.web.errors import (
     BrowserContractError,
     BrowserNavigationError,
+    BrowserStaleRefError,
     BrowserUnavailableError,
     WebPageUrlError,
 )
 from cywl_oopz.features.web.models import (
+    BrowserActionResult,
     BrowserDocument,
     BrowserPageView,
     BrowserWaitKind,
@@ -153,6 +165,24 @@ class FakeBrowserGateway:
         del request
         return await self._page(session, "https://current.example")
 
+    async def click(self, session: str, ref: str) -> BrowserPageView:
+        del ref
+        return await self._page(session, "https://clicked.example")
+
+    async def fill(
+        self,
+        session: str,
+        ref: str,
+        text: str,
+    ) -> BrowserActionResult:
+        del ref, text
+        self.sessions.append(session)
+        return BrowserActionResult("Filled", "https://current.example", True)
+
+    async def press(self, session: str, key: str) -> BrowserPageView:
+        del key
+        return await self._page(session, "https://pressed.example")
+
     async def close_session(self, session: str) -> None:
         self.closed.append(session)
 
@@ -166,6 +196,7 @@ class FakeMcpToolset:
         *,
         missing: str | None = None,
         error_method: str | None = None,
+        error_message: str = "navigation failed",
     ) -> None:
         self.server_info = SimpleNamespace(name="agent-browser", version="0.33.0")
         self.calls: list[tuple[str, dict[str, Any]]] = []
@@ -173,6 +204,7 @@ class FakeMcpToolset:
         self.exited = 0
         self.missing = missing
         self.error_method = error_method
+        self.error_message = error_message
 
     async def __aenter__(self) -> FakeMcpToolset:
         self.entered += 1
@@ -212,7 +244,7 @@ class FakeMcpToolset:
     ) -> dict[str, Any]:
         self.calls.append((name, arguments))
         if name == self.error_method:
-            raise ToolError("navigation failed")
+            raise ToolError(self.error_message)
         values: dict[str, dict[str, Any]] = {
             "agent_browser_open": {"title": "Opened", "url": "https://example.com/"},
             "agent_browser_read": {
@@ -264,6 +296,34 @@ def test_public_web_url_policy_accepts_ordinary_http_urls() -> None:
 
     assert policy.validate(" https://example.com/path?q=one ") == ("https://example.com/path?q=one")
     assert policy.validate("http://8.8.8.8/") == "http://8.8.8.8/"
+
+
+def test_agent_browser_action_policy_defaults_to_deny() -> None:
+    policy_path = (
+        Path(__file__).parents[1]
+        / "src"
+        / "cywl_oopz"
+        / "integrations"
+        / "web"
+        / "agent_browser_action_policy.json"
+    )
+    policy = json.loads(policy_path.read_text())
+
+    assert policy["default"] == "deny"
+    assert {"navigate", "read", "snapshot", "click", "fill", "press", "wait"}.issubset(
+        policy["allow"]
+    )
+    assert {"url", "title", "close"}.issubset(policy["allow"])
+    assert {
+        "eval",
+        "upload",
+        "download",
+        "auth",
+        "cookies",
+        "storage",
+        "network",
+        "screenshot",
+    }.isdisjoint(policy["allow"])
 
 
 @pytest.mark.asyncio
@@ -322,6 +382,21 @@ async def test_browser_sessions_prune_idle_state_and_retry_one_broken_transport(
 
 
 @pytest.mark.asyncio
+async def test_browser_writes_are_never_retried_after_transport_failure() -> None:
+    gateway = FakeBrowserGateway()
+    manager = BrowserSessionManager(web_settings(), gateway)
+    key = conversation("writer")
+    await manager.open(key, "https://example.com")
+    gateway.fail_once = True
+
+    with pytest.raises(BrowserUnavailableError):
+        await manager.click(key, "@e1")
+
+    assert gateway.restarted == 0
+    await manager.aclose()
+
+
+@pytest.mark.asyncio
 async def test_agent_browser_gateway_validates_contract_and_bounds_outputs() -> None:
     toolset = FakeMcpToolset()
     gateway = AgentBrowserMcpGateway(
@@ -339,6 +414,9 @@ async def test_agent_browser_gateway_validates_contract_and_bounds_outputs() -> 
         "session",
         BrowserWaitRequest(BrowserWaitKind.TEXT, "ready", 2),
     )
+    clicked = await gateway.click("session", "@e1")
+    filled = await gateway.fill("session", "@e2", "hello")
+    pressed = await gateway.press("session", "Enter")
     await gateway.close_session("session")
     await gateway.aclose()
 
@@ -348,8 +426,11 @@ async def test_agent_browser_gateway_validates_contract_and_bounds_outputs() -> 
     assert len(document.content) == 20
     assert page.truncated is True
     assert waited.url == "https://example.com/"
+    assert clicked.url == "https://example.com/"
+    assert filled.applied is True
+    assert pressed.url == "https://example.com/"
     assert all("extraArgs" not in arguments for _, arguments in toolset.calls)
-    assert [name for name, _ in toolset.calls].count("agent_browser_snapshot") == 2
+    assert [name for name, _ in toolset.calls].count("agent_browser_snapshot") == 4
 
 
 @pytest.mark.asyncio
@@ -371,6 +452,18 @@ async def test_agent_browser_gateway_rejects_contract_drift_and_maps_errors() ->
     with pytest.raises(BrowserNavigationError):
         await failing.open("session", "https://example.com")
     await failing.aclose()
+
+    stale_toolset = FakeMcpToolset(
+        error_method="agent_browser_click",
+        error_message="Element ref @e9 not found; stale ref",
+    )
+    stale = AgentBrowserMcpGateway(
+        web_settings(),
+        toolset_factory=lambda: stale_toolset,
+    )
+    with pytest.raises(BrowserStaleRefError):
+        await stale.click("session", "@e9")
+    await stale.aclose()
 
 
 @pytest.mark.asyncio
@@ -396,6 +489,18 @@ async def test_browser_agent_tools_use_trusted_conversation_and_stable_errors() 
         context,
         BrowserWaitInput(text="ready"),
     )
+    clicked = await BrowserClickTool(manager, **options).execute(
+        context,
+        BrowserRefInput(ref="@e1"),
+    )
+    filled = await BrowserFillTool(manager, **options).execute(
+        context,
+        BrowserFillInput(ref="@e2", text="hello"),
+    )
+    pressed = await BrowserPressTool(manager, **options).execute(
+        context,
+        BrowserPressInput(key="Enter"),
+    )
     closed = await BrowserCloseTool(manager, **options).execute(
         context,
         EmptyToolInput(),
@@ -405,6 +510,9 @@ async def test_browser_agent_tools_use_trusted_conversation_and_stable_errors() 
     assert opened.snapshot == "snapshot"
     assert snapshot.url == "https://current.example"
     assert waited.title == "Title"
+    assert clicked.url == "https://clicked.example"
+    assert filled.applied is True
+    assert pressed.url == "https://pressed.example"
     assert closed.closed is True
     assert set(gateway.sessions) == {manager.session_name(context.identity.conversation)}
 
@@ -415,6 +523,10 @@ async def test_browser_agent_tools_use_trusted_conversation_and_stable_errors() 
         )
     with pytest.raises(ValidationError, match="exactly one"):
         BrowserWaitInput(text="ready", selector="@e1")
+    with pytest.raises(ValidationError):
+        BrowserRefInput(ref="button.submit")
+    with pytest.raises(ValidationError):
+        BrowserPressInput(key="Control+Alt+Delete")
     await manager.aclose()
 
 
@@ -422,7 +534,7 @@ async def test_browser_agent_tools_use_trusted_conversation_and_stable_errors() 
 async def test_real_agent_browser_gateway_when_explicitly_enabled() -> None:
     if os.getenv("CYWL_RUN_AGENT_BROWSER_MCP_TESTS") != "1":
         pytest.skip("set CYWL_RUN_AGENT_BROWSER_MCP_TESTS=1 for live browser adapter")
-    gateway = AgentBrowserMcpGateway(web_settings(CYWL_WEB_BROWSER_DAEMON_IDLE_SECONDS="2"))
+    gateway = AgentBrowserMcpGateway(web_settings(CYWL_WEB_BROWSER_DAEMON_IDLE_SECONDS="10"))
     session = "cywl-live-adapter"
     try:
         await gateway.start()
@@ -446,3 +558,90 @@ async def test_real_agent_browser_gateway_when_explicitly_enabled() -> None:
     finally:
         await gateway.close_session(session)
         await gateway.aclose()
+
+
+@pytest.mark.asyncio
+async def test_real_agent_browser_interactions_when_explicitly_enabled() -> None:
+    if os.getenv("CYWL_RUN_AGENT_BROWSER_MCP_TESTS") != "1":
+        pytest.skip("set CYWL_RUN_AGENT_BROWSER_MCP_TESTS=1 for live interactions")
+    gateway = AgentBrowserMcpGateway(
+        web_settings(
+            CYWL_WEB_BROWSER_INTERACTION_ENABLED="true",
+            CYWL_WEB_BROWSER_DAEMON_IDLE_SECONDS="10",
+        )
+    )
+    session = "cywl-live-actions"
+    session_open = False
+    try:
+        await gateway.start()
+        dynamic = await gateway.open(
+            session,
+            "https://www.selenium.dev/selenium/web/dynamic.html",
+        )
+        session_open = True
+        assert "Add a box!" in dynamic.snapshot
+        clicked = await gateway.click(session, "@e1")
+        assert clicked.url.endswith("/selenium/web/dynamic.html")
+        assert "Add a box!" in clicked.snapshot
+
+        wikipedia = await gateway.open(session, "https://www.wikipedia.org")
+        match = re.search(
+            r'searchbox "Search Wikipedia".*?\[ref=(e\d+)\]',
+            wikipedia.snapshot,
+        )
+        assert match is not None
+        filled = await gateway.fill(session, f"@{match.group(1)}", "Hatsune Miku")
+        assert filled.applied is True
+        submitted = await gateway.press(session, "Enter")
+        assert "wikipedia.org" in submitted.url
+        assert "Hatsune" in submitted.url or "Hatsune" in submitted.snapshot
+    finally:
+        if session_open:
+            await gateway.close_session(session)
+        await gateway.aclose()
+
+
+@pytest.mark.asyncio
+async def test_real_action_policy_denies_eval_when_explicitly_enabled() -> None:
+    if os.getenv("CYWL_RUN_AGENT_BROWSER_MCP_TESTS") != "1":
+        pytest.skip("set CYWL_RUN_AGENT_BROWSER_MCP_TESTS=1 for live action policy")
+    executable = shutil.which("agent-browser")
+    assert executable is not None
+    policy_path = (
+        Path(__file__).parents[1]
+        / "src"
+        / "cywl_oopz"
+        / "integrations"
+        / "web"
+        / "agent_browser_action_policy.json"
+    )
+    environment = dict(os.environ)
+    environment.update(
+        {
+            "AGENT_BROWSER_SESSION": "cywl-policy-test",
+            "AGENT_BROWSER_NAMESPACE": "cywl-oopz-policy-test",
+            "AGENT_BROWSER_ACTION_POLICY": str(policy_path),
+            "AGENT_BROWSER_IDLE_TIMEOUT_MS": "2000",
+        }
+    )
+
+    async def command(*arguments: str) -> tuple[int, bytes]:
+        process = await asyncio.create_subprocess_exec(
+            executable,
+            *arguments,
+            "--json",
+            env=environment,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        output, _ = await asyncio.wait_for(process.communicate(), timeout=15)
+        return process.returncode or 0, output
+
+    opened_code, _ = await command("open", "https://example.com")
+    eval_code, eval_output = await command("eval", "1 + 1")
+    closed_code, _ = await command("close")
+
+    assert opened_code == 0
+    assert eval_code != 0
+    assert b"denied by policy" in eval_output
+    assert closed_code == 0

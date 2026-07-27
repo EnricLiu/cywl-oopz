@@ -1,0 +1,18 @@
+{
+  "default": "deny",
+  "allow": [
+    "launch",
+    "navigate",
+    "read",
+    "snapshot",
+    "click",
+    "fill",
+    "press",
+    "wait",
+    "url",
+    "title",
+    "close"
+  ],
+  "deny": [],
+  "confirm": []
+}

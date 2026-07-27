@@ -35,7 +35,11 @@ from cywl_oopz.features.agent.tools.models import (
     ToolExecutionStatus,
 )
 from cywl_oopz.features.agent.tools.web import (
+    BrowserActionOutput,
     BrowserDocumentOutput,
+    BrowserFillInput,
+    BrowserPageOutput,
+    BrowserPressInput,
     SearchWebInput,
     SearchWebOutput,
     WebPageUrlInput,
@@ -220,6 +224,87 @@ class WebResearchRuntime:
                 "url": str(call.arguments["url"]),
                 "content_type": "text/html",
                 "content": "The verified fact appears in the page body.",
+                "truncated": False,
+            }
+        return ToolExecutionResult(
+            call.call_id,
+            call.name,
+            ToolExecutionStatus.SUCCEEDED,
+            output,
+        )
+
+
+class BrowserInteractionRuntime:
+    def __init__(self) -> None:
+        self._descriptors = {
+            "browser_open": ToolDescriptor(
+                name="browser_open",
+                display_name="打开网页",
+                description="Open one public page.",
+                input_model=WebPageUrlInput,
+                output_model=BrowserPageOutput,
+                effect=ToolEffect.READ,
+                timeout_seconds=2,
+                max_output_characters=8000,
+                concurrency_safe=False,
+                idempotent=True,
+            ),
+            "browser_fill": ToolDescriptor(
+                name="browser_fill",
+                display_name="填写网页内容",
+                description="Fill one current page ref.",
+                input_model=BrowserFillInput,
+                output_model=BrowserActionOutput,
+                effect=ToolEffect.WRITE,
+                timeout_seconds=2,
+                max_output_characters=4000,
+                concurrency_safe=False,
+                idempotent=True,
+            ),
+            "browser_press": ToolDescriptor(
+                name="browser_press",
+                display_name="操作网页按键",
+                description="Press one allowed key.",
+                input_model=BrowserPressInput,
+                output_model=BrowserPageOutput,
+                effect=ToolEffect.WRITE,
+                timeout_seconds=2,
+                max_output_characters=8000,
+                concurrency_safe=False,
+                idempotent=True,
+            ),
+        }
+        self.calls: list[ToolCall] = []
+
+    def descriptors(self, names: tuple[str, ...]) -> tuple[ToolDescriptor, ...]:
+        return tuple(self._descriptors[name] for name in sorted(names))
+
+    async def execute(
+        self,
+        call: ToolCall,
+        context: ToolExecutionContext,
+    ) -> ToolExecutionResult:
+        del context
+        self.calls.append(call)
+        if call.name == "browser_fill":
+            output: dict[str, object] = {
+                "title": "Search",
+                "url": "https://example.com/search",
+                "applied": True,
+            }
+        else:
+            output = {
+                "title": "Results" if call.name == "browser_press" else "Search",
+                "url": (
+                    "https://example.com/results?q=miku"
+                    if call.name == "browser_press"
+                    else "https://example.com/search"
+                ),
+                "snapshot": (
+                    '- link "Hatsune Miku" [ref=e1]'
+                    if call.name == "browser_press"
+                    else '- searchbox "Search" [ref=e2]'
+                ),
                 "truncated": False,
             }
         return ToolExecutionResult(
@@ -464,6 +549,77 @@ async def test_engine_can_search_read_source_then_return_verified_citation() -> 
     ]
     assert "https://example.com/source" in result.output
     assert result.tool_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_engine_can_open_fill_press_and_use_fresh_snapshot() -> None:
+    async def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        del info
+        tool_returns = [
+            part
+            for message in messages
+            if isinstance(message, ModelRequest)
+            for part in message.parts
+            if isinstance(part, ToolReturnPart)
+        ]
+        if len(tool_returns) == 0:
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        "browser_open",
+                        {"url": "https://example.com/search"},
+                        "call-open",
+                    )
+                ]
+            )
+        if len(tool_returns) == 1:
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        "browser_fill",
+                        {"ref": "@e2", "text": "miku"},
+                        "call-fill",
+                    )
+                ]
+            )
+        if len(tool_returns) == 2:
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        "browser_press",
+                        {"key": "Enter"},
+                        "call-press",
+                    )
+                ]
+            )
+        return ModelResponse(
+            parts=[TextPart("页面已更新，并从最新快照看到 Hatsune Miku 搜索结果。")]
+        )
+
+    runtime = BrowserInteractionRuntime()
+    engine = PydanticAiAgentEngine(
+        StaticRegistry(streaming_model(respond)),
+        runtime,
+    )
+
+    result = await engine.run(
+        request(
+            enabled_tools=(
+                "browser_open",
+                "browser_fill",
+                "browser_press",
+            )
+        )
+    )
+
+    assert result.stop_reason is AgentStopReason.COMPLETED
+    assert [call.name for call in runtime.calls] == [
+        "browser_open",
+        "browser_fill",
+        "browser_press",
+    ]
+    assert "最新快照" in result.output
+    assert result.tool_calls == 3
 
 
 @pytest.mark.asyncio

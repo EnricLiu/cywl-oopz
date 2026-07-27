@@ -7,6 +7,7 @@ import logging
 import os
 import shutil
 from collections.abc import Callable, Mapping
+from pathlib import Path
 from typing import Any
 
 from fastmcp.exceptions import ToolError
@@ -22,6 +23,7 @@ from cywl_oopz.features.web.errors import (
     BrowserUnavailableError,
 )
 from cywl_oopz.features.web.models import (
+    BrowserActionResult,
     BrowserDocument,
     BrowserPageView,
     BrowserWaitKind,
@@ -152,6 +154,9 @@ class AgentBrowserMcpGateway:
                     self._settings.browser_daemon_idle_seconds * 1_000
                 ),
                 "AGENT_BROWSER_NO_AUTO_DIALOG": "false",
+                "AGENT_BROWSER_ACTION_POLICY": str(
+                    Path(__file__).with_name("agent_browser_action_policy.json")
+                ),
             }
         )
         transport = StdioTransport(
@@ -267,6 +272,58 @@ class AgentBrowserMcpGateway:
             method = "agent_browser_wait_ms"
             arguments.update(ms=int(request.value))
         await self._call(method, arguments)
+        return await self.snapshot(session, interactive=True, compact=True)
+
+    async def click(self, session: str, ref: str) -> BrowserPageView:
+        """Click a current accessibility ref and return a fresh snapshot."""
+        await self._call(
+            "agent_browser_click",
+            {
+                "selector": ref,
+                "newTab": False,
+                **self._common(session),
+            },
+        )
+        return await self.snapshot(session, interactive=True, compact=True)
+
+    async def fill(
+        self,
+        session: str,
+        ref: str,
+        text: str,
+    ) -> BrowserActionResult:
+        """Fill one field and return provider-confirmed current page identity."""
+        await self._call(
+            "agent_browser_fill",
+            {
+                "selector": ref,
+                "text": text,
+                **self._common(session),
+            },
+        )
+        url_data = await self._call(
+            "agent_browser_get_url",
+            self._common(session),
+        )
+        title_data = await self._call(
+            "agent_browser_get_title",
+            self._common(session),
+        )
+        return BrowserActionResult(
+            title=str(title_data.get("title", "")).strip(),
+            url=str(url_data.get("url", "")),
+            applied=True,
+        )
+
+    async def press(self, session: str, key: str) -> BrowserPageView:
+        """Press one project-validated key and return a fresh snapshot."""
+        await self._call(
+            "agent_browser_press",
+            {
+                "key": key,
+                **self._common(session),
+            },
+        )
         return await self.snapshot(session, interactive=True, compact=True)
 
     async def close_session(self, session: str) -> None:

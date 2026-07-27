@@ -16,7 +16,12 @@ from cywl_oopz.features.chat.models import ConversationKey
 from cywl_oopz.settings import WebToolsSettings
 
 from .errors import BrowserError, BrowserUnavailableError, WebPageUrlError
-from .models import BrowserDocument, BrowserPageView, BrowserWaitRequest
+from .models import (
+    BrowserActionResult,
+    BrowserDocument,
+    BrowserPageView,
+    BrowserWaitRequest,
+)
 from .ports import BrowserGateway
 
 _Result = TypeVar("_Result")
@@ -140,6 +145,35 @@ class BrowserSessionManager:
             lambda session: self._gateway.wait(session, request),
         )
 
+    async def click(self, key: ConversationKey, ref: str) -> BrowserPageView:
+        """Click a fresh snapshot ref without retrying the write."""
+        return await self._run(
+            key,
+            lambda session: self._gateway.click(session, ref),
+            retry_unavailable=False,
+        )
+
+    async def fill(
+        self,
+        key: ConversationKey,
+        ref: str,
+        text: str,
+    ) -> BrowserActionResult:
+        """Fill a fresh snapshot ref without retrying the write."""
+        return await self._run(
+            key,
+            lambda session: self._gateway.fill(session, ref, text),
+            retry_unavailable=False,
+        )
+
+    async def press(self, key: ConversationKey, key_name: str) -> BrowserPageView:
+        """Press an allowed key without retrying the write."""
+        return await self._run(
+            key,
+            lambda session: self._gateway.press(session, key_name),
+            retry_unavailable=False,
+        )
+
     async def close(self, key: ConversationKey) -> bool:
         """Close and forget one conversation session."""
         async with self._sessions_lock:
@@ -155,6 +189,8 @@ class BrowserSessionManager:
         self,
         key: ConversationKey,
         operation: Callable[[str], Awaitable[_Result]],
+        *,
+        retry_unavailable: bool = True,
     ) -> _Result:
         if self._closed:
             raise BrowserUnavailableError
@@ -165,11 +201,16 @@ class BrowserSessionManager:
                 try:
                     result = await operation(entry.name)
                 except BrowserUnavailableError:
+                    if not retry_unavailable:
+                        raise
                     await self._gateway.restart()
                     if entry.started and entry.current_url:
                         await self._gateway.open(entry.name, entry.current_url)
                     result = await operation(entry.name)
-                if isinstance(result, (BrowserDocument, BrowserPageView)):
+                if isinstance(
+                    result,
+                    (BrowserActionResult, BrowserDocument, BrowserPageView),
+                ):
                     entry.current_url = result.url
                     entry.started = True
                 entry.last_used = self._clock()

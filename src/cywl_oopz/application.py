@@ -55,8 +55,11 @@ from .features.agent.tools.music import (
 from .features.agent.tools.policy import ToolAvailabilityService, ToolPolicy
 from .features.agent.tools.registry import ToolRegistry
 from .features.agent.tools.web import (
+    BrowserClickTool,
     BrowserCloseTool,
+    BrowserFillTool,
     BrowserOpenTool,
+    BrowserPressTool,
     BrowserSnapshotTool,
     BrowserWaitTool,
     ReadWebPageTool,
@@ -223,6 +226,14 @@ class BotApplication:
                     BrowserCloseTool(self.browser, **browser_tool_options),
                 )
             )
+            if settings.web.browser_interaction_enabled:
+                agent_tools.extend(
+                    (
+                        BrowserClickTool(self.browser, **browser_tool_options),
+                        BrowserFillTool(self.browser, **browser_tool_options),
+                        BrowserPressTool(self.browser, **browser_tool_options),
+                    )
+                )
         else:
             enabled_agent_tools = tuple(
                 name

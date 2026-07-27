@@ -131,6 +131,13 @@ async def test_composition_root_registers_browser_read_tools_only_when_enabled(
             CYWL_WEB_BROWSER_ENABLED="true",
         )
     )
+    interactions = BotApplication(
+        settings(
+            "agent",
+            CYWL_WEB_BROWSER_ENABLED="true",
+            CYWL_WEB_BROWSER_INTERACTION_ENABLED="true",
+        )
+    )
 
     browser_tools = {
         "read_web_page",
@@ -148,9 +155,16 @@ async def test_composition_root_registers_browser_read_tools_only_when_enabled(
         "browser_fill",
         "browser_press",
     }.isdisjoint(enabled.agent_tool_registry.names)
+    assert {
+        "browser_click",
+        "browser_fill",
+        "browser_press",
+    }.issubset(interactions.agent_tool_registry.names)
 
     await enabled.browser.aclose()
-    for application in (disabled, enabled):
+    assert interactions.browser is not None
+    await interactions.browser.aclose()
+    for application in (disabled, enabled, interactions):
         await application.agent_engine.aclose()
         await application._provider.aclose()
         await application.database.close()

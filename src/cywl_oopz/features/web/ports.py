@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Protocol
 
 from .models import (
+    BrowserActionResult,
     BrowserDocument,
     BrowserPageView,
     BrowserWaitRequest,
@@ -53,6 +54,20 @@ class BrowserGateway(Protocol):
         request: BrowserWaitRequest,
     ) -> BrowserPageView:
         """Wait for a supported condition and return fresh page state."""
+
+    async def click(self, session: str, ref: str) -> BrowserPageView:
+        """Click one current snapshot ref and return fresh page state."""
+
+    async def fill(
+        self,
+        session: str,
+        ref: str,
+        text: str,
+    ) -> BrowserActionResult:
+        """Fill one current snapshot ref without submitting the page."""
+
+    async def press(self, session: str, key: str) -> BrowserPageView:
+        """Press one allowed key and return fresh page state."""
 
     async def close_session(self, session: str) -> None:
         """Close one project-owned browser session."""
