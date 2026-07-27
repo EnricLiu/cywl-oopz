@@ -472,40 +472,60 @@ async def test_browser_agent_tools_use_trusted_conversation_and_stable_errors() 
     manager = BrowserSessionManager(web_settings(), gateway)
     options = {"timeout_seconds": 5, "max_output_characters": 20_000}
     context = tool_context()
+    tools = (
+        ReadWebPageTool(manager, **options),
+        BrowserOpenTool(manager, **options),
+        BrowserSnapshotTool(manager, **options),
+        BrowserWaitTool(manager, **options),
+        BrowserCloseTool(manager, **options),
+        BrowserClickTool(manager, **options),
+        BrowserFillTool(manager, **options),
+        BrowserPressTool(manager, **options),
+    )
 
-    document = await ReadWebPageTool(manager, **options).execute(
+    document = await tools[0].execute(
         context,
         WebPageUrlInput(url="https://example.com/article"),
     )
-    opened = await BrowserOpenTool(manager, **options).execute(
+    opened = await tools[1].execute(
         context,
         WebPageUrlInput(url="https://example.com/app"),
     )
-    snapshot = await BrowserSnapshotTool(manager, **options).execute(
+    snapshot = await tools[2].execute(
         context,
         BrowserSnapshotInput(),
     )
-    waited = await BrowserWaitTool(manager, **options).execute(
+    waited = await tools[3].execute(
         context,
         BrowserWaitInput(text="ready"),
     )
-    clicked = await BrowserClickTool(manager, **options).execute(
+    clicked = await tools[5].execute(
         context,
         BrowserRefInput(ref="@e1"),
     )
-    filled = await BrowserFillTool(manager, **options).execute(
+    filled = await tools[6].execute(
         context,
         BrowserFillInput(ref="@e2", text="hello"),
     )
-    pressed = await BrowserPressTool(manager, **options).execute(
+    pressed = await tools[7].execute(
         context,
         BrowserPressInput(key="Enter"),
     )
-    closed = await BrowserCloseTool(manager, **options).execute(
+    closed = await tools[4].execute(
         context,
         EmptyToolInput(),
     )
 
+    assert [tool.descriptor.display_name for tool in tools] == [
+        "读取网页正文",
+        "打开交互网页",
+        "刷新网页状态",
+        "等待网页响应",
+        "关闭浏览器",
+        "点击网页元素",
+        "填写网页输入框",
+        "按下网页按键",
+    ]
     assert document.url == "https://example.com/article"
     assert opened.snapshot == "snapshot"
     assert snapshot.url == "https://current.example"

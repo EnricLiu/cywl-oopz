@@ -16,7 +16,10 @@ from cywl_oopz.integrations.oopz.editable_messages import (
     EditableMessageRef,
     MessageAddress,
 )
-from cywl_oopz.integrations.oopz.message_renderer import OopzMessageRenderer
+from cywl_oopz.integrations.oopz.message_renderer import (
+    OopzMessageRenderer,
+    oopz_units,
+)
 
 
 class FakeClock:
@@ -111,6 +114,57 @@ async def test_many_text_deltas_coalesce_into_one_serial_terminal_edit() -> None
     assert 1 <= len(gateway.edits) <= 3
     assert gateway.edits[-1] == "🎵 **CYWL**\n最终回答"
     assert gateway.max_active_edits == 1
+    assert session.state.terminal is True
+
+
+@pytest.mark.asyncio
+async def test_web_research_loop_uses_one_bounded_message_and_safe_stage_names() -> None:
+    gateway = FakeGateway()
+    session = await opened_session(gateway)
+
+    await session.emit(ConversationProgressEvent(ProgressKind.THINKING))
+    await session.emit(
+        ConversationProgressEvent(
+            ProgressKind.TOOL_STARTED,
+            call_id="search-secret-id",
+            tool_name="search_web",
+            tool_display_name="搜索公开网页",
+        )
+    )
+    await session.emit(
+        ConversationProgressEvent(
+            ProgressKind.TOOL_SUCCEEDED,
+            call_id="search-secret-id",
+            tool_name="search_web",
+            tool_display_name="搜索公开网页",
+        )
+    )
+    await session.emit(
+        ConversationProgressEvent(
+            ProgressKind.TOOL_STARTED,
+            call_id="read-secret-id",
+            tool_name="read_web_page",
+            tool_display_name="读取网页正文",
+        )
+    )
+    async with asyncio.timeout(1):
+        while not any("读取网页正文" in snapshot for snapshot in gateway.edits):
+            await asyncio.sleep(0)
+
+    answer = "已核实的正文。" * 500 + "\n来源：Example 官方文档（https://example.com/docs/current）"
+    await session.complete(ChatResponse(answer, "provider/model"))
+    await session.aclose()
+
+    snapshots = gateway.created + gateway.edits
+    assert len(gateway.created) == 1
+    assert any("搜索公开网页" in snapshot for snapshot in gateway.edits)
+    assert any("读取网页正文" in snapshot for snapshot in gateway.edits)
+    assert all(oopz_units(snapshot) <= 1950 for snapshot in snapshots)
+    assert all("secret-id" not in snapshot for snapshot in snapshots)
+    assert all("search_web" not in snapshot for snapshot in snapshots)
+    assert all("read_web_page" not in snapshot for snapshot in snapshots)
+    assert gateway.edits[-1].startswith("🎵 **CYWL**")
+    assert gateway.edits[-1].endswith("https://example.com/docs/current）")
     assert session.state.terminal is True
 
 

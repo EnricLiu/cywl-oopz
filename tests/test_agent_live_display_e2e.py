@@ -29,7 +29,7 @@ from cywl_oopz.integrations.oopz.editable_messages import (
     MessageAddress,
     OopzEditableMessageGateway,
 )
-from cywl_oopz.integrations.oopz.message_renderer import OopzMessageRenderer
+from cywl_oopz.integrations.oopz.message_renderer import OopzMessageRenderer, oopz_units
 from cywl_oopz.settings import AgentMode, AppSettings
 from cywl_oopz.storage.models import ChannelSettingsRecord
 
@@ -360,6 +360,57 @@ async def test_live_provider_timeout_replaces_the_original_display_message() -> 
         assert len(harness.gateway.created) == 1
         assert len(displayed) == 1
         assert "模型响应超时" in (displayed[0].text or displayed[0].content)
+    finally:
+        await harness.aclose()
+
+
+@pytest.mark.asyncio
+async def test_live_long_terminal_is_folded_in_the_original_display_message() -> None:
+    if not _live_enabled():
+        pytest.skip("set CYWL_RUN_LIVE_AGENT_DISPLAY_TESTS=1 to run the live display E2E test")
+
+    class LongAnswerService:
+        enabled = True
+
+        async def ask(self, *args: object, **kwargs: object) -> ChatResponse:
+            del args
+            progress = kwargs["progress"]
+            await progress.emit(ConversationProgressEvent(ProgressKind.ACCEPTED))
+            await progress.emit(
+                ConversationProgressEvent(
+                    ProgressKind.TOOL_STARTED,
+                    call_id="live-web-search",
+                    tool_name="search_web",
+                    tool_display_name="搜索公开网页",
+                )
+            )
+            await progress.emit(
+                ConversationProgressEvent(
+                    ProgressKind.TOOL_SUCCEEDED,
+                    call_id="live-web-search",
+                    tool_name="search_web",
+                    tool_display_name="搜索公开网页",
+                )
+            )
+            return ChatResponse(
+                "已核实的正文。" * 500
+                + "\n来源：Example 官方文档（https://example.com/docs/current）",
+                "simulated/model",
+            )
+
+    harness = await LiveAgentDisplayHarness.create()
+    try:
+        await harness.start()
+        await harness.run_with(LongAnswerService(), "模拟超长联网回答")
+
+        displayed = await harness.displayed_messages()
+        assert len(harness.gateway.created) == 1
+        assert len(displayed) == 1
+        terminal = displayed[0].text or displayed[0].content
+        assert terminal.startswith("🎵 **CYWL**")
+        assert terminal.endswith("https://example.com/docs/current）")
+        assert "因 OOPZ 长度限制已折叠" in terminal
+        assert oopz_units(terminal) <= 1950
     finally:
         await harness.aclose()
 

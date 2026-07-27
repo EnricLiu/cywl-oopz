@@ -197,6 +197,7 @@ async def test_search_web_tool_returns_bounded_model_shape_and_stable_error() ->
         SearchWebInput(query="  latest   topic ", time_range="d"),
     )
 
+    assert tool.descriptor.display_name == "搜索公开网页"
     assert output.model_dump() == {
         "query": "latest topic",
         "results": (
