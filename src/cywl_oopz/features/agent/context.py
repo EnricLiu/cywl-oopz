@@ -7,6 +7,7 @@ import logging
 from typing import Protocol
 
 from cywl_oopz.core.errors import DatabaseError
+from cywl_oopz.core.observability import opaque_ref
 from cywl_oopz.settings import AgentSettings
 
 from .models import AgentIdentity, AgentMessage, AgentThread
@@ -69,8 +70,11 @@ class AgentContextBuilder:
         if self._memory is not None:
             try:
                 memory_text = await self._memory.context_text(identity.person_id)
-            except DatabaseError:
-                logger.exception("Failed to load optional Agent memory context")
+            except DatabaseError as exc:
+                logger.warning(
+                    "Failed to load optional Agent memory context: error=%s",
+                    type(exc).__name__,
+                )
                 memory_text = ""
             if memory_text:
                 context.append(
@@ -91,7 +95,23 @@ class AgentContextBuilder:
             limit=self._settings.max_history_messages,
             after_sequence=thread.summary_through_sequence,
         )
-        context.extend(self.trim_history(history))
+        retained = self.trim_history(history)
+        context.extend(retained)
+        logger.debug(
+            "Agent context built: thread=%s conversation=%s summary=%s memory=%s "
+            "history_loaded=%s history_retained=%s",
+            thread.id,
+            opaque_ref(
+                identity.conversation.scope,
+                identity.conversation.area_id,
+                identity.conversation.channel_id,
+                identity.conversation.person_id,
+            ),
+            bool(thread.summary.strip()),
+            self._memory is not None,
+            len(history),
+            len(retained),
+        )
         return tuple(context)
 
     def trim_history(

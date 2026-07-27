@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import ipaddress
+import logging
 import time
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
@@ -23,6 +24,8 @@ from .models import (
     BrowserWaitRequest,
 )
 from .ports import BrowserGateway, BrowserProgressObserver
+
+logger = logging.getLogger(__name__)
 
 _Result = TypeVar("_Result")
 
@@ -99,7 +102,9 @@ class BrowserSessionManager:
 
     async def start(self) -> None:
         """Start and validate the shared MCP provider."""
+        logger.info("Starting browser session manager")
         await self._gateway.start()
+        logger.info("Browser session manager started")
 
     async def read(
         self,
@@ -110,6 +115,11 @@ class BrowserSessionManager:
     ) -> BrowserDocument:
         """Read a validated public URL in this conversation's isolated session."""
         validated_url = self._url_policy.validate(url)
+        logger.info(
+            "Browser page read requested: session=%s host=%s",
+            self.session_name(key),
+            self._host(validated_url),
+        )
         return await self._run(
             key,
             lambda session: self._gateway.read(
@@ -128,6 +138,11 @@ class BrowserSessionManager:
     ) -> BrowserPageView:
         """Navigate the conversation's session to a validated public URL."""
         validated_url = self._url_policy.validate(url)
+        logger.info(
+            "Browser navigation requested: session=%s host=%s",
+            self.session_name(key),
+            self._host(validated_url),
+        )
         return await self._run(
             key,
             lambda session: self._gateway.open(
@@ -146,6 +161,7 @@ class BrowserSessionManager:
         progress: BrowserProgressObserver | None = None,
     ) -> BrowserPageView:
         """Inspect the current page without accepting a model-controlled session."""
+        logger.debug("Browser snapshot requested: session=%s", self.session_name(key))
         return await self._run(
             key,
             lambda session: self._gateway.snapshot(
@@ -164,6 +180,9 @@ class BrowserSessionManager:
         progress: BrowserProgressObserver | None = None,
     ) -> BrowserPageView:
         """Wait in the current page and always return a fresh snapshot."""
+        logger.debug(
+            "Browser wait requested: session=%s kind=%s", self.session_name(key), request.kind.value
+        )
         return await self._run(
             key,
             lambda session: self._gateway.wait(
@@ -181,6 +200,7 @@ class BrowserSessionManager:
         progress: BrowserProgressObserver | None = None,
     ) -> BrowserPageView:
         """Click a fresh snapshot ref without retrying the write."""
+        logger.info("Browser click requested: session=%s", self.session_name(key))
         return await self._run(
             key,
             lambda session: self._gateway.click(
@@ -200,6 +220,11 @@ class BrowserSessionManager:
         progress: BrowserProgressObserver | None = None,
     ) -> BrowserActionResult:
         """Fill a fresh snapshot ref without retrying the write."""
+        logger.info(
+            "Browser fill requested: session=%s text_characters=%s",
+            self.session_name(key),
+            len(text),
+        )
         return await self._run(
             key,
             lambda session: self._gateway.fill(
@@ -219,6 +244,9 @@ class BrowserSessionManager:
         progress: BrowserProgressObserver | None = None,
     ) -> BrowserPageView:
         """Press an allowed key without retrying the write."""
+        logger.info(
+            "Browser key press requested: session=%s key=%s", self.session_name(key), key_name
+        )
         return await self._run(
             key,
             lambda session: self._gateway.press(
@@ -235,6 +263,7 @@ class BrowserSessionManager:
             entry = self._sessions.pop(key, None)
         if entry is None:
             return False
+        logger.info("Closing browser session: session=%s", entry.name)
         async with entry.lock:
             async with self._operation_slots:
                 await self._gateway.close_session(entry.name)
@@ -257,7 +286,14 @@ class BrowserSessionManager:
                     result = await operation(entry.name)
                 except BrowserUnavailableError:
                     if not retry_unavailable:
+                        logger.warning(
+                            "Browser operation unavailable without retry: session=%s", entry.name
+                        )
                         raise
+                    logger.warning(
+                        "Restarting browser transport after unavailable operation: session=%s",
+                        entry.name,
+                    )
                     await self._gateway.restart()
                     if entry.started and entry.current_url:
                         await self._gateway.open(entry.name, entry.current_url)
@@ -269,6 +305,7 @@ class BrowserSessionManager:
                     entry.current_url = result.url
                     entry.started = True
                 entry.last_used = self._clock()
+                logger.debug("Browser operation completed: session=%s", entry.name)
                 return result
 
     async def _session_for(self, key: ConversationKey) -> _BrowserSession:
@@ -280,6 +317,7 @@ class BrowserSessionManager:
                     last_used=self._clock(),
                 )
                 self._sessions[key] = entry
+                logger.debug("Created browser session: session=%s", entry.name)
             return entry
 
     async def _prune_idle(self) -> None:
@@ -290,6 +328,7 @@ class BrowserSessionManager:
                 if entry.last_used <= cutoff and not entry.lock.locked():
                     expired.append(self._sessions.pop(key))
         for entry in expired:
+            logger.info("Pruning idle browser session: session=%s", entry.name)
             async with self._operation_slots:
                 with suppress(BrowserError):
                     await self._gateway.close_session(entry.name)
@@ -314,4 +353,12 @@ class BrowserSessionManager:
                 async with self._operation_slots:
                     with suppress(BrowserError):
                         await self._gateway.close_session(entry.name)
+        logger.info("Closing browser transport: sessions=%s", len(entries))
         await self._gateway.aclose()
+
+    @staticmethod
+    def _host(url: str) -> str:
+        try:
+            return urlsplit(url).netloc or "unknown"
+        except ValueError:
+            return "invalid"

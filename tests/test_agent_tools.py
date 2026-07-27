@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import cast
@@ -306,6 +307,27 @@ async def test_executor_preserves_expected_tool_error_code() -> None:
 
     assert result.status is ToolExecutionStatus.FAILED
     assert result.error_code == "voice_channel_required"
+
+
+@pytest.mark.asyncio
+async def test_executor_logs_failure_context_without_arguments(caplog) -> None:
+    executor = ToolExecutor(
+        ToolRegistry((RecordingTool(),)),
+        ToolPolicy(),
+        InMemoryExecutionRepository(),
+    )
+    context = tool_context("double")
+    caplog.set_level(logging.INFO, logger="cywl_oopz.features.agent.tools.executor")
+
+    result = await executor.execute(
+        ToolCall("call-invalid", "double", {"value": "argument-secret"}),
+        context,
+    )
+
+    assert result.error_code == "invalid_arguments"
+    messages = "\n".join(caplog.messages)
+    assert "Rejected Agent tool arguments" in messages
+    assert "argument-secret" not in messages
 
 
 @pytest.mark.asyncio

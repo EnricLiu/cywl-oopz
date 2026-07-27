@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -10,6 +11,8 @@ from uuid import UUID
 
 from .models import AgentModelRef, LlmModel, LlmProvider, ModelCapability
 from .ports import ProviderCatalogAdminRepository, ProviderCatalogRepository
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,12 +174,18 @@ class ReloadableProviderCatalog:
     async def reload(self) -> ProviderCatalog:
         """Load and validate a replacement before publishing it."""
         async with self._reload_lock:
+            logger.debug("Reloading Agent provider catalog")
             providers, models = await asyncio.gather(
                 self._repository.load_providers(),
                 self._repository.load_models(),
             )
             replacement = ProviderCatalog.build(providers, models)
             self._catalog = replacement
+            logger.info(
+                "Agent provider catalog reloaded: providers=%s models=%s",
+                len(providers),
+                len(models),
+            )
             return replacement
 
 
@@ -200,5 +209,10 @@ class ProviderCatalogAdminService:
         if any(model.provider_id != provider.id for model in models):
             raise ValueError("All registered models must belong to the provider")
         ProviderCatalog.build((provider,), models)
+        logger.info(
+            "Registering Agent provider bundle: provider=%s models=%s",
+            provider.alias,
+            len(models),
+        )
         await self._repository.upsert_provider_bundle(provider, models)
         return await self._catalog.reload()

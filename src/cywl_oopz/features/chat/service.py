@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
+import time
 from datetime import UTC, datetime, timedelta
 
 from cywl_oopz.core.errors import AuthorizationError, FeatureDisabledError, ProviderError
 from cywl_oopz.core.health import HealthRegistry, HealthState
+from cywl_oopz.core.observability import exception_kind, opaque_ref
 from cywl_oopz.settings import ChatSettings
 
 from .history import HistoryTrimmer
@@ -25,6 +28,8 @@ from .provider import ChatProvider
 from .rate_limit import RateLimitService
 from .repository import ConversationRepository
 from .streaming import StreamResponseAssembler
+
+logger = logging.getLogger(__name__)
 
 
 class ChatService:
@@ -71,6 +76,14 @@ class ChatService:
         if not content:
             raise ValueError("Chat prompt must not be empty")
         self._history.validate_input(content)
+        started_at = time.perf_counter()
+        conversation = self._conversation_ref(key)
+        logger.info(
+            "Chat request received: conversation=%s prompt_characters=%s streaming=%s",
+            conversation,
+            len(content),
+            self._settings.stream_responses,
+        )
         await emit_progress(progress, ConversationProgressEvent(ProgressKind.ACCEPTED))
 
         async with self._locks.hold(key):
@@ -90,6 +103,12 @@ class ChatService:
                     user_id=key.person_id,
                     timeout_seconds=self._settings.request_timeout_seconds,
                 )
+                logger.debug(
+                    "Chat provider request started: conversation=%s model=%s history_messages=%s",
+                    conversation,
+                    model,
+                    len(request_history),
+                )
                 response = await self._request_response(request)
                 persisted_history = self._history.trim(
                     request_history + (ChatMessage(ChatRole.ASSISTANT, response.content),)
@@ -102,6 +121,15 @@ class ChatService:
                         expires_at=now + timedelta(seconds=self._settings.session_ttl_seconds),
                     )
                 )
+                logger.info(
+                    "Chat request completed: conversation=%s model=%s elapsed_seconds=%.3f "
+                    "input_tokens=%s output_tokens=%s",
+                    conversation,
+                    response.model,
+                    time.perf_counter() - started_at,
+                    response.input_tokens,
+                    response.output_tokens,
+                )
                 return response
 
     async def clear(self, key: ConversationKey) -> None:
@@ -109,6 +137,7 @@ class ChatService:
         self._ensure_enabled()
         async with self._locks.hold(key):
             await self._repository.delete(key)
+        logger.info("Chat conversation cleared: conversation=%s", self._conversation_ref(key))
 
     async def select_model(self, key: ConversationKey, model: str) -> str:
         """Persist an allow-listed model choice for an explicitly allowed person."""
@@ -130,6 +159,9 @@ class ChatService:
                     expires_at=now + timedelta(seconds=self._settings.session_ttl_seconds),
                 )
             )
+        logger.info(
+            "Chat model selected: conversation=%s model=%s", self._conversation_ref(key), choice
+        )
         return choice
 
     async def status(self, key: ConversationKey) -> ChatStatus:
@@ -168,8 +200,13 @@ class ChatService:
                 )
             else:
                 response = await self._provider.complete(request)
-        except ProviderError:
+        except ProviderError as exc:
             self._mark_provider_health(HealthState.DEGRADED, "request failed")
+            logger.warning(
+                "Chat provider request failed: model=%s error=%s",
+                request.model,
+                exception_kind(exc),
+            )
             raise
         else:
             self._mark_provider_health(HealthState.HEALTHY, "last request succeeded")
@@ -182,3 +219,7 @@ class ChatService:
     def _mark_provider_health(self, state: HealthState, detail: str) -> None:
         if self._health is not None:
             self._health.mark("llm", state, detail)
+
+    @staticmethod
+    def _conversation_ref(key: ConversationKey) -> str:
+        return opaque_ref(key.scope, key.area_id, key.channel_id, key.person_id)

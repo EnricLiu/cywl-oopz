@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Protocol
 
 from sqlalchemy import select
@@ -12,6 +13,8 @@ from cywl_oopz.core.errors import DatabaseError
 from cywl_oopz.storage.models import ConversationSessionRecord
 
 from .models import ChatMessage, ConversationKey, ConversationSession
+
+logger = logging.getLogger(__name__)
 
 
 class ConversationRepository(Protocol):
@@ -40,6 +43,7 @@ class SqlAlchemyConversationRepository:
                 record = await session.scalar(self._query(key))
                 return None if record is None else self._to_domain(record)
         except SQLAlchemyError as exc:
+            logger.warning("Failed to load chat conversation session: error=%s", type(exc).__name__)
             raise DatabaseError("Failed to load conversation session") from exc
 
     async def save(self, chat_session: ConversationSession) -> None:
@@ -55,6 +59,7 @@ class SqlAlchemyConversationRepository:
                     record.messages = [message.to_payload() for message in chat_session.messages]
                     record.expires_at = chat_session.expires_at
         except SQLAlchemyError as exc:
+            logger.warning("Failed to save chat conversation session: error=%s", type(exc).__name__)
             raise DatabaseError("Failed to save conversation session") from exc
 
     async def delete(self, key: ConversationKey) -> None:
@@ -66,6 +71,9 @@ class SqlAlchemyConversationRepository:
                     if record is not None:
                         await session.delete(record)
         except SQLAlchemyError as exc:
+            logger.warning(
+                "Failed to delete chat conversation session: error=%s", type(exc).__name__
+            )
             raise DatabaseError("Failed to delete conversation session") from exc
 
     @staticmethod

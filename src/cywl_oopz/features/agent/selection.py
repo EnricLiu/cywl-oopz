@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import logging
+
 from cywl_oopz.core.errors import ProviderSelectionError
+from cywl_oopz.core.observability import opaque_ref
 from cywl_oopz.features.chat.models import ConversationKey
 
 from .catalog import ReloadableProviderCatalog
 from .models import ModelCapability, ModelSelection, ModelSelectionSource
 from .ports import ModelSelectionRepository
+
+logger = logging.getLogger(__name__)
 
 
 class ProviderSelectionService:
@@ -47,7 +52,20 @@ class ProviderSelectionService:
                 in {ModelSelectionSource.THREAD, ModelSelectionSource.USER},
             )
             if model is not None:
+                logger.debug(
+                    "Agent model resolved: conversation=%s source=%s model=%s/%s skipped=%s",
+                    opaque_ref(key.scope, key.area_id, key.channel_id, key.person_id),
+                    source.value,
+                    model.provider_alias,
+                    model.model_alias,
+                    len(skipped),
+                )
                 return ModelSelection(model, source, tuple(skipped))
             skipped.append(source)
 
+        logger.warning(
+            "No Agent model satisfies selection: conversation=%s required_capabilities=%s",
+            opaque_ref(key.scope, key.area_id, key.channel_id, key.person_id),
+            ",".join(sorted(capability.value for capability in required_capabilities)) or "none",
+        )
         raise ProviderSelectionError("No enabled LLM model satisfies this Agent run")

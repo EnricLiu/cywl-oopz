@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -9,7 +10,10 @@ from types import MappingProxyType
 from typing import Any, Protocol
 from uuid import UUID, uuid4
 
+from cywl_oopz.core.observability import opaque_ref
 from cywl_oopz.settings import AgentSettings
+
+logger = logging.getLogger(__name__)
 
 
 class MemoryDisabledError(ValueError):
@@ -107,6 +111,9 @@ class MemoryService:
 
     async def set_enabled(self, person_id: str, enabled: bool) -> None:
         await self._repository.set_preference(person_id, enabled)
+        logger.info(
+            "Agent memory preference updated: user=%s enabled=%s", opaque_ref(person_id), enabled
+        )
 
     async def remember(self, person_id: str, text: str) -> MemoryItem:
         content = text.strip()
@@ -115,9 +122,16 @@ class MemoryService:
         if len(content) > self._settings.memory_max_item_characters:
             raise MemoryItemTooLongError("Memory text is too long")
         if not await self.is_enabled(person_id):
+            logger.info(
+                "Agent memory write rejected because disabled: user=%s", opaque_ref(person_id)
+            )
             raise MemoryDisabledError("Long-term memory is disabled")
         now = datetime.now(UTC)
         if await self._repository.count_active(person_id, now) >= self._settings.memory_max_items:
+            logger.info(
+                "Agent memory write rejected because capacity reached: user=%s",
+                opaque_ref(person_id),
+            )
             raise MemoryCapacityError("Long-term memory item limit reached")
         item = MemoryItem(
             id=uuid4(),
@@ -132,6 +146,7 @@ class MemoryService:
             expires_at=now + timedelta(days=self._settings.memory_default_ttl_days),
         )
         await self._repository.add(item)
+        logger.info("Agent memory item created: user=%s item=%s", opaque_ref(person_id), item.id)
         return item
 
     async def list(self, person_id: str) -> tuple[MemoryItem, ...]:
@@ -142,10 +157,19 @@ class MemoryService:
         )
 
     async def forget(self, person_id: str, item_id: UUID) -> bool:
-        return await self._repository.delete(person_id, item_id)
+        deleted = await self._repository.delete(person_id, item_id)
+        logger.info(
+            "Agent memory item delete requested: user=%s item=%s deleted=%s",
+            opaque_ref(person_id),
+            item_id,
+            deleted,
+        )
+        return deleted
 
     async def forget_all(self, person_id: str) -> int:
-        return await self._repository.delete_all(person_id)
+        deleted = await self._repository.delete_all(person_id)
+        logger.info("Agent memory cleared: user=%s count=%s", opaque_ref(person_id), deleted)
+        return deleted
 
     async def context_text(self, person_id: str) -> str:
         """Project enabled items into a bounded, explicitly untrusted text block."""
@@ -169,4 +193,9 @@ class MemoryService:
             text = item.content.get("text")
             if isinstance(text, str) and text.strip():
                 lines.append(f"- {text.strip()}")
+        logger.debug(
+            "Agent memory projected into context: user=%s items=%s",
+            opaque_ref(person_id),
+            len(lines),
+        )
         return "\n".join(lines)

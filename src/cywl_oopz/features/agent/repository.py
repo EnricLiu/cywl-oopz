@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from dataclasses import asdict
 from datetime import UTC, datetime
@@ -45,6 +46,8 @@ from .tools.models import (
     ToolExecutionStatus,
 )
 
+logger = logging.getLogger(__name__)
+
 
 class SqlAlchemyProviderCatalogRepository:
     """Load provider/model configuration through short-lived ORM sessions."""
@@ -59,7 +62,7 @@ class SqlAlchemyProviderCatalogRepository:
                 records = (await session.scalars(select(LlmProviderRecord))).all()
                 return tuple(self._provider_to_domain(record) for record in records)
         except SQLAlchemyError as exc:
-            raise DatabaseError("Failed to load LLM providers") from exc
+            raise _database_error("load LLM providers", exc) from exc
 
     async def load_models(self) -> tuple[LlmModel, ...]:
         """Load configured models and their measured capability snapshots."""
@@ -68,7 +71,7 @@ class SqlAlchemyProviderCatalogRepository:
                 records = (await session.scalars(select(LlmModelRecord))).all()
                 return tuple(self._model_to_domain(record) for record in records)
         except SQLAlchemyError as exc:
-            raise DatabaseError("Failed to load LLM models") from exc
+            raise _database_error("load LLM models", exc) from exc
 
     async def upsert_provider_bundle(
         self,
@@ -114,7 +117,7 @@ class SqlAlchemyProviderCatalogRepository:
                     for model_record, model in records:
                         model_record.fallback_model_id = model.fallback_model_id
         except SQLAlchemyError as exc:
-            raise DatabaseError("Failed to save LLM provider configuration") from exc
+            raise _database_error("save LLM provider configuration", exc) from exc
 
     @staticmethod
     def _provider_to_domain(record: LlmProviderRecord) -> LlmProvider:
@@ -223,7 +226,7 @@ class SqlAlchemyModelSelectionRepository:
                     application_model_id=application_model_id,
                 )
         except SQLAlchemyError as exc:
-            raise DatabaseError("Failed to load LLM model selection") from exc
+            raise _database_error("load LLM model selection", exc) from exc
 
     async def set_user_model(self, person_id: str, model_id: UUID) -> None:
         """Insert or update one user's default model."""
@@ -241,7 +244,7 @@ class SqlAlchemyModelSelectionRepository:
                     else:
                         record.preferred_model_id = model_id
         except SQLAlchemyError as exc:
-            raise DatabaseError("Failed to save user LLM preference") from exc
+            raise _database_error("save user LLM preference", exc) from exc
 
 
 class SqlAlchemyAgentThreadRepository:
@@ -257,7 +260,7 @@ class SqlAlchemyAgentThreadRepository:
                 record = await session.scalar(self._query(key))
                 return None if record is None else self._to_domain(record)
         except SQLAlchemyError as exc:
-            raise DatabaseError("Failed to load Agent thread") from exc
+            raise _database_error("load Agent thread", exc) from exc
 
     async def add(self, thread: AgentThread) -> None:
         """Create a thread in one short transaction."""
@@ -280,7 +283,7 @@ class SqlAlchemyAgentThreadRepository:
                         )
                     )
         except SQLAlchemyError as exc:
-            raise DatabaseError("Failed to create Agent thread") from exc
+            raise _database_error("create Agent thread", exc) from exc
 
     async def set_selected_model(self, key: ConversationKey, model_id: UUID) -> None:
         """Pin an existing thread without changing its history."""
@@ -303,7 +306,7 @@ class SqlAlchemyAgentThreadRepository:
                     if result.rowcount != 1:
                         raise DatabaseError("Agent thread does not exist")
         except SQLAlchemyError as exc:
-            raise DatabaseError("Failed to select Agent thread model") from exc
+            raise _database_error("select Agent thread model", exc) from exc
 
     async def refresh_expiry(self, thread_id: UUID, expires_at: datetime) -> None:
         """Extend a thread TTL after a completed interaction."""
@@ -316,7 +319,7 @@ class SqlAlchemyAgentThreadRepository:
                         .values(expires_at=expires_at)
                     )
         except SQLAlchemyError as exc:
-            raise DatabaseError("Failed to refresh Agent thread") from exc
+            raise _database_error("refresh Agent thread", exc) from exc
 
     async def save_summary(
         self,
@@ -348,7 +351,7 @@ class SqlAlchemyAgentThreadRepository:
                     )
                     return result.rowcount == 1
         except SQLAlchemyError as exc:
-            raise DatabaseError("Failed to save Agent thread summary") from exc
+            raise _database_error("save Agent thread summary", exc) from exc
 
     async def delete(self, key: ConversationKey) -> None:
         """Delete one thread and let database cascades remove runtime records."""
@@ -359,7 +362,7 @@ class SqlAlchemyAgentThreadRepository:
                     if record is not None:
                         await session.delete(record)
         except SQLAlchemyError as exc:
-            raise DatabaseError("Failed to delete Agent thread") from exc
+            raise _database_error("delete Agent thread", exc) from exc
 
     @staticmethod
     def _query(key: ConversationKey):
@@ -423,7 +426,7 @@ class SqlAlchemyAgentRunRepository:
                         )
                     )
         except SQLAlchemyError as exc:
-            raise DatabaseError("Failed to create Agent run") from exc
+            raise _database_error("create Agent run", exc) from exc
 
     async def finish(
         self,
@@ -458,7 +461,7 @@ class SqlAlchemyAgentRunRepository:
                     if result.rowcount != 1:
                         raise DatabaseError("Agent run is missing or already finished")
         except SQLAlchemyError as exc:
-            raise DatabaseError("Failed to finish Agent run") from exc
+            raise _database_error("finish Agent run", exc) from exc
 
     async def abandon_stale(self, before: datetime, now: datetime) -> int:
         """Mark runs with an expired heartbeat abandoned after process restart."""
@@ -480,7 +483,7 @@ class SqlAlchemyAgentRunRepository:
                     )
                     return result.rowcount
         except SQLAlchemyError as exc:
-            raise DatabaseError("Failed to abandon stale Agent runs") from exc
+            raise _database_error("abandon stale Agent runs", exc) from exc
 
 
 class SqlAlchemyAgentMessageRepository:
@@ -521,7 +524,7 @@ class SqlAlchemyAgentMessageRepository:
                 records.reverse()
                 return tuple(self._to_domain(record) for record in records)
         except SQLAlchemyError as exc:
-            raise DatabaseError("Failed to load Agent messages") from exc
+            raise _database_error("load Agent messages", exc) from exc
 
     async def load_after(
         self,
@@ -556,7 +559,7 @@ class SqlAlchemyAgentMessageRepository:
                 ).all()
                 return tuple(self._to_domain(record) for record in records)
         except SQLAlchemyError as exc:
-            raise DatabaseError("Failed to load Agent summary messages") from exc
+            raise _database_error("load Agent summary messages", exc) from exc
 
     async def append(
         self,
@@ -599,7 +602,7 @@ class SqlAlchemyAgentMessageRepository:
                             )
                         )
         except SQLAlchemyError as exc:
-            raise DatabaseError("Failed to append Agent messages") from exc
+            raise _database_error("append Agent messages", exc) from exc
 
     async def count(self, thread_id: UUID) -> int:
         """Count one thread without reading message content."""
@@ -622,7 +625,7 @@ class SqlAlchemyAgentMessageRepository:
                     or 0
                 )
         except SQLAlchemyError as exc:
-            raise DatabaseError("Failed to count Agent messages") from exc
+            raise _database_error("count Agent messages", exc) from exc
 
     @staticmethod
     def _to_domain(record: AgentMessageRecord) -> AgentMessage:
@@ -682,7 +685,7 @@ class SqlAlchemyToolExecutionRepository:
                         raise DatabaseError("Tool execution claim was not persisted")
                     return ToolExecutionClaim(self._to_domain(record), created=False)
         except SQLAlchemyError as exc:
-            raise DatabaseError("Failed to claim Agent tool execution") from exc
+            raise _database_error("claim Agent tool execution", exc) from exc
 
     async def finish(
         self,
@@ -726,7 +729,7 @@ class SqlAlchemyToolExecutionRepository:
                         raise DatabaseError("Finished tool execution is missing")
                     return self._to_domain(record)
         except SQLAlchemyError as exc:
-            raise DatabaseError("Failed to finish Agent tool execution") from exc
+            raise _database_error("finish Agent tool execution", exc) from exc
 
     @staticmethod
     def _to_domain(record: AgentToolExecutionRecord) -> ToolExecution:
@@ -752,3 +755,13 @@ class SqlAlchemyToolExecutionRepository:
 def _mapping(value: object) -> Mapping[str, Any]:
     """Copy a JSON object while rejecting non-object persisted values."""
     return value if isinstance(value, dict) else {}
+
+
+def _database_error(operation: str, error: SQLAlchemyError) -> DatabaseError:
+    """Report a static operation name without rendering SQL or record data."""
+    logger.warning(
+        "Agent persistence failed: operation=%s error=%s",
+        operation,
+        type(error).__name__,
+    )
+    return DatabaseError(f"Failed to {operation}")

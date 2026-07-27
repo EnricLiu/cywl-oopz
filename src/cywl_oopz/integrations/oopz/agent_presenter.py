@@ -9,6 +9,7 @@ from typing import Any
 
 from oopz_sdk.exceptions import OopzConnectionError, OopzRateLimitError
 
+from cywl_oopz.core.observability import opaque_ref
 from cywl_oopz.features.agent.display import (
     AgentLoopReducer,
     AgentLoopViewState,
@@ -116,6 +117,7 @@ class OopzAgentLoopMessage:
     async def open(self) -> None:
         """Create the placeholder before model work begins."""
         snapshot = self._renderer.render(self._state)
+        logger.debug("Opening OOPZ Agent display: address=%s", self._address_ref())
         self._message = await self._gateway.create_reply(self._address, snapshot)
         self._last_snapshot = snapshot
         self._next_edit_at = self._now() + self._edit_interval
@@ -123,6 +125,7 @@ class OopzAgentLoopMessage:
             self._run_worker(),
             name="oopz-agent-loop-message",
         )
+        logger.info("Opened OOPZ Agent display: address=%s", self._address_ref())
 
     async def emit(self, event: ConversationProgressEvent) -> None:
         async with self._state_lock:
@@ -197,6 +200,10 @@ class OopzAgentLoopMessage:
         await self._terminal_done.wait()
         if self._terminal_delivery_failed and not self._fallback_attempted:
             self._fallback_attempted = True
+            logger.warning(
+                "Attempting OOPZ Agent terminal fallback: address=%s",
+                self._address_ref(),
+            )
             try:
                 await self._gateway.create_reply(
                     self._address,
@@ -206,6 +213,11 @@ class OopzAgentLoopMessage:
                 logger.warning(
                     "OOPZ Agent terminal fallback failed: %s",
                     type(exc).__name__,
+                )
+            else:
+                logger.info(
+                    "Delivered OOPZ Agent terminal fallback: address=%s",
+                    self._address_ref(),
                 )
 
     async def _run_worker(self) -> None:
@@ -285,6 +297,10 @@ class OopzAgentLoopMessage:
             self._pending_delta_characters = 0
             self._mark_flushed(revision, state.terminal)
             if state.terminal:
+                logger.info(
+                    "Delivered terminal OOPZ Agent display: address=%s",
+                    self._address_ref(),
+                )
                 return
             if self._dirty_revision > revision:
                 self._wake.set()
@@ -315,8 +331,22 @@ class OopzAgentLoopMessage:
     def _disable(self, terminal: bool) -> None:
         self._disabled = True
         self._terminal_delivery_failed = terminal
+        logger.warning(
+            "Disabled OOPZ Agent display: address=%s terminal=%s",
+            self._address_ref(),
+            terminal,
+        )
         if terminal:
             self._terminal_done.set()
+
+    def _address_ref(self) -> str:
+        return opaque_ref(
+            self._address.scope,
+            self._address.area_id,
+            self._address.channel_id,
+            self._address.target_person_id,
+            self._address.reference_message_id,
+        )
 
     def _now(self) -> float:
         if self._clock is not None:

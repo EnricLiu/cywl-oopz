@@ -15,6 +15,7 @@ from .commands.builtin import HelpCommand, PingCommand, StatusCommand
 from .commands.router import CommandRouter
 from .core.errors import ConfigurationError, DatabaseError
 from .core.health import HealthRegistry, HealthState
+from .core.observability import exception_kind, opaque_ref
 from .core.tasks import TaskSupervisor
 from .features.agent.catalog import ProviderCatalogAdminService, ReloadableProviderCatalog
 from .features.agent.commands import MemoryCommand, ProviderCommand, ToolsCommand
@@ -245,7 +246,14 @@ class BotApplication:
                 name for name in enabled_agent_tools if name not in WEB_BROWSER_INTERACTION_TOOLS
             )
         self.agent_tool_registry = ToolRegistry(agent_tools)
-        logger.info(self.agent_tool_registry)
+        logger.info(
+            "Application configured: agent=%s tools=%s music=%s web_search=%s browser=%s",
+            settings.agent.enabled,
+            len(self.agent_tool_registry.names),
+            self.music is not None,
+            self.web_search is not None,
+            self.browser is not None,
+        )
         self.agent_tool_availability = ToolAvailabilityService(
             self.agent_tool_registry,
             channel_settings,
@@ -348,6 +356,7 @@ class BotApplication:
 
     async def run(self) -> None:
         """Start the database check before entering the long-running OOPZ client."""
+        logger.info("Application startup started")
         try:
             try:
                 await self.database.start()
@@ -355,17 +364,22 @@ class BotApplication:
                 self.health.mark("database", HealthState.DEGRADED, "connection check failed")
                 raise
             self.health.mark("database", HealthState.HEALTHY, "connection check passed")
+            logger.info("Database health check passed")
             if self.browser is not None:
                 try:
                     await self.browser.start()
-                except BrowserError:
-                    logger.exception("Failed to initialize agent-browser MCP")
+                except BrowserError as exc:
+                    logger.warning(
+                        "Agent-browser MCP initialization failed: error=%s",
+                        exception_kind(exc),
+                    )
                     self.health.mark(
                         "browser",
                         HealthState.DEGRADED,
                         "MCP initialization failed",
                     )
                 else:
+                    logger.info("Agent-browser MCP contract validated")
                     self.health.mark(
                         "browser",
                         HealthState.HEALTHY,
@@ -374,6 +388,11 @@ class BotApplication:
             if self.settings.agent.enabled:
                 await self.agent_models.reload()
                 catalog = self.agent_catalog.snapshot
+                logger.info(
+                    "Agent provider catalog loaded: providers=%s models=%s",
+                    len(catalog.providers),
+                    len(catalog.models),
+                )
                 default_model_id = catalog.application_default_model_id()
                 default_model = (
                     catalog.resolve(
@@ -393,12 +412,16 @@ class BotApplication:
                         "Agent mode requires an enabled application-default LLM model"
                     )
                 now = datetime.now(UTC)
-                await self.agent_runs.abandon_stale(
+                abandoned = await self.agent_runs.abandon_stale(
                     now - timedelta(seconds=self.settings.agent.stale_run_after_seconds),
                     now,
                 )
+                if abandoned:
+                    logger.warning("Marked stale Agent runs abandoned: count=%s", abandoned)
+            logger.info("Starting OOPZ client")
             await self.bot.run()
         finally:
+            logger.info("Application shutdown started")
             await self.chat_tasks.close()
             await self.agent_summary_tasks.close()
             if self.music is not None:
@@ -410,6 +433,7 @@ class BotApplication:
             await self.agent_engine.aclose()
             await self._provider.aclose()
             await self.database.close()
+            logger.info("Application shutdown completed")
 
     async def _on_ready(self, _: EventContext) -> None:
         self.health.mark("oopz", HealthState.HEALTHY, "websocket connected")
@@ -417,23 +441,45 @@ class BotApplication:
 
     async def _on_message(self, message: OopzMessage, context: EventContext) -> None:
         """Route short commands inline and own slow LLM work in supervised tasks."""
-        logger.debug(f"[OnMessage] Bot: new message: {message}")
+        logger.debug(
+            "Received OOPZ message: scope=%s conversation=%s has_text=%s",
+            "private" if getattr(context.event, "is_private", False) else "channel",
+            self._message_reference(message, context),
+            bool(message.plain_text or message.text or message.content),
+        )
         command = self.commands.parse(message.plain_text or message.text or message.content)
         if command is not None:
+            logger.info(
+                "Dispatching command: name=%s conversation=%s",
+                command.name,
+                self._message_reference(message, context),
+            )
             if command.name == "chat":
                 await self._start_chat_task(context, self.commands.dispatch(message, context))
                 return
             await self.commands.dispatch(message, context)
             return
         if self._mention_handler.matches(message):
+            logger.info(
+                "Dispatching mention chat: conversation=%s",
+                self._message_reference(message, context),
+            )
             await self._start_chat_task(context, self._mention_handler.handle(message, context))
             return
         try:
             ambient_enabled = await self._ambient_handler.matches(message, context)
-        except DatabaseError:
-            logger.exception("Failed to evaluate ambient chat policy")
+        except DatabaseError as exc:
+            logger.warning(
+                "Failed to evaluate ambient chat policy: conversation=%s error=%s",
+                self._message_reference(message, context),
+                exception_kind(exc),
+            )
             return
         if ambient_enabled:
+            logger.info(
+                "Dispatching ambient chat: conversation=%s",
+                self._message_reference(message, context),
+            )
             await self._start_chat_task(context, self._ambient_handler.handle(message, context))
 
     async def _start_chat_task(
@@ -444,9 +490,25 @@ class BotApplication:
         """Register slow work so the SDK receive loop can immediately process later events."""
         try:
             key = ConversationKey.from_oopz_context(context)
-        except ValueError:
+        except ValueError as exc:
             operation.close()
+            logger.warning("Could not start chat task: error=%s", exception_kind(exc))
             await context.reply("无法识别当前对话的位置，请稍后重试。")
             return
         if not self.chat_tasks.start(key, operation):
+            logger.info(
+                "Rejected duplicate chat task: conversation=%s",
+                opaque_ref(key.scope, key.area_id, key.channel_id, key.person_id),
+            )
             await context.reply("当前对话正在生成回复；可使用 !cancel 取消后再试。")
+
+    @staticmethod
+    def _message_reference(message: OopzMessage, context: EventContext) -> str:
+        """Build a stable correlation token without logging OOPZ identifiers or content."""
+        event = context.event
+        return opaque_ref(
+            "private" if getattr(event, "is_private", False) else "channel",
+            getattr(message, "area", ""),
+            getattr(message, "channel", ""),
+            getattr(message, "sender_id", ""),
+        )

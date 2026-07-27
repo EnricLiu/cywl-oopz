@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -16,6 +17,8 @@ from sqlalchemy.ext.asyncio import (
 
 from cywl_oopz.core.errors import DatabaseError
 from cywl_oopz.settings import DatabaseSettings
+
+logger = logging.getLogger(__name__)
 
 
 class Database:
@@ -39,11 +42,16 @@ class Database:
 
     async def start(self) -> None:
         """Verify the pool can execute a minimal, read-only health query."""
+        logger.debug("Running PostgreSQL connection health check")
         try:
             async with self._engine.connect() as connection:
                 await connection.execute(text("SELECT 1"))
         except SQLAlchemyError as exc:
+            logger.warning(
+                "PostgreSQL connection health check failed: error=%s", type(exc).__name__
+            )
             raise DatabaseError("PostgreSQL connection check failed") from exc
+        logger.info("PostgreSQL connection health check completed")
 
     @asynccontextmanager
     async def session(self) -> AsyncIterator[AsyncSession]:
@@ -52,10 +60,12 @@ class Database:
             try:
                 yield session
                 await session.commit()
-            except BaseException:
+            except BaseException as exc:
+                logger.debug("Rolling back database session: error=%s", type(exc).__name__)
                 await session.rollback()
                 raise
 
     async def close(self) -> None:
         """Release all pool connections during shutdown."""
+        logger.info("Closing PostgreSQL engine")
         await self._engine.dispose()

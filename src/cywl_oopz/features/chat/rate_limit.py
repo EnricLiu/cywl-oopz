@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from dataclasses import dataclass
 
 from cywl_oopz.core.errors import RateLimitExceeded
+from cywl_oopz.core.observability import opaque_ref
 from cywl_oopz.settings import ChatSettings
 
 from .models import ConversationKey
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -61,18 +65,43 @@ class RateLimitService:
         async with self._lock:
             retry_after = max(self._counters.user_available_at.get(key.person_id, 0.0) - now, 0.0)
             if retry_after > 0.0:
+                logger.warning(
+                    "Chat request rejected by cooldown: conversation=%s retry_after=%.2f",
+                    self._conversation_ref(key),
+                    retry_after,
+                )
                 raise RateLimitExceeded("user cooldown", retry_after)
             if self._counters.global_requests >= self._settings.max_global_concurrency:
+                logger.warning(
+                    "Chat request rejected by global concurrency: conversation=%s "
+                    "active=%s limit=%s",
+                    self._conversation_ref(key),
+                    self._counters.global_requests,
+                    self._settings.max_global_concurrency,
+                )
                 raise RateLimitExceeded("global concurrency")
             if (
                 self._counters.channel_requests.get(channel_key, 0)
                 >= self._settings.max_channel_concurrency
             ):
+                logger.warning(
+                    "Chat request rejected by channel concurrency: conversation=%s "
+                    "active=%s limit=%s",
+                    self._conversation_ref(key),
+                    self._counters.channel_requests.get(channel_key, 0),
+                    self._settings.max_channel_concurrency,
+                )
                 raise RateLimitExceeded("channel concurrency")
             if (
                 self._counters.user_requests.get(key.person_id, 0)
                 >= self._settings.max_user_concurrency
             ):
+                logger.warning(
+                    "Chat request rejected by user concurrency: conversation=%s active=%s limit=%s",
+                    self._conversation_ref(key),
+                    self._counters.user_requests.get(key.person_id, 0),
+                    self._settings.max_user_concurrency,
+                )
                 raise RateLimitExceeded("user concurrency")
 
             self._counters.global_requests += 1
@@ -81,6 +110,11 @@ class RateLimitService:
             )
             self._counters.user_requests[key.person_id] = (
                 self._counters.user_requests.get(key.person_id, 0) + 1
+            )
+            logger.debug(
+                "Chat rate-limit lease acquired: conversation=%s global_active=%s",
+                self._conversation_ref(key),
+                self._counters.global_requests,
             )
         return RateLimitLease(self, key)
 
@@ -93,6 +127,11 @@ class RateLimitService:
             self._decrement(self._counters.user_requests, key.person_id)
             self._counters.user_available_at[key.person_id] = (
                 time.monotonic() + self._settings.user_cooldown_seconds
+            )
+            logger.debug(
+                "Chat rate-limit lease released: conversation=%s global_active=%s",
+                self._conversation_ref(key),
+                self._counters.global_requests,
             )
 
     async def cooldown_remaining(self, key: ConversationKey) -> float:
@@ -109,3 +148,7 @@ class RateLimitService:
             values.pop(key, None)
         else:
             values[key] = remaining
+
+    @staticmethod
+    def _conversation_ref(key: ConversationKey) -> str:
+        return opaque_ref(key.scope, key.area_id, key.channel_id, key.person_id)

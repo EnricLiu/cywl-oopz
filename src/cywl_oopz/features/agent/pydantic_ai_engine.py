@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -29,6 +30,7 @@ from pydantic_ai.messages import (
 )
 
 from cywl_oopz.core.errors import ProviderError, ProviderResponseError, ProviderTimeoutError
+from cywl_oopz.core.observability import exception_kind
 from cywl_oopz.features.chat.progress import ProgressSink, emit_progress
 
 from .models import AgentMessage, AgentRunRequest, AgentRunResult, AgentStopReason
@@ -36,6 +38,8 @@ from .progress import ConversationToolProgressReporter, PydanticAiProgressMapper
 from .registry import AgentModelRegistry
 from .tools.models import ToolCall, ToolDescriptor, ToolExecutionContext
 from .tools.ports import AgentToolRuntime
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -63,6 +67,16 @@ class PydanticAiAgentEngine:
         progress: ProgressSink | None = None,
     ) -> AgentRunResult:
         """Run an Agent loop with hard wall-clock, model, token, and tool budgets."""
+        logger.info(
+            "Agent engine run started: run=%s model=%s/%s context_messages=%s "
+            "tools=%s timeout_seconds=%s",
+            request.run_id,
+            request.model.provider_alias,
+            request.model.model_alias,
+            len(request.context),
+            len(request.enabled_tools),
+            request.limits.timeout_seconds,
+        )
         model = await self._registry.model(request.model)
         instructions, history = self._map_context(request.context)
         framework_tools, dependencies, descriptors = self._build_tools(request, progress)
@@ -107,6 +121,9 @@ class PydanticAiAgentEngine:
                 if result is None:
                     raise ProviderResponseError("Agent stream ended without a result")
         except TimeoutError as exc:
+            logger.warning(
+                "Agent engine timed out: run=%s error=%s", request.run_id, exception_kind(exc)
+            )
             raise ProviderTimeoutError("Agent run timed out") from exc
         except UsageLimitExceeded as exc:
             message = str(exc)
@@ -123,16 +140,40 @@ class PydanticAiAgentEngine:
                 output="本次对话已达到运行预算，请缩短问题或开始新的对话。",
                 stop_reason=reason,
             )
+            logger.warning(
+                "Agent engine reached usage limit: run=%s reason=%s",
+                request.run_id,
+                reason.value,
+            )
             return exhausted
         except (ModelAPIError, ModelHTTPError) as exc:
+            logger.warning(
+                "Agent model request failed: run=%s error=%s",
+                request.run_id,
+                exception_kind(exc),
+            )
             raise ProviderError("Agent model request failed") from exc
         except (UnexpectedModelBehavior, UserError) as exc:
+            logger.warning(
+                "Agent model response invalid: run=%s error=%s",
+                request.run_id,
+                exception_kind(exc),
+            )
             raise ProviderResponseError("Agent model returned an invalid response") from exc
 
         output = result.output
         if not isinstance(output, str) or not output.strip():
             raise ProviderResponseError("Agent model returned no text")
         usage = result.usage
+        logger.info(
+            "Agent engine run completed: run=%s model_requests=%s tool_calls=%s "
+            "input_tokens=%s output_tokens=%s",
+            request.run_id,
+            usage.requests,
+            usage.tool_calls,
+            usage.input_tokens,
+            usage.output_tokens,
+        )
         return AgentRunResult(
             output=output.strip(),
             stop_reason=AgentStopReason.COMPLETED,
@@ -145,6 +186,7 @@ class PydanticAiAgentEngine:
 
     async def aclose(self) -> None:
         """Close registry-owned clients."""
+        logger.debug("Closing Agent engine")
         await self._registry.aclose()
 
     @staticmethod

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
+
+logger = logging.getLogger(__name__)
 
 
 class HealthState(StrEnum):
@@ -34,12 +37,22 @@ class HealthRegistry:
 
     def mark(self, name: str, state: HealthState, detail: str = "") -> None:
         """Record a status using an intentionally short, non-sensitive detail."""
+        previous = self._checks.get(name)
         self._checks[name] = HealthCheck(
             name=name,
             state=state,
             checked_at=datetime.now(UTC),
             detail=detail,
         )
+        if previous is None or (previous.state, previous.detail) != (state, detail):
+            level = logging.WARNING if state is HealthState.DEGRADED else logging.INFO
+            logger.log(
+                level,
+                "Component health changed: component=%s state=%s detail=%s",
+                name,
+                state.value,
+                detail or "none",
+            )
 
     def snapshot(self) -> tuple[HealthCheck, ...]:
         """Return checks in stable order for a user-facing status response."""

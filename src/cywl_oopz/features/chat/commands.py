@@ -18,6 +18,7 @@ from cywl_oopz.core.errors import (
     ProviderTimeoutError,
     RateLimitExceeded,
 )
+from cywl_oopz.core.observability import opaque_ref
 from cywl_oopz.storage.channel_settings import ChannelSettingsRepository
 
 from .history import ChatInputTooLongError
@@ -69,10 +70,15 @@ class ChatCommandController:
             return "你没有执行此操作的权限。"
         if isinstance(error, ValueError):
             return "命令参数不正确，请使用 !help 查看用法。"
-        logger.exception("Unexpected chat command failure: %s", type(error).__name__)
+        logger.error("Unexpected chat command failure: error=%s", type(error).__name__)
         return "处理请求时出现了问题，请稍后重试。"
 
     async def _reply_error(self, context: EventContext, error: Exception) -> None:
+        logger.warning(
+            "Chat command failed: conversation=%s error=%s",
+            self._conversation_ref(context),
+            type(error).__name__,
+        )
         await context.reply(self._error_message(error))
 
     async def _ask_with_presenter(
@@ -100,6 +106,11 @@ class ChatCommandController:
             await self._show_cancelled(context, presentation)
             raise
         except Exception as exc:
+            logger.warning(
+                "Chat request failed: conversation=%s error=%s",
+                self._conversation_ref(context),
+                type(exc).__name__,
+            )
             message = self._error_message(exc)
             if presentation.owns_message:
                 await presentation.fail(message)
@@ -124,6 +135,11 @@ class ChatCommandController:
             await asyncio.shield(presentation.cancel())
         else:
             await context.reply("已取消当前文字回复。")
+
+    @staticmethod
+    def _conversation_ref(context: EventContext) -> str:
+        key = ConversationKey.from_oopz_context(context)
+        return opaque_ref(key.scope, key.area_id, key.channel_id, key.person_id)
 
 
 class ChatCommand(ChatCommandController):

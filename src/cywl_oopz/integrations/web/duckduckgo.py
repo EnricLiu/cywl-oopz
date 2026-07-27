@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable, Iterable, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any
@@ -17,6 +18,8 @@ from cywl_oopz.features.web.errors import (
     WebSearchUnavailableError,
 )
 from cywl_oopz.features.web.models import WebSearchRequest, WebSearchResult
+
+logger = logging.getLogger(__name__)
 
 _MAX_TITLE_CHARACTERS = 160
 _MAX_URL_CHARACTERS = 2048
@@ -43,23 +46,42 @@ class DuckDuckGoSearchGateway:
 
     async def search(self, request: WebSearchRequest) -> tuple[WebSearchResult, ...]:
         """Execute one synchronous DuckDuckGo request in a worker thread."""
+        future: Future[tuple[Mapping[str, Any], ...]] | None = None
         try:
             if self._closed:
+                logger.warning("Rejected web search because DuckDuckGo gateway is closed")
                 raise WebSearchUnavailableError
+            logger.debug(
+                "Submitting DuckDuckGo worker request: query_characters=%s max_results=%s",
+                len(request.query),
+                request.max_results,
+            )
             future = self._executor.submit(self._search_sync, request)
             raw_results = await self._wait_for_thread(future)
         except asyncio.CancelledError:
-            future.cancel()
+            if future is not None:
+                future.cancel()
+            logger.info("DuckDuckGo worker request cancelled")
             raise
         except TimeoutException as exc:
+            logger.warning("DuckDuckGo request timed out: error=%s", type(exc).__name__)
             raise WebSearchTimeoutError from exc
         except RatelimitException as exc:
+            logger.warning("DuckDuckGo rate limited request: error=%s", type(exc).__name__)
             raise WebSearchRateLimitError from exc
         except DDGSException as exc:
+            logger.warning("DuckDuckGo request unavailable: error=%s", type(exc).__name__)
             raise WebSearchUnavailableError from exc
         except (OSError, ValueError, TypeError) as exc:
+            logger.warning("DuckDuckGo worker failed: error=%s", type(exc).__name__)
             raise WebSearchUnavailableError from exc
-        return self._normalize(raw_results, request.max_results)
+        results = self._normalize(raw_results, request.max_results)
+        logger.debug(
+            "DuckDuckGo worker completed: raw_results=%s normalized_results=%s",
+            len(raw_results),
+            len(results),
+        )
+        return results
 
     @staticmethod
     async def _wait_for_thread(
@@ -75,6 +97,7 @@ class DuckDuckGoSearchGateway:
         if self._closed:
             return
         self._closed = True
+        logger.info("Closing DuckDuckGo worker pool")
         self._executor.shutdown(wait=False, cancel_futures=True)
 
     def _search_sync(self, request: WebSearchRequest) -> tuple[Mapping[str, Any], ...]:

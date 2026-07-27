@@ -8,6 +8,7 @@ from collections import OrderedDict, deque
 from contextlib import suppress
 from dataclasses import dataclass, field
 
+from cywl_oopz.core.observability import opaque_ref
 from cywl_oopz.core.tasks import TaskSupervisor
 from cywl_oopz.features.agent.models import AgentIdentity
 from cywl_oopz.settings import MusicSettings
@@ -60,7 +61,7 @@ class MusicRequestService:
         self._catalog = catalog
         self._voice = voice
         self._sessions: dict[VoiceChannelKey, _MusicSession] = {}
-        self._tasks = TaskSupervisor(lambda key: f"music:{key.area_id}:{key.channel_id}")
+        self._tasks = TaskSupervisor(lambda key: f"music:{self._channel_ref(key)}")
         # oopz-sdk exposes one voice backend per bot. Queue state remains channel-scoped,
         # while this slot gives one track at a time exclusive access to that backend.
         self._voice_slot = asyncio.Lock()
@@ -73,10 +74,18 @@ class MusicRequestService:
             raise MusicQueryError("Music search query must not be empty")
         if len(normalized) > self._settings.max_query_characters:
             raise MusicQueryError("Music search query is too long")
-        return await self._catalog.search(
-            normalized,
-            limit=min(limit or self._settings.search_limit, self._settings.search_limit),
+        requested_limit = min(limit or self._settings.search_limit, self._settings.search_limit)
+        logger.info(
+            "Music search started: query_characters=%s limit=%s",
+            len(normalized),
+            requested_limit,
         )
+        matches = await self._catalog.search(
+            normalized,
+            limit=requested_limit,
+        )
+        logger.info("Music search completed: result_count=%s", len(matches))
+        return matches
 
     async def enqueue(
         self,
@@ -92,6 +101,11 @@ class MusicRequestService:
             async with session.lock:
                 previous = session.idempotent_enqueues.get(idempotency_key)
                 if previous is not None:
+                    logger.info(
+                        "Reused idempotent music enqueue: channel=%s position=%s",
+                        self._channel_ref(channel),
+                        previous.position,
+                    )
                     return previous
         matches = await self.search(query, limit=1)
         if not matches:
@@ -101,6 +115,11 @@ class MusicRequestService:
             if idempotency_key:
                 previous = session.idempotent_enqueues.get(idempotency_key)
                 if previous is not None:
+                    logger.info(
+                        "Reused idempotent music enqueue after search: channel=%s position=%s",
+                        self._channel_ref(channel),
+                        previous.position,
+                    )
                     return previous
             total = len(session.queue) + (1 if session.current is not None else 0)
             if total >= self._settings.max_queue_length:
@@ -110,6 +129,12 @@ class MusicRequestService:
             session.state = PlaybackState.WAITING if session.current is None else session.state
             position = len(session.queue) + (1 if session.current is not None else 0)
         started = self._tasks.start(channel, self._play_queue(channel, session))
+        logger.info(
+            "Music enqueued: channel=%s position=%s playback_worker_started=%s",
+            self._channel_ref(channel),
+            position,
+            started,
+        )
         result = EnqueueResult(channel, item, position, started)
         if idempotency_key:
             async with session.lock:
@@ -123,6 +148,12 @@ class MusicRequestService:
         channel = await self._channel_for(identity)
         session = self._session(channel)
         async with session.lock:
+            logger.debug(
+                "Music queue inspected: channel=%s state=%s upcoming=%s",
+                self._channel_ref(channel),
+                session.state.value,
+                len(session.queue),
+            )
             return MusicQueueSnapshot(
                 voice_channel=channel,
                 state=session.state,
@@ -137,6 +168,10 @@ class MusicRequestService:
         session = self._session(channel)
         async with session.lock:
             if session.current is None:
+                logger.info(
+                    "Music skip ignored because queue is idle: channel=%s",
+                    self._channel_ref(channel),
+                )
                 return False
             session.skip_requested.set()
             session.revision += 1
@@ -144,8 +179,13 @@ class MusicRequestService:
         if owns_voice:
             try:
                 await self._voice.stop()
-            except Exception:
-                logger.exception("Failed to stop OOPZ voice while skipping music")
+            except Exception as exc:
+                logger.warning(
+                    "Failed to stop OOPZ voice while skipping music: channel=%s error=%s",
+                    self._channel_ref(channel),
+                    type(exc).__name__,
+                )
+        logger.info("Music skip requested: channel=%s", self._channel_ref(channel))
         return True
 
     async def pause(self, identity: AgentIdentity) -> bool:
@@ -154,15 +194,26 @@ class MusicRequestService:
         session = self._session(channel)
         async with session.lock:
             if self._voice_owner != channel or session.state is not PlaybackState.PLAYING:
+                logger.info("Music pause ignored: channel=%s", self._channel_ref(channel))
                 return False
         try:
             paused = await self._voice.pause()
         except Exception as exc:
+            logger.warning(
+                "Music pause failed: channel=%s error=%s",
+                self._channel_ref(channel),
+                type(exc).__name__,
+            )
             raise MusicPlaybackError("Failed to pause music") from exc
         if paused:
             async with session.lock:
                 session.state = PlaybackState.PAUSED
                 session.revision += 1
+        logger.info(
+            "Music pause completed: channel=%s applied=%s",
+            self._channel_ref(channel),
+            paused,
+        )
         return paused
 
     async def resume(self, identity: AgentIdentity) -> bool:
@@ -171,19 +222,31 @@ class MusicRequestService:
         session = self._session(channel)
         async with session.lock:
             if self._voice_owner != channel or session.state is not PlaybackState.PAUSED:
+                logger.info("Music resume ignored: channel=%s", self._channel_ref(channel))
                 return False
         try:
             resumed = await self._voice.resume()
         except Exception as exc:
+            logger.warning(
+                "Music resume failed: channel=%s error=%s",
+                self._channel_ref(channel),
+                type(exc).__name__,
+            )
             raise MusicPlaybackError("Failed to resume music") from exc
         if resumed:
             async with session.lock:
                 session.state = PlaybackState.PLAYING
                 session.revision += 1
+        logger.info(
+            "Music resume completed: channel=%s applied=%s",
+            self._channel_ref(channel),
+            resumed,
+        )
         return resumed
 
     async def aclose(self) -> None:
         """Cancel all workers before closing OOPZ voice and catalog resources."""
+        logger.info("Closing music service: active_channels=%s", len(self._sessions))
         await self._tasks.close()
         try:
             await self._voice.aclose()
@@ -202,6 +265,7 @@ class MusicRequestService:
                 identity.person_id,
             )
         except Exception as exc:
+            logger.warning("Could not resolve caller voice channel: error=%s", type(exc).__name__)
             raise MusicPlaybackError("Failed to locate the user's voice channel") from exc
         if not channel_id:
             raise MusicVoiceChannelRequiredError(
@@ -228,6 +292,10 @@ class MusicRequestService:
                         session.current = None
                         session.state = PlaybackState.IDLE
                         session.revision += 1
+                        logger.info(
+                            "Music playback worker idle: channel=%s",
+                            self._channel_ref(channel),
+                        )
                         return
                     item = session.queue.popleft()
                     session.current = item
@@ -236,24 +304,35 @@ class MusicRequestService:
                     session.skip_requested.clear()
                 self._voice_owner = channel
                 try:
+                    logger.info(
+                        "Music track resolving: channel=%s",
+                        self._channel_ref(channel),
+                    )
                     playable = await self._catalog.resolve(item.track)
                     if session.skip_requested.is_set():
+                        logger.info(
+                            "Music track skipped before playback: channel=%s",
+                            self._channel_ref(channel),
+                        )
                         continue
                     await self._voice.play(channel, playable.stream_url)
                     async with session.lock:
                         session.state = PlaybackState.PLAYING
                         session.revision += 1
+                    logger.info(
+                        "Music track playback started: channel=%s",
+                        self._channel_ref(channel),
+                    )
                     await self._wait_until_finished(session)
                 except asyncio.CancelledError:
                     with suppress(Exception):
                         await self._voice.stop()
                     raise
-                except Exception:
-                    logger.exception(
-                        "Music playback failed: area=%s channel=%s track=%s",
-                        channel.area_id,
-                        channel.channel_id,
-                        item.track.source_id,
+                except Exception as exc:
+                    logger.error(
+                        "Music playback failed: channel=%s error=%s",
+                        self._channel_ref(channel),
+                        type(exc).__name__,
                     )
                     with suppress(Exception):
                         await self._voice.stop()
@@ -266,6 +345,10 @@ class MusicRequestService:
                         session.current = None
                         session.skip_requested.clear()
                         session.revision += 1
+                    logger.debug(
+                        "Music playback state reset: channel=%s",
+                        self._channel_ref(channel),
+                    )
 
     async def _wait_until_finished(self, session: _MusicSession) -> None:
         while not session.skip_requested.is_set():
@@ -275,4 +358,9 @@ class MusicRequestService:
             except Exception as exc:
                 raise MusicPlaybackError("Failed to read music playback state") from exc
             if state in self._FINISHED_BACKEND_STATES:
+                logger.debug("Music backend reported finished state: state=%s", state)
                 return
+
+    @staticmethod
+    def _channel_ref(channel: VoiceChannelKey) -> str:
+        return opaque_ref(channel.area_id, channel.channel_id)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -16,6 +17,8 @@ from cywl_oopz.core.errors import ConfigurationError, ProviderSelectionError
 
 from .catalog import ReloadableProviderCatalog
 from .models import AgentModelRef, LlmProvider, ProviderProtocol
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -37,6 +40,7 @@ class ProviderClientPool:
         async with self._lock:
             existing = self._entries.get(provider.id)
             if existing is not None and existing.fingerprint == fingerprint:
+                logger.debug("Reusing Agent provider HTTP client: provider=%s", provider.alias)
                 return existing.client
 
             client = httpx.AsyncClient(
@@ -45,7 +49,10 @@ class ProviderClientPool:
             )
             self._entries[provider.id] = _ClientEntry(fingerprint, client)
             if existing is not None:
+                logger.info("Replacing Agent provider HTTP client: provider=%s", provider.alias)
                 await existing.client.aclose()
+            else:
+                logger.info("Created Agent provider HTTP client: provider=%s", provider.alias)
             return client
 
     async def aclose(self) -> None:
@@ -54,6 +61,7 @@ class ProviderClientPool:
             entries = tuple(self._entries.values())
             self._entries.clear()
         if entries:
+            logger.info("Closing Agent provider HTTP clients: count=%s", len(entries))
             await asyncio.gather(
                 *(entry.client.aclose() for entry in entries),
                 return_exceptions=True,
@@ -95,6 +103,7 @@ class AgentModelRegistry:
 
     async def reload(self) -> None:
         """Refresh the catalog; stale clients are replaced lazily by fingerprint."""
+        logger.debug("Reloading Agent model registry catalog")
         await self._catalog.reload()
 
     async def model(self, reference: AgentModelRef) -> OpenAIChatModel:
@@ -108,8 +117,18 @@ class AgentModelRegistry:
             or model.provider_id != provider.id
             or model.remote_model_name != reference.remote_model_name
         ):
+            logger.warning(
+                "Pinned Agent model disappeared from catalog: provider=%s model=%s",
+                reference.provider_alias,
+                reference.model_alias,
+            )
             raise ProviderSelectionError("Pinned Agent model is no longer in the catalog")
         if provider.protocol is not ProviderProtocol.OPENAI_CHAT_COMPATIBLE:
+            logger.warning(
+                "Unsupported Agent provider protocol: provider=%s protocol=%s",
+                provider.alias,
+                provider.protocol.value,
+            )
             raise ConfigurationError(f"Unsupported provider protocol: {provider.protocol}")
 
         client = await self._clients.get(provider)
@@ -129,4 +148,5 @@ class AgentModelRegistry:
 
     async def aclose(self) -> None:
         """Close all provider clients."""
+        logger.debug("Closing Agent model registry")
         await self._clients.aclose()

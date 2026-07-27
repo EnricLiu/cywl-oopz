@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
-from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
@@ -15,6 +15,7 @@ from cywl_oopz.core.errors import (
     ProviderTimeoutError,
 )
 from cywl_oopz.core.health import HealthRegistry, HealthState
+from cywl_oopz.core.observability import exception_kind, opaque_ref
 from cywl_oopz.core.tasks import TaskSupervisor
 from cywl_oopz.features.chat.history import HistoryTrimmer
 from cywl_oopz.features.chat.locks import ConversationLockPool
@@ -58,6 +59,8 @@ from .ports import (
 from .selection import ProviderSelectionService
 from .summarization import ThreadSummaryService
 from .tools.policy import AvailableTool, ToolAvailabilityService
+
+logger = logging.getLogger(__name__)
 
 
 class AgentConversationService:
@@ -125,6 +128,12 @@ class AgentConversationService:
         if not content:
             raise ValueError("Agent prompt must not be empty")
         self._input_validator.validate_input(content)
+        conversation = self._conversation_ref(key)
+        logger.info(
+            "Agent request received: conversation=%s prompt_characters=%s",
+            conversation,
+            len(content),
+        )
         await emit_progress(progress, ConversationProgressEvent(ProgressKind.ACCEPTED))
 
         async with self._locks.hold(key):
@@ -181,16 +190,33 @@ class AgentConversationService:
                     enabled_tools=enabled_tools,
                     limits=limits,
                 )
+                logger.info(
+                    "Agent run started: run=%s conversation=%s model=%s/%s "
+                    "context_messages=%s tools=%s",
+                    run_id,
+                    conversation,
+                    selection.model.provider_alias,
+                    selection.model.model_alias,
+                    len(context),
+                    len(enabled_tools),
+                )
                 try:
                     result = await self._engine.run(request, progress)
                 except asyncio.CancelledError:
+                    logger.info("Agent run cancelled: run=%s conversation=%s", run_id, conversation)
                     await self._finish_after_interrupt(
                         state,
                         AgentStopReason.CANCELLED,
                         "cancelled",
                     )
                     raise
-                except ProviderTimeoutError:
+                except ProviderTimeoutError as exc:
+                    logger.warning(
+                        "Agent run timed out: run=%s conversation=%s error=%s",
+                        run_id,
+                        conversation,
+                        exception_kind(exc),
+                    )
                     await self._finish_after_interrupt(
                         state,
                         AgentStopReason.TIMEOUT,
@@ -198,7 +224,13 @@ class AgentConversationService:
                     )
                     self._mark_health(HealthState.DEGRADED, "request timed out")
                     raise
-                except ProviderError:
+                except ProviderError as exc:
+                    logger.warning(
+                        "Agent provider failed: run=%s conversation=%s error=%s",
+                        run_id,
+                        conversation,
+                        exception_kind(exc),
+                    )
                     await self._finish_after_interrupt(
                         state,
                         AgentStopReason.PROVIDER_ERROR,
@@ -206,7 +238,13 @@ class AgentConversationService:
                     )
                     self._mark_health(HealthState.DEGRADED, "request failed")
                     raise
-                except Exception:
+                except Exception as exc:
+                    logger.error(
+                        "Agent run failed unexpectedly: run=%s conversation=%s error=%s",
+                        run_id,
+                        conversation,
+                        exception_kind(exc),
+                    )
                     await self._finish_after_interrupt(
                         state,
                         AgentStopReason.INVALID_OUTPUT,
@@ -247,6 +285,18 @@ class AgentConversationService:
                         ),
                     )
                 self._mark_health(HealthState.HEALTHY, "last Agent run succeeded")
+                logger.info(
+                    "Agent run completed: run=%s conversation=%s reason=%s elapsed_seconds=%.3f "
+                    "model_requests=%s tool_calls=%s input_tokens=%s output_tokens=%s",
+                    run_id,
+                    conversation,
+                    result.stop_reason.value,
+                    time.perf_counter() - started_at,
+                    result.model_requests,
+                    result.tool_calls,
+                    result.input_tokens,
+                    result.output_tokens,
+                )
                 return ChatResponse(
                     content=result.output,
                     model=f"{selection.model.provider_alias}/{selection.model.model_alias}",
@@ -262,6 +312,7 @@ class AgentConversationService:
         """Delete this scoped Agent thread and all cascading records."""
         async with self._locks.hold(key):
             await self._threads.delete(key)
+        logger.info("Agent conversation cleared: conversation=%s", self._conversation_ref(key))
 
     async def select_model(self, key: ConversationKey, model: str) -> str:
         """Compatibility path for `!model`, accepting `provider/model` or a unique alias."""
@@ -288,6 +339,12 @@ class AgentConversationService:
         if reference is None:
             raise ValueError("The requested Agent model is not available")
         await self._select_thread_model(key, reference.model_id)
+        logger.info(
+            "Agent model selected: conversation=%s model=%s/%s",
+            self._conversation_ref(key),
+            reference.provider_alias,
+            reference.model_alias,
+        )
         return f"{reference.provider_alias}/{reference.model_alias}"
 
     async def select_provider(
@@ -310,6 +367,13 @@ class AgentConversationService:
             await self._selection_repository.set_user_model(key.person_id, reference.model_id)
         else:
             await self._select_thread_model(key, reference.model_id)
+        logger.info(
+            "Agent provider selected: scope=%s conversation=%s model=%s/%s",
+            "user" if user_default else "thread",
+            self._conversation_ref(key),
+            reference.provider_alias,
+            reference.model_alias,
+        )
         return f"{reference.provider_alias}/{reference.model_alias}"
 
     def list_models(self) -> tuple[str, ...]:
@@ -381,6 +445,11 @@ class AgentConversationService:
             expires_at=now + timedelta(seconds=self._settings.session_ttl_seconds),
         )
         await self._threads.add(thread)
+        logger.debug(
+            "Created Agent thread: thread=%s conversation=%s",
+            thread.id,
+            self._conversation_ref(key),
+        )
         return thread
 
     async def _load_active_thread(
@@ -391,6 +460,11 @@ class AgentConversationService:
         thread = await self._threads.get(key)
         if thread is not None and thread.is_expired(now):
             await self._threads.delete(key)
+            logger.info(
+                "Expired Agent thread removed: thread=%s conversation=%s",
+                thread.id,
+                self._conversation_ref(key),
+            )
             return None
         return thread
 
@@ -409,11 +483,18 @@ class AgentConversationService:
         reason: AgentStopReason,
         error_code: str,
     ) -> None:
-        with suppress(DatabaseError):
+        try:
             await self._runs.finish(
                 state.finish(reason, datetime.now(UTC)),
                 usage={},
                 error_code=error_code,
+            )
+        except DatabaseError as exc:
+            logger.warning(
+                "Could not persist interrupted Agent run: run=%s reason=%s error=%s",
+                state.run_id,
+                reason.value,
+                exception_kind(exc),
             )
 
     @staticmethod
@@ -428,3 +509,7 @@ class AgentConversationService:
     def _mark_health(self, state: HealthState, detail: str) -> None:
         if self._health is not None:
             self._health.mark("llm", state, detail)
+
+    @staticmethod
+    def _conversation_ref(key: ConversationKey) -> str:
+        return opaque_ref(key.scope, key.area_id, key.channel_id, key.person_id)

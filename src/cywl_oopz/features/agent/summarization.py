@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -24,6 +25,8 @@ from .models import AgentMessage, AgentModelRef, AgentThread
 from .ports import AgentMessageRepository, AgentThreadRepository
 from .registry import AgentModelRegistry
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass(frozen=True, slots=True)
 class ThreadSummaryRequest:
@@ -39,6 +42,12 @@ class ThreadSummarizer(Protocol):
     """Generate one merged summary without mutating persistence."""
 
     async def summarize(self, request: ThreadSummaryRequest) -> str:
+        logger.info(
+            "Agent thread summarization started: model=%s/%s messages=%s",
+            request.model.provider_alias,
+            request.model.model_alias,
+            len(request.messages),
+        )
         """Return a non-empty bounded summary."""
 
 
@@ -79,7 +88,9 @@ class PydanticAiThreadSummarizer:
         output = result.output
         if not isinstance(output, str) or not output.strip():
             raise ProviderResponseError("Agent summary was empty")
-        return output.strip()[: request.max_characters]
+        summary = output.strip()[: request.max_characters]
+        logger.info("Agent thread summarization completed: summary_characters=%s", len(summary))
+        return summary
 
     @staticmethod
     def _transcript(messages: tuple[AgentMessage, ...]) -> str:
@@ -132,6 +143,12 @@ class ThreadSummaryService:
         through_sequence = selected[-1].sequence
         if through_sequence is None:
             return False
+        logger.debug(
+            "Agent thread summary triggered: thread=%s selected_messages=%s through_sequence=%s",
+            thread.id,
+            len(selected),
+            through_sequence,
+        )
         summary = await self._summarizer.summarize(
             ThreadSummaryRequest(
                 model=model,
@@ -140,12 +157,18 @@ class ThreadSummaryService:
                 max_characters=self._settings.summary_max_characters,
             )
         )
-        return await self._threads.save_summary(
+        saved = await self._threads.save_summary(
             thread.id,
             summary,
             through_sequence,
             expected_version=thread.version,
         )
+        logger.info(
+            "Agent thread summary persistence completed: thread=%s saved=%s",
+            thread.id,
+            saved,
+        )
+        return saved
 
     def _select_complete_turns(
         self,

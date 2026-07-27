@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any
 
 from oopz_sdk.auth.headers import build_oopz_headers
 from oopz_sdk.exceptions import OopzApiError
 from oopz_sdk.utils.payload import coerce_bool
+
+from cywl_oopz.core.observability import opaque_ref
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +81,13 @@ class OopzEditableMessageGateway:
         text: str,
     ) -> EditableMessageRef:
         """Create the sole display message and retain its edit metadata."""
+        address_ref = self._address_ref(address)
+        logger.debug(
+            "Creating OOPZ editable reply: address=%s scope=%s characters=%s",
+            address_ref,
+            address.scope,
+            len(text),
+        )
         if address.scope == "private":
             result = await self._bot.messages.send_private_message(
                 text,
@@ -90,7 +102,7 @@ class OopzEditableMessageGateway:
                 channel=address.channel_id,
                 reference_message_id=address.reference_message_id or None,
             )
-        return EditableMessageRef(
+        message = EditableMessageRef(
             message_id=str(result.message_id),
             timestamp=str(result.timestamp),
             scope=address.scope,
@@ -99,11 +111,23 @@ class OopzEditableMessageGateway:
             target_person_id=address.target_person_id,
             reference_message_id=address.reference_message_id,
         )
+        logger.info(
+            "Created OOPZ editable reply: address=%s scope=%s",
+            address_ref,
+            address.scope,
+        )
+        return message
 
     async def replace(self, message: EditableMessageRef, text: str) -> None:
         """Replace message text through the active edit endpoint."""
         if not text:
             raise ValueError("Replacement text must not be empty")
+        logger.debug(
+            "Replacing OOPZ editable reply: message=%s scope=%s characters=%s",
+            opaque_ref(message.message_id, message.timestamp),
+            message.scope,
+            len(text),
+        )
         path = self._PRIVATE_EDIT_PATH if message.scope == "private" else self._CHANNEL_EDIT_PATH
         body = self._edit_payload(message, text)
         encoded_body = json.dumps(body, separators=(",", ":"), ensure_ascii=False)
@@ -120,6 +144,20 @@ class OopzEditableMessageGateway:
             headers=headers,
         )
         self._ensure_success(response)
+        logger.debug(
+            "Replaced OOPZ editable reply: message=%s",
+            opaque_ref(message.message_id, message.timestamp),
+        )
+
+    @staticmethod
+    def _address_ref(address: MessageAddress) -> str:
+        return opaque_ref(
+            address.scope,
+            address.area_id,
+            address.channel_id,
+            address.target_person_id,
+            address.reference_message_id,
+        )
 
     @staticmethod
     def _edit_payload(message: EditableMessageRef, text: str) -> dict[str, Any]:

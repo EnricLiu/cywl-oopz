@@ -23,11 +23,13 @@ class TaskSupervisor[KeyT: Hashable]:
         existing = self._tasks.get(key)
         if existing is not None and not existing.done():
             operation.close()
+            logger.info("Owned task already active: task=%s", existing.get_name())
             return False
 
         task = asyncio.create_task(operation, name=self._task_name(key))
         self._tasks[key] = task
         task.add_done_callback(lambda completed: self._on_done(key, completed))
+        logger.debug("Owned task started: task=%s", task.get_name())
         return True
 
     def has_active(self, key: KeyT) -> bool:
@@ -40,6 +42,7 @@ class TaskSupervisor[KeyT: Hashable]:
         task = self._tasks.get(key)
         if task is None or task.done():
             return False
+        logger.info("Cancelling owned task: task=%s", task.get_name())
         task.cancel()
         with suppress(asyncio.CancelledError):
             await task
@@ -48,6 +51,8 @@ class TaskSupervisor[KeyT: Hashable]:
     async def close(self) -> None:
         """Cancel and await all work before application resources close."""
         tasks = tuple(self._tasks.values())
+        if tasks:
+            logger.info("Closing owned tasks: count=%s", len(tasks))
         for task in tasks:
             task.cancel()
         if tasks:
@@ -58,8 +63,15 @@ class TaskSupervisor[KeyT: Hashable]:
         if self._tasks.get(key) is task:
             self._tasks.pop(key, None)
         if task.cancelled():
+            logger.debug("Owned task cancelled: task=%s", task.get_name())
             return
         try:
             task.result()
-        except Exception:
-            logger.exception("Owned task failed: task=%s", task.get_name())
+        except Exception as exc:
+            logger.error(
+                "Owned task failed: task=%s error=%s",
+                task.get_name(),
+                type(exc).__name__,
+            )
+        else:
+            logger.debug("Owned task completed: task=%s", task.get_name())

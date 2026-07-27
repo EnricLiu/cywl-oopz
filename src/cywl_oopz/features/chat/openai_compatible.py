@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
 
 from cywl_oopz.core.errors import ProviderError, ProviderResponseError, ProviderTimeoutError
+from cywl_oopz.core.observability import exception_kind
 from cywl_oopz.settings import ChatSettings
 
 from .models import ChatChunk, ChatRequest, ChatResponse
+
+logger = logging.getLogger(__name__)
 
 
 class OpenAICompatibleChatProvider:
@@ -25,6 +29,12 @@ class OpenAICompatibleChatProvider:
 
     async def complete(self, request: ChatRequest) -> ChatResponse:
         """Send a non-streaming chat-completion request and validate its shape."""
+        logger.debug(
+            "Sending non-streaming chat completion: model=%s message_count=%s timeout_seconds=%s",
+            request.model,
+            len(request.messages),
+            request.timeout_seconds,
+        )
         try:
             response = await self._client.post(
                 self._endpoint,
@@ -34,13 +44,27 @@ class OpenAICompatibleChatProvider:
             )
             self._raise_for_provider_error(response)
         except httpx.TimeoutException as exc:
+            logger.warning(
+                "Chat completion timed out: model=%s error=%s", request.model, exception_kind(exc)
+            )
             raise ProviderTimeoutError("LLM request timed out") from exc
         except httpx.HTTPError as exc:
+            logger.warning(
+                "Chat completion transport failed: model=%s error=%s",
+                request.model,
+                exception_kind(exc),
+            )
             raise ProviderError("LLM request failed") from exc
 
         return self._parse_complete_response(response, request.model)
 
     async def _stream(self, request: ChatRequest) -> AsyncIterator[ChatChunk]:
+        logger.debug(
+            "Sending streaming chat completion: model=%s message_count=%s timeout_seconds=%s",
+            request.model,
+            len(request.messages),
+            request.timeout_seconds,
+        )
         try:
             async with self._client.stream(
                 "POST",
@@ -55,8 +79,16 @@ class OpenAICompatibleChatProvider:
                     if chunk is not None:
                         yield chunk
         except httpx.TimeoutException as exc:
+            logger.warning(
+                "Chat stream timed out: model=%s error=%s", request.model, exception_kind(exc)
+            )
             raise ProviderTimeoutError("LLM stream timed out") from exc
         except httpx.HTTPError as exc:
+            logger.warning(
+                "Chat stream transport failed: model=%s error=%s",
+                request.model,
+                exception_kind(exc),
+            )
             raise ProviderError("LLM stream failed") from exc
 
     def stream(self, request: ChatRequest) -> AsyncIterator[ChatChunk]:
@@ -66,6 +98,7 @@ class OpenAICompatibleChatProvider:
     async def aclose(self) -> None:
         """Close an internally created HTTP client exactly once."""
         if self._owns_client:
+            logger.debug("Closing owned OpenAI-compatible HTTP client")
             await self._client.aclose()
 
     def _headers(self) -> dict[str, str]:
@@ -86,6 +119,9 @@ class OpenAICompatibleChatProvider:
     @staticmethod
     def _raise_for_provider_error(response: httpx.Response) -> None:
         if response.is_error:
+            logger.warning(
+                "Chat provider returned HTTP error: status_code=%s", response.status_code
+            )
             raise ProviderError(f"LLM provider returned HTTP {response.status_code}")
 
     @staticmethod

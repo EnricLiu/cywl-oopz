@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Protocol
 
 from sqlalchemy import select
@@ -11,6 +12,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from cywl_oopz.core.errors import DatabaseError
 
 from .models import ChannelSettingsRecord
+
+logger = logging.getLogger(__name__)
 
 
 class ChannelSettingsRepository(Protocol):
@@ -44,6 +47,7 @@ class SqlAlchemyChannelSettingsRepository:
                 )
                 return bool(enabled)
         except SQLAlchemyError as exc:
+            logger.warning("Failed to load channel chat setting: error=%s", type(exc).__name__)
             raise DatabaseError("Failed to load channel settings") from exc
 
     async def enabled_agent_tools(
@@ -66,4 +70,5 @@ class SqlAlchemyChannelSettingsRepository:
                     item.strip() for item in raw if isinstance(item, str) and item.strip()
                 )
         except SQLAlchemyError as exc:
+            logger.warning("Failed to load channel Agent tools: error=%s", type(exc).__name__)
             raise DatabaseError("Failed to load channel Agent tools") from exc

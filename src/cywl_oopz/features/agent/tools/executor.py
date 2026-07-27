@@ -5,10 +5,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 from datetime import UTC, datetime
 from uuid import uuid4
 
 from pydantic import ValidationError
+
+from cywl_oopz.core.observability import exception_kind
 
 from .models import (
     ToolCall,
@@ -23,6 +26,8 @@ from .models import (
 from .policy import ToolPolicy
 from .ports import ToolExecutionRepository
 from .registry import ToolRegistry
+
+logger = logging.getLogger(__name__)
 
 
 class ToolExecutor:
@@ -50,6 +55,11 @@ class ToolExecutor:
         """Execute one call and convert all tool failures to safe model data."""
         tool = self._registry.get(call.name)
         if tool is None:
+            logger.warning(
+                "Rejected unregistered Agent tool: run=%s tool=%s",
+                context.run_id,
+                call.name,
+            )
             return ToolExecutionResult(
                 call.call_id,
                 call.name,
@@ -80,6 +90,13 @@ class ToolExecutor:
             )
         )
         if not claim.created:
+            logger.info(
+                "Reused existing Agent tool execution: run=%s call=%s tool=%s status=%s",
+                context.run_id,
+                call.call_id,
+                call.name,
+                claim.execution.status.value,
+            )
             return self._from_execution(claim.execution)
 
         if not self._policy.allows(context, descriptor):
@@ -87,6 +104,13 @@ class ToolExecutor:
                 "administrator_required"
                 if descriptor.effect is ToolEffect.ADMIN and not context.identity.is_administrator
                 else "tool_not_enabled"
+            )
+            logger.warning(
+                "Denied Agent tool execution: run=%s call=%s tool=%s reason=%s",
+                context.run_id,
+                call.call_id,
+                descriptor.name,
+                error_code,
             )
             return await self._finish(
                 context,
@@ -98,6 +122,12 @@ class ToolExecutor:
         try:
             arguments = descriptor.input_model.model_validate(dict(call.arguments))
         except ValidationError:
+            logger.warning(
+                "Rejected Agent tool arguments: run=%s call=%s tool=%s",
+                context.run_id,
+                call.call_id,
+                descriptor.name,
+            )
             return await self._finish(
                 context,
                 call,
@@ -106,9 +136,22 @@ class ToolExecutor:
             )
 
         try:
+            logger.info(
+                "Agent tool execution started: run=%s call=%s tool=%s timeout_seconds=%s",
+                context.run_id,
+                call.call_id,
+                descriptor.name,
+                descriptor.timeout_seconds,
+            )
             async with asyncio.timeout(descriptor.timeout_seconds):
                 raw_output = await tool.execute(context, arguments)
         except asyncio.CancelledError:
+            logger.info(
+                "Agent tool execution cancelled: run=%s call=%s tool=%s",
+                context.run_id,
+                call.call_id,
+                descriptor.name,
+            )
             await asyncio.shield(
                 self._finish(
                     context,
@@ -118,7 +161,14 @@ class ToolExecutor:
                 )
             )
             raise
-        except TimeoutError:
+        except TimeoutError as exc:
+            logger.warning(
+                "Agent tool execution timed out: run=%s call=%s tool=%s error=%s",
+                context.run_id,
+                call.call_id,
+                descriptor.name,
+                exception_kind(exc),
+            )
             return await self._finish(
                 context,
                 call,
@@ -126,13 +176,27 @@ class ToolExecutor:
                 error_code="tool_timeout",
             )
         except ToolExecutionError as exc:
+            logger.warning(
+                "Agent tool execution failed: run=%s call=%s tool=%s reason=%s",
+                context.run_id,
+                call.call_id,
+                descriptor.name,
+                exc.error_code,
+            )
             return await self._finish(
                 context,
                 call,
                 ToolExecutionStatus.FAILED,
                 error_code=exc.error_code,
             )
-        except Exception:
+        except Exception as exc:
+            logger.error(
+                "Agent tool execution crashed: run=%s call=%s tool=%s error=%s",
+                context.run_id,
+                call.call_id,
+                descriptor.name,
+                exception_kind(exc),
+            )
             return await self._finish(
                 context,
                 call,
@@ -144,6 +208,12 @@ class ToolExecutor:
             output_model = descriptor.output_model.model_validate(raw_output)
             output = output_model.model_dump(mode="json")
         except ValidationError:
+            logger.warning(
+                "Agent tool returned invalid output: run=%s call=%s tool=%s",
+                context.run_id,
+                call.call_id,
+                descriptor.name,
+            )
             return await self._finish(
                 context,
                 call,
@@ -151,12 +221,20 @@ class ToolExecutor:
                 error_code="invalid_tool_output",
             )
         bounded = self._bounded_output(output, descriptor.max_output_characters)
-        return await self._finish(
+        result = await self._finish(
             context,
             call,
             ToolExecutionStatus.SUCCEEDED,
             output=bounded,
         )
+        logger.info(
+            "Agent tool execution completed: run=%s call=%s tool=%s output_truncated=%s",
+            context.run_id,
+            call.call_id,
+            descriptor.name,
+            bounded.get("truncated") is True,
+        )
+        return result
 
     async def _finish(
         self,

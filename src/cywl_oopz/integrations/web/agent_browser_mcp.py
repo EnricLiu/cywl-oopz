@@ -9,6 +9,7 @@ import shutil
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from fastmcp.exceptions import ToolError
 from pydantic_ai.mcp import MCPToolset, StdioTransport
@@ -75,17 +76,22 @@ class AgentBrowserMcpGateway:
         """Start the stdio transport and reject incompatible upstream schemas."""
         async with self._lifecycle_lock:
             if self._toolset is not None:
+                logger.debug("agent-browser MCP already started")
                 return
+            logger.info("Starting agent-browser MCP transport")
             await self._start_unlocked()
+            logger.info("agent-browser MCP transport started")
 
     async def restart(self) -> None:
         """Close a suspect transport and initialize one replacement."""
         async with self._lifecycle_lock:
+            logger.warning("Restarting agent-browser MCP transport")
             await self._close_unlocked()
             await self._start_unlocked()
 
     async def _start_unlocked(self) -> None:
         if self._requires_executable and shutil.which("agent-browser") is None:
+            logger.warning("agent-browser executable was not found")
             raise BrowserUnavailableError
         toolset = self._toolset_factory()
         entered = False
@@ -111,9 +117,13 @@ class AgentBrowserMcpGateway:
         except Exception as exc:
             if entered:
                 await toolset.__aexit__(None, None, None)
-            logger.debug("agent-browser MCP initialization failed", exc_info=exc)
+            logger.warning(
+                "agent-browser MCP initialization unavailable: error=%s",
+                type(exc).__name__,
+            )
             raise BrowserUnavailableError from exc
         self._toolset = toolset
+        logger.debug("agent-browser MCP contract validation succeeded")
 
     async def _validate_contract(self, toolset: MCPToolset) -> None:
         server_info = toolset.server_info
@@ -185,6 +195,7 @@ class AgentBrowserMcpGateway:
         progress: BrowserProgressObserver | None = None,
     ) -> BrowserPageView:
         """Navigate and return a fresh compact interactive snapshot."""
+        logger.debug("agent-browser navigation requested: host=%s", self._host(url))
         await self._call(
             "agent_browser_open",
             {
@@ -212,6 +223,7 @@ class AgentBrowserMcpGateway:
         progress: BrowserProgressObserver | None = None,
     ) -> BrowserDocument:
         """Read HTML/Markdown content without requiring a Markdown content type."""
+        logger.debug("agent-browser page read requested: host=%s", self._host(url or ""))
         arguments: dict[str, Any] = self._common(session)
         if url is not None:
             arguments["url"] = url
@@ -472,8 +484,12 @@ class AgentBrowserMcpGateway:
             return
         try:
             await progress.update(update)
-        except Exception:
-            return
+        except Exception as exc:
+            logger.warning(
+                "agent-browser progress observer failed: stage=%s error=%s",
+                update.stage.value,
+                type(exc).__name__,
+            )
 
     @staticmethod
     def _preview_lines(value: str) -> tuple[str, ...]:
@@ -497,17 +513,25 @@ class AgentBrowserMcpGateway:
         toolset = self._toolset
         if toolset is None:
             raise BrowserUnavailableError
+        logger.debug("Calling agent-browser MCP method: method=%s", method)
         try:
             async with asyncio.timeout(self._settings.browser_mcp_call_timeout_seconds + 1):
                 result = await toolset.direct_call_tool(method, arguments)
         except asyncio.CancelledError:
+            logger.info("agent-browser MCP call cancelled: method=%s", method)
             raise
         except TimeoutError as exc:
+            logger.warning("agent-browser MCP call timed out: method=%s", method)
             raise BrowserTimeoutError from exc
         except ToolError as exc:
+            logger.warning("agent-browser MCP tool failed: method=%s", method)
             raise self._mapped_tool_error(method, str(exc)) from exc
         except Exception as exc:
-            logger.debug("agent-browser MCP call failed: %s", method, exc_info=exc)
+            logger.warning(
+                "agent-browser MCP call unavailable: method=%s error=%s",
+                method,
+                type(exc).__name__,
+            )
             raise BrowserUnavailableError from exc
         if not isinstance(result, dict):
             raise BrowserUnavailableError
@@ -518,6 +542,7 @@ class AgentBrowserMcpGateway:
         data = response.get("data")
         if not isinstance(data, dict):
             raise BrowserUnavailableError
+        logger.debug("agent-browser MCP call completed: method=%s", method)
         return data
 
     @staticmethod
@@ -551,9 +576,19 @@ class AgentBrowserMcpGateway:
         toolset = self._toolset
         self._toolset = None
         if toolset is not None:
+            logger.debug("Closing agent-browser MCP transport")
             await toolset.__aexit__(None, None, None)
 
     async def aclose(self) -> None:
         """Close only the MCP stdio transport owned by this adapter."""
         async with self._lifecycle_lock:
             await self._close_unlocked()
+
+    @staticmethod
+    def _host(url: str) -> str:
+        if not url:
+            return "current-page"
+        try:
+            return urlsplit(url).netloc or "invalid"
+        except ValueError:
+            return "invalid"

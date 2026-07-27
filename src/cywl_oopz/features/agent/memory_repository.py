@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from uuid import UUID
 
@@ -16,6 +17,8 @@ from cywl_oopz.storage.models import (
 )
 
 from .memory import MemoryItem
+
+logger = logging.getLogger(__name__)
 
 
 class SqlAlchemyMemoryRepository:
@@ -33,7 +36,7 @@ class SqlAlchemyMemoryRepository:
                     )
                 )
         except SQLAlchemyError as exc:
-            raise DatabaseError("Failed to load Agent memory preference") from exc
+            raise _database_error("load Agent memory preference", exc) from exc
 
     async def set_preference(self, person_id: str, enabled: bool) -> None:
         try:
@@ -50,7 +53,7 @@ class SqlAlchemyMemoryRepository:
                     else:
                         record.enabled = enabled
         except SQLAlchemyError as exc:
-            raise DatabaseError("Failed to save Agent memory preference") from exc
+            raise _database_error("save Agent memory preference", exc) from exc
 
     async def add(self, item: MemoryItem) -> None:
         try:
@@ -71,7 +74,7 @@ class SqlAlchemyMemoryRepository:
                         )
                     )
         except SQLAlchemyError as exc:
-            raise DatabaseError("Failed to save Agent memory item") from exc
+            raise _database_error("save Agent memory item", exc) from exc
 
     async def list_active(
         self,
@@ -98,7 +101,7 @@ class SqlAlchemyMemoryRepository:
                 ).all()
                 return tuple(self._to_domain(record) for record in records)
         except SQLAlchemyError as exc:
-            raise DatabaseError("Failed to list Agent memory items") from exc
+            raise _database_error("list Agent memory items", exc) from exc
 
     async def count_active(self, person_id: str, now: datetime) -> int:
         try:
@@ -116,7 +119,7 @@ class SqlAlchemyMemoryRepository:
                     or 0
                 )
         except SQLAlchemyError as exc:
-            raise DatabaseError("Failed to count Agent memory items") from exc
+            raise _database_error("count Agent memory items", exc) from exc
 
     async def delete(self, person_id: str, item_id: UUID) -> bool:
         try:
@@ -130,7 +133,7 @@ class SqlAlchemyMemoryRepository:
                     )
                     return result.rowcount == 1
         except SQLAlchemyError as exc:
-            raise DatabaseError("Failed to delete Agent memory item") from exc
+            raise _database_error("delete Agent memory item", exc) from exc
 
     async def delete_all(self, person_id: str) -> int:
         try:
@@ -143,7 +146,7 @@ class SqlAlchemyMemoryRepository:
                     )
                     return result.rowcount
         except SQLAlchemyError as exc:
-            raise DatabaseError("Failed to delete Agent memory items") from exc
+            raise _database_error("delete Agent memory items", exc) from exc
 
     async def touch(
         self,
@@ -165,7 +168,7 @@ class SqlAlchemyMemoryRepository:
                         .values(last_used_at=now)
                     )
         except SQLAlchemyError as exc:
-            raise DatabaseError("Failed to touch Agent memory items") from exc
+            raise _database_error("touch Agent memory items", exc) from exc
 
     @staticmethod
     def _to_domain(record: AgentMemoryItemRecord) -> MemoryItem:
@@ -182,3 +185,13 @@ class SqlAlchemyMemoryRepository:
             last_used_at=record.last_used_at,
             expires_at=record.expires_at,
         )
+
+
+def _database_error(operation: str, error: SQLAlchemyError) -> DatabaseError:
+    """Report a static operation name without rendering SQL or record data."""
+    logger.warning(
+        "Agent memory persistence failed: operation=%s error=%s",
+        operation,
+        type(error).__name__,
+    )
+    return DatabaseError(f"Failed to {operation}")
