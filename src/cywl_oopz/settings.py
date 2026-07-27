@@ -33,6 +33,7 @@ DEFAULT_AGENT_TOOLS = (
     "browser_click",
     "browser_fill",
     "browser_press",
+    "set_music_playback_mode",
 )
 
 MUSIC_AGENT_TOOLS = frozenset(
@@ -43,6 +44,7 @@ MUSIC_AGENT_TOOLS = frozenset(
         "skip_music",
         "pause_music",
         "resume_music",
+        "set_music_playback_mode",
     }
 )
 

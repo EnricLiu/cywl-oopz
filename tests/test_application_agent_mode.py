@@ -95,6 +95,7 @@ async def test_composition_root_registers_music_tools_only_when_music_is_enabled
         "skip_music",
         "pause_music",
         "resume_music",
+        "set_music_playback_mode",
     }.issubset(enabled.agent_tool_registry.names)
 
     await enabled.music.aclose()

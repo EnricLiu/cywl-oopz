@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 from collections import OrderedDict, deque
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -24,6 +25,8 @@ from .models import (
     EnqueueResult,
     MusicQueueSnapshot,
     MusicTrack,
+    PlaybackMode,
+    PlaybackModeChange,
     PlaybackState,
     QueuedTrack,
     VoiceChannelKey,
@@ -40,6 +43,7 @@ class _MusicSession:
     queue: deque[QueuedTrack] = field(default_factory=deque)
     current: QueuedTrack | None = None
     state: PlaybackState = PlaybackState.IDLE
+    mode: PlaybackMode = PlaybackMode.SEQUENTIAL
     revision: int = 0
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     skip_requested: asyncio.Event = field(default_factory=asyncio.Event)
@@ -52,16 +56,20 @@ class MusicRequestService:
     _FINISHED_BACKEND_STATES = frozenset(
         {"finished", "idle", "joined", "stopped", "ended", "error"}
     )
+    _COMPLETED_BACKEND_STATES = frozenset({"finished", "idle", "joined", "stopped", "ended"})
 
     def __init__(
         self,
         settings: MusicSettings,
         catalog: MusicCatalog,
         voice: MusicVoiceGateway,
+        *,
+        rng: random.Random | None = None,
     ) -> None:
         self._settings = settings
         self._catalog = catalog
         self._voice = voice
+        self._rng = rng or random.Random()
         self._sessions: dict[VoiceChannelKey, _MusicSession] = {}
         self._tasks = TaskSupervisor(lambda key: f"music:{self._channel_ref(key)}")
         # oopz-sdk exposes one voice backend per bot. Queue state remains channel-scoped,
@@ -159,10 +167,32 @@ class MusicRequestService:
             return MusicQueueSnapshot(
                 voice_channel=channel,
                 state=session.state,
+                mode=session.mode,
                 current=session.current,
                 upcoming=tuple(session.queue),
                 revision=session.revision,
             )
+
+    async def set_mode(
+        self,
+        identity: AgentIdentity,
+        mode: PlaybackMode,
+    ) -> PlaybackModeChange:
+        """Change playback policy for the caller's current voice channel."""
+        channel = await self._channel_for(identity)
+        session = self._session(channel)
+        async with session.lock:
+            changed = session.mode is not mode
+            if changed:
+                session.mode = mode
+                session.revision += 1
+        logger.info(
+            "Music playback mode selected: channel=%s mode=%s changed=%s",
+            self._channel_ref(channel),
+            mode.value,
+            changed,
+        )
+        return PlaybackModeChange(channel, mode, changed)
 
     async def skip(self, identity: AgentIdentity) -> bool:
         """Request one current track to stop; repeated calls before advance are harmless."""
@@ -298,13 +328,19 @@ class MusicRequestService:
                             "Music playback worker idle: channel=%s",
                             self._channel_ref(channel),
                         )
-                        return
-                    item = session.queue.popleft()
-                    session.current = item
-                    session.state = PlaybackState.LOADING
-                    session.revision += 1
-                    session.skip_requested.clear()
+                        should_leave = True
+                    else:
+                        should_leave = False
+                        item = self._take_next(session)
+                        session.current = item
+                        session.state = PlaybackState.LOADING
+                        session.revision += 1
+                        session.skip_requested.clear()
+                if should_leave:
+                    await self._leave_idle_channel(channel)
+                    return
                 self._voice_owner = channel
+                completed_state = ""
                 try:
                     logger.info(
                         "Music track resolving: channel=%s",
@@ -325,7 +361,7 @@ class MusicRequestService:
                         "Music track playback started: channel=%s",
                         self._channel_ref(channel),
                     )
-                    await self._wait_until_finished(session)
+                    completed_state = await self._wait_until_finished(session)
                 except asyncio.CancelledError:
                     with suppress(Exception):
                         await self._voice.stop()
@@ -344,6 +380,11 @@ class MusicRequestService:
                 finally:
                     self._voice_owner = None
                     async with session.lock:
+                        if (
+                            not session.skip_requested.is_set()
+                            and completed_state in self._COMPLETED_BACKEND_STATES
+                        ):
+                            self._retain_completed(session, item)
                         session.current = None
                         session.skip_requested.clear()
                         session.revision += 1
@@ -352,7 +393,7 @@ class MusicRequestService:
                         self._channel_ref(channel),
                     )
 
-    async def _wait_until_finished(self, session: _MusicSession) -> None:
+    async def _wait_until_finished(self, session: _MusicSession) -> str:
         while not session.skip_requested.is_set():
             await asyncio.sleep(self._settings.playback_poll_seconds)
             try:
@@ -361,7 +402,40 @@ class MusicRequestService:
                 raise MusicPlaybackError("Failed to read music playback state") from exc
             if state in self._FINISHED_BACKEND_STATES:
                 logger.debug("Music backend reported finished state: state=%s", state)
-                return
+                return state
+        return ""
+
+    def _take_next(self, session: _MusicSession) -> QueuedTrack:
+        if session.mode is PlaybackMode.SHUFFLE and len(session.queue) > 1:
+            index = self._rng.randrange(len(session.queue))
+            session.queue.rotate(-index)
+            item = session.queue.popleft()
+            session.queue.rotate(index)
+            return item
+        return session.queue.popleft()
+
+    @staticmethod
+    def _retain_completed(session: _MusicSession, item: QueuedTrack) -> None:
+        if session.mode is PlaybackMode.REPEAT_ONE:
+            session.queue.appendleft(item)
+        elif session.mode is PlaybackMode.REPEAT_ALL:
+            session.queue.append(item)
+
+    async def _leave_idle_channel(self, channel: VoiceChannelKey) -> None:
+        try:
+            left = await self._voice.leave(channel)
+        except Exception as exc:
+            logger.warning(
+                "Could not leave idle OOPZ voice channel: channel=%s error=%s",
+                self._channel_ref(channel),
+                type(exc).__name__,
+            )
+            return
+        logger.info(
+            "Music voice channel released after queue drained: channel=%s left=%s",
+            self._channel_ref(channel),
+            left,
+        )
 
     @staticmethod
     def _channel_ref(channel: VoiceChannelKey) -> str:

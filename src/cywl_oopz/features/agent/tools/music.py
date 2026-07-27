@@ -15,7 +15,12 @@ from cywl_oopz.features.music.errors import (
     MusicQueueFullError,
     MusicVoiceChannelRequiredError,
 )
-from cywl_oopz.features.music.models import MusicQueueSnapshot, MusicTrack, QueuedTrack
+from cywl_oopz.features.music.models import (
+    MusicQueueSnapshot,
+    MusicTrack,
+    PlaybackMode,
+    QueuedTrack,
+)
 from cywl_oopz.features.music.service import MusicRequestService
 
 from .builtin import EmptyToolInput
@@ -212,6 +217,7 @@ class MusicQueueOutput(BaseModel):
 
     voice_channel_id: str
     state: str
+    mode: PlaybackMode
     current: QueuedMusicOutput | None
     upcoming: tuple[QueuedMusicOutput, ...]
     revision: int
@@ -221,6 +227,7 @@ class MusicQueueOutput(BaseModel):
         return cls(
             voice_channel_id=snapshot.voice_channel.channel_id,
             state=snapshot.state.value,
+            mode=snapshot.mode,
             current=(
                 QueuedMusicOutput.from_item(snapshot.current)
                 if snapshot.current is not None
@@ -276,6 +283,67 @@ class MusicControlOutput(BaseModel):
     """Result of one idempotent playback-control request."""
 
     applied: bool
+
+
+class MusicPlaybackModeInput(BaseModel):
+    """One explicit queue policy selected by the user."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: PlaybackMode = Field(
+        description=(
+            "播放模式：sequential 顺序播放；repeat_one 单曲循环；"
+            "repeat_all 列表循环；shuffle 随机播放"
+        )
+    )
+
+
+class MusicPlaybackModeOutput(BaseModel):
+    """Committed playback policy for the caller's voice channel."""
+
+    mode: PlaybackMode
+    changed: bool
+
+
+class SetMusicPlaybackModeTool(_MusicTool):
+    """Change queue behavior without exposing channel identifiers as input."""
+
+    def __init__(
+        self,
+        music: MusicRequestService,
+        *,
+        timeout_seconds: float,
+        max_output_characters: int,
+    ) -> None:
+        self._music = music
+        self._descriptor = ToolDescriptor(
+            name="set_music_playback_mode",
+            display_name="设置播放模式",
+            description=("设置用户当前语音频道的顺序播放、单曲循环、列表循环或随机播放模式。"),
+            input_model=MusicPlaybackModeInput,
+            output_model=MusicPlaybackModeOutput,
+            effect=ToolEffect.WRITE,
+            timeout_seconds=timeout_seconds,
+            max_output_characters=max_output_characters,
+            concurrency_safe=False,
+            idempotent=True,
+        )
+
+    @property
+    def descriptor(self) -> ToolDescriptor:
+        return self._descriptor
+
+    async def execute(
+        self,
+        context: ToolExecutionContext,
+        arguments: BaseModel,
+    ) -> BaseModel:
+        values = MusicPlaybackModeInput.model_validate(arguments)
+        try:
+            result = await self._music.set_mode(context.identity, values.mode)
+        except MusicError as exc:
+            self._raise_tool_error(exc)
+        return MusicPlaybackModeOutput(mode=result.mode, changed=result.changed)
 
 
 class _MusicControlTool(_MusicTool):

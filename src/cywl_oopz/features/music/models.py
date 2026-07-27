@@ -68,12 +68,22 @@ class PlaybackState(StrEnum):
     FAILED = "failed"
 
 
+class PlaybackMode(StrEnum):
+    """Queue selection and completed-track retention policy."""
+
+    SEQUENTIAL = "sequential"
+    REPEAT_ONE = "repeat_one"
+    REPEAT_ALL = "repeat_all"
+    SHUFFLE = "shuffle"
+
+
 @dataclass(frozen=True, slots=True)
 class MusicQueueSnapshot:
     """Bounded immutable view of one voice channel queue."""
 
     voice_channel: VoiceChannelKey
     state: PlaybackState
+    mode: PlaybackMode
     current: QueuedTrack | None
     upcoming: tuple[QueuedTrack, ...]
     revision: int
@@ -87,3 +97,12 @@ class EnqueueResult:
     item: QueuedTrack
     position: int
     started_worker: bool
+
+
+@dataclass(frozen=True, slots=True)
+class PlaybackModeChange:
+    """Result of changing one voice channel's playback policy."""
+
+    voice_channel: VoiceChannelKey
+    mode: PlaybackMode
+    changed: bool

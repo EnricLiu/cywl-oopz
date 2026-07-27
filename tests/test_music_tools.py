@@ -11,8 +11,10 @@ from cywl_oopz.features.agent.tools.music import (
     EnqueueMusicInput,
     EnqueueMusicTool,
     GetMusicQueueTool,
+    MusicPlaybackModeInput,
     MusicSearchInput,
     SearchMusicCatalogTool,
+    SetMusicPlaybackModeTool,
 )
 from cywl_oopz.features.chat.models import ConversationKey
 from cywl_oopz.features.music.errors import MusicVoiceChannelRequiredError
@@ -20,6 +22,8 @@ from cywl_oopz.features.music.models import (
     EnqueueResult,
     MusicQueueSnapshot,
     MusicTrack,
+    PlaybackMode,
+    PlaybackModeChange,
     PlaybackState,
     QueuedTrack,
     VoiceChannelKey,
@@ -53,10 +57,19 @@ class StubMusic:
         return MusicQueueSnapshot(
             VoiceChannelKey("area", "voice"),
             PlaybackState.PLAYING,
+            PlaybackMode.SEQUENTIAL,
             item,
             (),
             2,
         )
+
+    async def set_mode(
+        self,
+        identity: AgentIdentity,
+        mode: PlaybackMode,
+    ) -> PlaybackModeChange:
+        assert identity.person_id == "person"
+        return PlaybackModeChange(VoiceChannelKey("area", "voice"), mode, True)
 
 
 def context() -> ToolExecutionContext:
@@ -68,7 +81,12 @@ def context() -> ToolExecutionContext:
         uuid4(),
         identity,
         AgentRunLimits(),
-        ("search_music_catalog", "enqueue_music", "get_music_queue"),
+        (
+            "search_music_catalog",
+            "enqueue_music",
+            "get_music_queue",
+            "set_music_playback_mode",
+        ),
     )
 
 
@@ -79,6 +97,7 @@ async def test_music_tools_expose_bounded_metadata_and_trusted_voice_target() ->
     search = SearchMusicCatalogTool(music, **options)
     enqueue = EnqueueMusicTool(music, **options)
     queue = GetMusicQueueTool(music, **options)
+    mode = SetMusicPlaybackModeTool(music, **options)
 
     search_output = await search.execute(
         context(),
@@ -89,10 +108,19 @@ async def test_music_tools_expose_bounded_metadata_and_trusted_voice_target() ->
         EnqueueMusicInput(query="Blue Train"),
     )
     queue_output = await queue.execute(context(), queue.descriptor.input_model())
+    mode_output = await mode.execute(
+        context(),
+        MusicPlaybackModeInput(mode=PlaybackMode.REPEAT_ALL),
+    )
 
     assert search_output.model_dump()["tracks"][0]["source_id"] == "42"
     assert enqueue_output.model_dump()["voice_channel_id"] == "voice"
     assert queue_output.model_dump()["state"] == "playing"
+    assert queue_output.model_dump()["mode"] == PlaybackMode.SEQUENTIAL
+    assert mode_output.model_dump() == {
+        "mode": PlaybackMode.REPEAT_ALL,
+        "changed": True,
+    }
 
 
 @pytest.mark.asyncio

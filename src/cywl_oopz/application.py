@@ -52,6 +52,7 @@ from .features.agent.tools.music import (
     PauseMusicTool,
     ResumeMusicTool,
     SearchMusicCatalogTool,
+    SetMusicPlaybackModeTool,
     SkipMusicTool,
 )
 from .features.agent.tools.policy import ToolAvailabilityService, ToolPolicy
@@ -180,6 +181,7 @@ class BotApplication:
                     SkipMusicTool(self.music, **music_tool_options),
                     PauseMusicTool(self.music, **music_tool_options),
                     ResumeMusicTool(self.music, **music_tool_options),
+                    SetMusicPlaybackModeTool(self.music, **music_tool_options),
                 )
             )
         else:

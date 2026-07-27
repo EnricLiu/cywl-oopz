@@ -89,9 +89,31 @@ def test_browser_and_music_results_have_compact_human_summaries() -> None:
         },
         succeeded=True,
     )
+    queue = catalog.result(
+        "get_music_queue",
+        {
+            "ok": True,
+            "data": {
+                "current": {"track": {"title": "Tell Your World"}},
+                "upcoming": [{"track": {"title": "39"}}],
+                "mode": "shuffle",
+            },
+        },
+        succeeded=True,
+    )
+    mode = catalog.result(
+        "set_music_playback_mode",
+        {
+            "ok": True,
+            "data": {"mode": "repeat_all", "changed": True},
+        },
+        succeeded=True,
+    )
 
     assert page.summary == "Example Domain"
     assert music.summary == "歌曲「Tell Your World」 · 队列第 2 位"
+    assert queue.summary == "正在播放 · 后续 1 首 · 随机播放"
+    assert mode.summary == "列表循环已设置"
     assert "snapshot" not in repr(page)
     assert "source_id" not in repr(music)
 

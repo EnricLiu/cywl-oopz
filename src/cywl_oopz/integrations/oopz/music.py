@@ -74,6 +74,19 @@ class OopzMusicVoiceGateway:
         logger.info("Resumed OOPZ voice playback: applied=%s", resumed)
         return resumed
 
+    async def leave(self, channel: VoiceChannelKey) -> bool:
+        """Leave only if the requested channel still owns the SDK voice backend."""
+        async with self._lock:
+            if self._current_channel != channel:
+                return False
+            logger.info(
+                "Leaving idle OOPZ voice channel: channel=%s",
+                self._channel_ref(channel),
+            )
+            await self._bot.voice.leave()
+            self._current_channel = None
+            return True
+
     async def aclose(self) -> None:
         async with self._lock:
             try:

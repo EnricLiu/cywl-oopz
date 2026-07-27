@@ -41,5 +41,8 @@ class MusicVoiceGateway(Protocol):
     async def resume(self) -> bool:
         """Resume the current track."""
 
+    async def leave(self, channel: VoiceChannelKey) -> bool:
+        """Leave the channel only when it still owns the shared voice backend."""
+
     async def aclose(self) -> None:
         """Stop playback and leave the active voice channel."""

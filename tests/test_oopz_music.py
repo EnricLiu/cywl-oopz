@@ -70,6 +70,8 @@ async def test_oopz_music_gateway_reuses_channel_and_switches_cleanly() -> None:
     assert bot.voice.leaves == 1
     assert bot.voice.volumes == [2, 2, 2]
 
+    assert await gateway.leave(first) is False
+    assert await gateway.leave(second) is True
     await gateway.aclose()
     assert bot.voice.stops == 1
     assert bot.voice.leaves == 2

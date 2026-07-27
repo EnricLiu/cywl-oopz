@@ -50,7 +50,8 @@ DEFAULT_AGENT_TOOLS = text(
     '"pause_music",'
     '"resume_music",'
     '"search_web",'
-    '"read_web_page"'
+    '"read_web_page",'
+    '"set_music_playback_mode"'
     "]'::jsonb"
 )
 TRUE = text("true")
@@ -135,6 +136,7 @@ class ChannelSettingsRecord(Base):
             "resume_music",
             "search_web",
             "read_web_page",
+            "set_music_playback_mode",
         ],
         server_default=DEFAULT_AGENT_TOOLS,
         nullable=False,

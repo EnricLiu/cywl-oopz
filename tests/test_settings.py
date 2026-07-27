@@ -60,6 +60,7 @@ def test_app_settings_use_the_injected_oopz_credentials(monkeypatch) -> None:
         "browser_click",
         "browser_fill",
         "browser_press",
+        "set_music_playback_mode",
     )
     assert settings.agent.summary_enabled is True
     assert settings.agent.memory_enabled_by_default is True

@@ -232,8 +232,30 @@ class MusicProgressProjector(_ProjectionSupport):
                 else 0
             )
             current = values.get("current")
-            summary = f"正在播放 · 后续 {count} 首" if current else f"当前未播放 · 后续 {count} 首"
+            mode_names = {
+                "sequential": "顺序播放",
+                "repeat_one": "单曲循环",
+                "repeat_all": "列表循环",
+                "shuffle": "随机播放",
+            }
+            mode = mode_names.get(str(values.get("mode", "")), "顺序播放")
+            summary = (
+                f"正在播放 · 后续 {count} 首 · {mode}"
+                if current
+                else f"当前未播放 · 后续 {count} 首 · {mode}"
+            )
             return ToolProgressPresentation(summary=summary)
+        if tool_name == "set_music_playback_mode":
+            mode_names = {
+                "sequential": "顺序播放",
+                "repeat_one": "单曲循环",
+                "repeat_all": "列表循环",
+                "shuffle": "随机播放",
+            }
+            mode = mode_names.get(str(values.get("mode", "")), "播放模式")
+            return ToolProgressPresentation(
+                summary=f"{mode}已设置" if values.get("changed") else f"已是{mode}"
+            )
         if tool_name in {"skip_music", "pause_music", "resume_music"}:
             return ToolProgressPresentation(
                 summary=("操作已生效" if values.get("applied") else "当前无需操作")
