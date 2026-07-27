@@ -24,6 +24,7 @@ DEFAULT_AGENT_TOOLS = (
     "skip_music",
     "pause_music",
     "resume_music",
+    "search_web",
 )
 
 MUSIC_AGENT_TOOLS = frozenset(
@@ -36,6 +37,8 @@ MUSIC_AGENT_TOOLS = frozenset(
         "resume_music",
     }
 )
+
+WEB_SEARCH_AGENT_TOOLS = frozenset({"search_web"})
 
 DEFAULT_AGENT_SYSTEM_PROMPT = (
     "你是 CYWL，也就是虚拟歌手初音未来（Hatsune Miku）。"
@@ -488,6 +491,78 @@ class MusicSettings:
         )
 
 
+class WebSearchSafeSearch(StrEnum):
+    """DuckDuckGo safe-search levels accepted by the project boundary."""
+
+    ON = "on"
+    MODERATE = "moderate"
+    OFF = "off"
+
+
+@dataclass(frozen=True, slots=True)
+class WebToolsSettings:
+    """Configuration for bounded internet search and later browser tools."""
+
+    search_enabled: bool
+    search_region: str
+    search_safesearch: WebSearchSafeSearch
+    search_max_results: int
+    search_timeout_seconds: float
+    search_max_query_characters: int
+    search_max_concurrency: int
+
+    @classmethod
+    def from_mapping(cls, values: Mapping[str, str]) -> WebToolsSettings:
+        """Build the DuckDuckGo search policy without requiring credentials."""
+        region = values.get("CYWL_WEB_SEARCH_REGION", "cn-zh").strip().casefold()
+        if not region or len(region) > 32:
+            raise ConfigurationError("CYWL_WEB_SEARCH_REGION must be between 1 and 32 characters")
+        raw_safesearch = (
+            values.get(
+                "CYWL_WEB_SEARCH_SAFESEARCH",
+                WebSearchSafeSearch.MODERATE.value,
+            )
+            .strip()
+            .casefold()
+        )
+        try:
+            safesearch = WebSearchSafeSearch(raw_safesearch)
+        except ValueError as exc:
+            raise ConfigurationError(
+                "CYWL_WEB_SEARCH_SAFESEARCH must be on, moderate, or off"
+            ) from exc
+        max_results = _positive_integer(values, "CYWL_WEB_SEARCH_MAX_RESULTS", 5)
+        if max_results > 10:
+            raise ConfigurationError("CYWL_WEB_SEARCH_MAX_RESULTS must not exceed 10")
+        max_query_characters = _positive_integer(
+            values,
+            "CYWL_WEB_SEARCH_MAX_QUERY_CHARACTERS",
+            300,
+        )
+        if max_query_characters > 300:
+            raise ConfigurationError("CYWL_WEB_SEARCH_MAX_QUERY_CHARACTERS must not exceed 300")
+        max_concurrency = _positive_integer(
+            values,
+            "CYWL_WEB_SEARCH_MAX_CONCURRENCY",
+            3,
+        )
+        if max_concurrency > 8:
+            raise ConfigurationError("CYWL_WEB_SEARCH_MAX_CONCURRENCY must not exceed 8")
+        return cls(
+            search_enabled=_boolean(values, "CYWL_WEB_SEARCH_ENABLED", True),
+            search_region=region,
+            search_safesearch=safesearch,
+            search_max_results=max_results,
+            search_timeout_seconds=_positive_float(
+                values,
+                "CYWL_WEB_SEARCH_TIMEOUT_SECONDS",
+                8.0,
+            ),
+            search_max_query_characters=max_query_characters,
+            search_max_concurrency=max_concurrency,
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class AppSettings:
     """All settings owned by the CYWL application."""
@@ -497,6 +572,7 @@ class AppSettings:
     chat: ChatSettings
     agent: AgentSettings
     music: MusicSettings
+    web: WebToolsSettings
     command_prefix: str = "!"
     environment: str = "development"
 
@@ -530,6 +606,7 @@ class AppSettings:
             chat=ChatSettings.from_mapping(values),
             agent=AgentSettings.from_mapping(values),
             music=MusicSettings.from_mapping(values),
+            web=WebToolsSettings.from_mapping(values),
             command_prefix=command_prefix,
             environment=values.get("CYWL_ENV", "development").strip() or "development",
         )

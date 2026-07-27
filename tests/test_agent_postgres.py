@@ -105,6 +105,7 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
             "skip_music",
             "pause_music",
             "resume_music",
+            "search_web",
         ]
 
         async with test_engine.begin() as connection:
@@ -140,6 +141,7 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
             "skip_music",
             "pause_music",
             "resume_music",
+            "search_web",
         ]
         assert defaulted["created_at"] == defaulted["updated_at"]
 

@@ -54,6 +54,7 @@ from .features.agent.tools.music import (
 )
 from .features.agent.tools.policy import ToolAvailabilityService, ToolPolicy
 from .features.agent.tools.registry import ToolRegistry
+from .features.agent.tools.web import SearchWebTool
 from .features.chat.commands import (
     AmbientChatHandler,
     CancelChatCommand,
@@ -71,12 +72,14 @@ from .features.chat.service import ChatService
 from .features.chat.tasks import ChatTaskSupervisor
 from .features.music.netease import NeteaseMusicCatalog
 from .features.music.service import MusicRequestService
+from .features.web.service import WebSearchService
 from .integrations.oopz.agent_presenter import OopzAgentPresenterFactory
 from .integrations.oopz.editable_messages import OopzEditableMessageGateway
 from .integrations.oopz.message_renderer import OopzMessageRenderer
 from .integrations.oopz.music import OopzMusicVoiceGateway
 from .integrations.oopz.reactions import OopzReactionGateway
-from .settings import MUSIC_AGENT_TOOLS, AppSettings
+from .integrations.web.duckduckgo import DuckDuckGoSearchGateway
+from .settings import MUSIC_AGENT_TOOLS, WEB_SEARCH_AGENT_TOOLS, AppSettings
 from .storage.channel_settings import SqlAlchemyChannelSettingsRepository
 from .storage.database import Database
 
@@ -161,6 +164,26 @@ class BotApplication:
         else:
             enabled_agent_tools = tuple(
                 name for name in enabled_agent_tools if name not in MUSIC_AGENT_TOOLS
+            )
+        self.web_search: WebSearchService | None = None
+        if settings.web.search_enabled:
+            self.web_search = WebSearchService(
+                settings.web,
+                DuckDuckGoSearchGateway(
+                    timeout_seconds=settings.web.search_timeout_seconds,
+                    max_concurrency=settings.web.search_max_concurrency,
+                ),
+            )
+            agent_tools.append(
+                SearchWebTool(
+                    self.web_search,
+                    timeout_seconds=settings.agent.tool_timeout_seconds,
+                    max_output_characters=settings.agent.max_tool_result_characters,
+                )
+            )
+        else:
+            enabled_agent_tools = tuple(
+                name for name in enabled_agent_tools if name not in WEB_SEARCH_AGENT_TOOLS
             )
         self.agent_tool_registry = ToolRegistry(agent_tools)
         self.agent_tool_availability = ToolAvailabilityService(
@@ -300,6 +323,8 @@ class BotApplication:
             await self.agent_summary_tasks.close()
             if self.music is not None:
                 await self.music.aclose()
+            if self.web_search is not None:
+                await self.web_search.aclose()
             await self.agent_engine.aclose()
             await self._provider.aclose()
             await self.database.close()

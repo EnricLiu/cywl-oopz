@@ -48,7 +48,8 @@ DEFAULT_AGENT_TOOLS = text(
     '"get_music_queue",'
     '"skip_music",'
     '"pause_music",'
-    '"resume_music"'
+    '"resume_music",'
+    '"search_web"'
     "]'::jsonb"
 )
 TRUE = text("true")
@@ -131,6 +132,7 @@ class ChannelSettingsRecord(Base):
             "skip_music",
             "pause_music",
             "resume_music",
+            "search_web",
         ],
         server_default=DEFAULT_AGENT_TOOLS,
         nullable=False,

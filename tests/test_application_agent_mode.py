@@ -102,6 +102,23 @@ async def test_composition_root_registers_music_tools_only_when_music_is_enabled
 
 
 @pytest.mark.asyncio
+async def test_composition_root_registers_web_search_only_when_enabled(monkeypatch) -> None:
+    monkeypatch.setattr(application_module, "OopzBot", FakeOopzBot)
+    enabled = BotApplication(settings("agent"))
+    disabled = BotApplication(settings("agent", CYWL_WEB_SEARCH_ENABLED="false"))
+
+    assert enabled.web_search is not None
+    assert "search_web" in enabled.agent_tool_registry.names
+    assert disabled.web_search is None
+    assert "search_web" not in disabled.agent_tool_registry.names
+
+    for application in (enabled, disabled):
+        await application.agent_engine.aclose()
+        await application._provider.aclose()
+        await application.database.close()
+
+
+@pytest.mark.asyncio
 async def test_agent_mode_fails_before_oopz_when_catalog_has_no_application_default(
     monkeypatch,
 ) -> None:

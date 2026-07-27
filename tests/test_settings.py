@@ -10,6 +10,8 @@ from cywl_oopz.settings import (
     ChatSettings,
     DatabaseSettings,
     MusicSettings,
+    WebSearchSafeSearch,
+    WebToolsSettings,
 )
 
 
@@ -49,12 +51,15 @@ def test_app_settings_use_the_injected_oopz_credentials(monkeypatch) -> None:
         "skip_music",
         "pause_music",
         "resume_music",
+        "search_web",
     )
     assert settings.agent.summary_enabled is True
     assert settings.agent.memory_enabled_by_default is True
     assert settings.agent.live_display is False
     assert settings.agent.display_edit_interval_seconds == 0.8
     assert settings.music.enabled is False
+    assert settings.web.search_enabled is True
+    assert settings.web.search_safesearch is WebSearchSafeSearch.MODERATE
 
 
 def test_agent_mode_uses_database_catalog_without_legacy_llm_credentials() -> None:
@@ -163,6 +168,31 @@ def test_enabled_music_requires_http_catalog_and_loads_bounds() -> None:
     assert settings.catalog_base_url == "http://music.example"
     assert settings.search_limit == 7
     assert settings.max_queue_length == 12
+
+
+def test_web_search_settings_validate_provider_bounds() -> None:
+    settings = WebToolsSettings.from_mapping(
+        {
+            "CYWL_WEB_SEARCH_REGION": "us-en",
+            "CYWL_WEB_SEARCH_SAFESEARCH": "off",
+            "CYWL_WEB_SEARCH_MAX_RESULTS": "8",
+            "CYWL_WEB_SEARCH_TIMEOUT_SECONDS": "3.5",
+        }
+    )
+
+    assert settings.search_region == "us-en"
+    assert settings.search_safesearch is WebSearchSafeSearch.OFF
+    assert settings.search_max_results == 8
+    assert settings.search_timeout_seconds == 3.5
+
+    with pytest.raises(ConfigurationError, match="SAFESEARCH"):
+        WebToolsSettings.from_mapping({"CYWL_WEB_SEARCH_SAFESEARCH": "sometimes"})
+    with pytest.raises(ConfigurationError, match="MAX_RESULTS"):
+        WebToolsSettings.from_mapping({"CYWL_WEB_SEARCH_MAX_RESULTS": "11"})
+    with pytest.raises(ConfigurationError, match="MAX_QUERY_CHARACTERS"):
+        WebToolsSettings.from_mapping({"CYWL_WEB_SEARCH_MAX_QUERY_CHARACTERS": "301"})
+    with pytest.raises(ConfigurationError, match="MAX_CONCURRENCY"):
+        WebToolsSettings.from_mapping({"CYWL_WEB_SEARCH_MAX_CONCURRENCY": "9"})
 
 
 def test_from_environment_loads_dotenv_from_the_current_directory(tmp_path, monkeypatch) -> None:
