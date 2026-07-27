@@ -86,8 +86,10 @@ async def test_composition_root_registers_music_tools_only_when_music_is_enabled
     )
 
     assert disabled.music is None
+    assert disabled.music_playlists is None
     assert "enqueue_music" not in disabled.agent_tool_registry.names
     assert enabled.music is not None
+    assert enabled.music_playlists is not None
     assert {
         "search_music_catalog",
         "enqueue_music",
@@ -96,6 +98,12 @@ async def test_composition_root_registers_music_tools_only_when_music_is_enabled
         "pause_music",
         "resume_music",
         "set_music_playback_mode",
+        "create_music_playlist",
+        "list_music_playlists",
+        "get_music_playlist",
+        "add_music_playlist_track",
+        "remove_music_playlist_track",
+        "load_music_playlist",
     }.issubset(enabled.agent_tool_registry.names)
 
     await enabled.music.aclose()

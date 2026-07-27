@@ -45,6 +45,14 @@ from cywl_oopz.features.agent.tools.models import (
     ToolExecutionStatus,
 )
 from cywl_oopz.features.chat.models import ConversationKey
+from cywl_oopz.features.music.errors import (
+    MusicPlaylistConflictError,
+    MusicPlaylistFullError,
+)
+from cywl_oopz.features.music.models import MusicTrack
+from cywl_oopz.features.music.playlist_repository import (
+    SqlAlchemyMusicPlaylistRepository,
+)
 from cywl_oopz.storage.models import (
     AgentRunRecord,
     ChannelSettingsRecord,
@@ -108,6 +116,12 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
             "search_web",
             "read_web_page",
             "set_music_playback_mode",
+            "create_music_playlist",
+            "list_music_playlists",
+            "get_music_playlist",
+            "add_music_playlist_track",
+            "remove_music_playlist_track",
+            "load_music_playlist",
         ]
 
         async with test_engine.begin() as connection:
@@ -146,8 +160,66 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
             "search_web",
             "read_web_page",
             "set_music_playback_mode",
+            "create_music_playlist",
+            "list_music_playlists",
+            "get_music_playlist",
+            "add_music_playlist_track",
+            "remove_music_playlist_track",
+            "load_music_playlist",
         ]
         assert defaulted["created_at"] == defaulted["updated_at"]
+
+        playlist_repository = SqlAlchemyMusicPlaylistRepository(sessions)
+        playlist = await playlist_repository.create(
+            "shared-area",
+            "夜间 电台",
+            "夜间 电台".casefold(),
+            "person",
+        )
+        with pytest.raises(MusicPlaylistConflictError):
+            await playlist_repository.create(
+                "shared-area",
+                "夜间 电台",
+                "夜间 电台".casefold(),
+                "other",
+            )
+        first_playlist_track = await playlist_repository.append(
+            "shared-area",
+            playlist.id,
+            MusicTrack("netease", "first", "First", ("Miku",), 1000),
+            "person",
+            max_tracks=2,
+        )
+        second_playlist_track = await playlist_repository.append(
+            "shared-area",
+            playlist.id,
+            MusicTrack("netease", "second", "Second", ("Miku",), 2000),
+            "other",
+            max_tracks=2,
+        )
+        with pytest.raises(MusicPlaylistFullError):
+            await playlist_repository.append(
+                "shared-area",
+                playlist.id,
+                MusicTrack("netease", "third", "Third", (), None),
+                "person",
+                max_tracks=2,
+            )
+        summaries = await playlist_repository.list("shared-area")
+        assert [(item.id, item.track_count) for item in summaries] == [(playlist.id, 2)]
+        assert await playlist_repository.get("other-area", playlist.id) is None
+        assert (
+            await playlist_repository.remove(
+                "shared-area",
+                playlist.id,
+                first_playlist_track.id,
+            )
+        ).removed is True
+        compacted_playlist = await playlist_repository.get("shared-area", playlist.id)
+        assert compacted_playlist is not None
+        assert [(entry.id, entry.position) for entry in compacted_playlist.entries] == [
+            (second_playlist_track.id, 1)
+        ]
 
         async with test_engine.begin() as connection:
             triggered_updated_at = await connection.scalar(

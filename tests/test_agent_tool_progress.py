@@ -109,11 +109,39 @@ def test_browser_and_music_results_have_compact_human_summaries() -> None:
         },
         succeeded=True,
     )
+    playlists = catalog.result(
+        "list_music_playlists",
+        {
+            "ok": True,
+            "data": {
+                "playlists": [
+                    {"id": "one", "name": "夜间电台", "track_count": 3},
+                    {"id": "two", "name": "V家", "track_count": 8},
+                ]
+            },
+        },
+        succeeded=True,
+    )
+    loaded_playlist = catalog.result(
+        "load_music_playlist",
+        {
+            "ok": True,
+            "data": {
+                "playlist_name": "夜间电台",
+                "loaded_count": 3,
+                "voice_channel_id": "private",
+            },
+        },
+        succeeded=True,
+    )
 
     assert page.summary == "Example Domain"
     assert music.summary == "歌曲「Tell Your World」 · 队列第 2 位"
     assert queue.summary == "正在播放 · 后续 1 首 · 随机播放"
     assert mode.summary == "列表循环已设置"
+    assert playlists.summary == "找到 2 个共享歌单"
+    assert loaded_playlist.summary == "歌单「夜间电台」· 已载入 3 首"
+    assert "voice_channel_id" not in repr(loaded_playlist)
     assert "snapshot" not in repr(page)
     assert "source_id" not in repr(music)
 

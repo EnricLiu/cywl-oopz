@@ -31,3 +31,27 @@ class MusicQueueFullError(MusicError):
 
 class MusicPlaybackError(MusicError):
     """Raised when the OOPZ voice backend cannot perform a requested action."""
+
+
+class MusicAreaRequiredError(MusicError):
+    """Raised when a shared playlist operation has no OOPZ area scope."""
+
+
+class MusicPlaylistNameError(MusicError):
+    """Raised when a playlist name is empty or too long."""
+
+
+class MusicPlaylistConflictError(MusicError):
+    """Raised when an area already has a playlist with the requested name."""
+
+
+class MusicPlaylistNotFoundError(MusicError):
+    """Raised when a playlist is absent from the caller's area."""
+
+
+class MusicPlaylistFullError(MusicError):
+    """Raised when a playlist reaches the configured track capacity."""
+
+
+class MusicPlaylistEmptyError(MusicError):
+    """Raised when an empty playlist cannot rebuild a playback queue."""

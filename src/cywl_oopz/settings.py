@@ -34,6 +34,12 @@ DEFAULT_AGENT_TOOLS = (
     "browser_fill",
     "browser_press",
     "set_music_playback_mode",
+    "create_music_playlist",
+    "list_music_playlists",
+    "get_music_playlist",
+    "add_music_playlist_track",
+    "remove_music_playlist_track",
+    "load_music_playlist",
 )
 
 MUSIC_AGENT_TOOLS = frozenset(
@@ -45,6 +51,12 @@ MUSIC_AGENT_TOOLS = frozenset(
         "pause_music",
         "resume_music",
         "set_music_playback_mode",
+        "create_music_playlist",
+        "list_music_playlists",
+        "get_music_playlist",
+        "add_music_playlist_track",
+        "remove_music_playlist_track",
+        "load_music_playlist",
     }
 )
 

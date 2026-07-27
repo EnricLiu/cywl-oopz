@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import (
     JSON,
     BigInteger,
+    CheckConstraint,
     DateTime,
     Enum,
     FetchedValue,
@@ -51,7 +52,13 @@ DEFAULT_AGENT_TOOLS = text(
     '"resume_music",'
     '"search_web",'
     '"read_web_page",'
-    '"set_music_playback_mode"'
+    '"set_music_playback_mode",'
+    '"create_music_playlist",'
+    '"list_music_playlists",'
+    '"get_music_playlist",'
+    '"add_music_playlist_track",'
+    '"remove_music_playlist_track",'
+    '"load_music_playlist"'
     "]'::jsonb"
 )
 TRUE = text("true")
@@ -137,6 +144,12 @@ class ChannelSettingsRecord(Base):
             "search_web",
             "read_web_page",
             "set_music_playback_mode",
+            "create_music_playlist",
+            "list_music_playlists",
+            "get_music_playlist",
+            "add_music_playlist_track",
+            "remove_music_playlist_track",
+            "load_music_playlist",
         ],
         server_default=DEFAULT_AGENT_TOOLS,
         nullable=False,
@@ -155,6 +168,85 @@ class ChannelSettingsRecord(Base):
         default=utc_now,
         server_default=CURRENT_TIMESTAMP,
         server_onupdate=FetchedValue(),
+    )
+
+
+class MusicPlaylistRecord(Base):
+    """One shared playlist identified inside an OOPZ area."""
+
+    __tablename__ = "music_playlists"
+    __table_args__ = (
+        UniqueConstraint("area_id", "normalized_name"),
+        Index("ix_music_playlists_area_updated", "area_id", "updated_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid,
+        primary_key=True,
+        default=uuid4,
+        server_default=GENERATED_UUID,
+    )
+    area_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    name: Mapped[str] = mapped_column(String(80), nullable=False)
+    normalized_name: Mapped[str] = mapped_column(String(80), nullable=False)
+    created_by_person_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        server_default=CURRENT_TIMESTAMP,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        server_default=CURRENT_TIMESTAMP,
+        server_onupdate=FetchedValue(),
+    )
+
+
+class MusicPlaylistTrackRecord(Base):
+    """One ordered catalog metadata snapshot inside a shared playlist."""
+
+    __tablename__ = "music_playlist_tracks"
+    __table_args__ = (
+        UniqueConstraint(
+            "playlist_id",
+            "position",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+        CheckConstraint("position > 0", name="ck_music_playlist_tracks_position_positive"),
+        CheckConstraint(
+            "duration_ms IS NULL OR duration_ms >= 0",
+            name="ck_music_playlist_tracks_duration_nonnegative",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid,
+        primary_key=True,
+        default=uuid4,
+        server_default=GENERATED_UUID,
+    )
+    playlist_id: Mapped[UUID] = mapped_column(
+        ForeignKey("music_playlists.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    source: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    title: Mapped[str] = mapped_column(String(512), nullable=False)
+    artists: Mapped[list[str]] = mapped_column(
+        JSONB,
+        default=list,
+        server_default=EMPTY_JSONB_ARRAY,
+        nullable=False,
+    )
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    added_by_person_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        server_default=CURRENT_TIMESTAMP,
     )
 
 

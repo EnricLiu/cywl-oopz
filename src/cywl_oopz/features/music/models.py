@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import StrEnum
 from uuid import UUID, uuid4
 
@@ -106,3 +107,72 @@ class PlaybackModeChange:
     voice_channel: VoiceChannelKey
     mode: PlaybackMode
     changed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class QueueRebuildResult:
+    """Result of replacing one voice channel's active and upcoming queue."""
+
+    voice_channel: VoiceChannelKey
+    loaded_count: int
+    replaced_current: bool
+    started_worker: bool
+
+
+@dataclass(frozen=True, slots=True)
+class MusicPlaylistEntry:
+    """One stable, ordered track snapshot stored in a shared area playlist."""
+
+    id: UUID
+    playlist_id: UUID
+    position: int
+    track: MusicTrack
+    added_by_person_id: str
+    created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class MusicPlaylist:
+    """An area-scoped shared playlist and its ordered entries."""
+
+    id: UUID
+    area_id: str
+    name: str
+    normalized_name: str
+    created_by_person_id: str
+    entries: tuple[MusicPlaylistEntry, ...]
+    created_at: datetime
+    updated_at: datetime
+
+    @property
+    def track_count(self) -> int:
+        return len(self.entries)
+
+
+@dataclass(frozen=True, slots=True)
+class MusicPlaylistSummary:
+    """Compact playlist metadata for area-level discovery."""
+
+    id: UUID
+    area_id: str
+    name: str
+    track_count: int
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class PlaylistTrackRemoval:
+    """Result of deleting and compacting one playlist entry."""
+
+    playlist_id: UUID
+    entry_id: UUID
+    removed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class PlaylistQueueLoad:
+    """A playlist plus the queue replacement committed from its entries."""
+
+    playlist_id: UUID
+    playlist_name: str
+    queue: QueueRebuildResult

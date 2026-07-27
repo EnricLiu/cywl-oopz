@@ -211,7 +211,8 @@ class MusicProgressProjector(_ProjectionSupport):
         arguments: Mapping[str, Any],
     ) -> ToolProgressPresentation:
         del tool_name
-        return ToolProgressPresentation(subject=self.scalar(arguments.get("query")))
+        subject = self.scalar(arguments.get("query") or arguments.get("name"))
+        return ToolProgressPresentation(subject=subject)
 
     def result(
         self,
@@ -256,6 +257,41 @@ class MusicProgressProjector(_ProjectionSupport):
             return ToolProgressPresentation(
                 summary=f"{mode}已设置" if values.get("changed") else f"已是{mode}"
             )
+        if tool_name == "create_music_playlist":
+            playlist = values.get("playlist")
+            name = self.scalar(playlist.get("name")) if isinstance(playlist, Mapping) else ""
+            return ToolProgressPresentation(summary=f"歌单「{name}」已创建")
+        if tool_name == "list_music_playlists":
+            playlists = values.get("playlists")
+            count = (
+                len(playlists)
+                if isinstance(playlists, Sequence) and not isinstance(playlists, str)
+                else 0
+            )
+            return ToolProgressPresentation(summary=f"找到 {count} 个共享歌单")
+        if tool_name == "get_music_playlist":
+            name = self.scalar(values.get("name"))
+            entries = values.get("entries")
+            count = (
+                len(entries)
+                if isinstance(entries, Sequence) and not isinstance(entries, str)
+                else 0
+            )
+            return ToolProgressPresentation(summary=f"歌单「{name}」· {count} 首")
+        if tool_name == "add_music_playlist_track":
+            entry = values.get("entry")
+            track = entry.get("track") if isinstance(entry, Mapping) else None
+            title = self.scalar(track.get("title")) if isinstance(track, Mapping) else ""
+            return ToolProgressPresentation(summary=f"歌曲「{title}」已加入歌单")
+        if tool_name == "remove_music_playlist_track":
+            return ToolProgressPresentation(
+                summary=("歌曲已移出歌单" if values.get("removed") else "歌单中没有该条目")
+            )
+        if tool_name == "load_music_playlist":
+            name = self.scalar(values.get("playlist_name"))
+            count = values.get("loaded_count")
+            count = count if isinstance(count, int) else 0
+            return ToolProgressPresentation(summary=f"歌单「{name}」· 已载入 {count} 首")
         if tool_name in {"skip_music", "pause_music", "resume_music"}:
             return ToolProgressPresentation(
                 summary=("操作已生效" if values.get("applied") else "当前无需操作")
@@ -328,6 +364,14 @@ class ToolProgressCatalog:
         "music_catalog_unavailable": "音乐搜索服务暂不可用",
         "music_failed": "音乐工具执行失败",
         "music_not_found": "没有找到匹配的歌曲",
+        "music_area_required": "共享歌单只能在 area 内使用",
+        "invalid_music_playlist_name": "歌单名称不正确",
+        "music_playlist_exists": "当前 area 已有同名歌单",
+        "music_playlist_not_found": "当前 area 没有这个歌单",
+        "music_playlist_full": "歌单已满",
+        "music_playlist_empty": "歌单还是空的",
+        "music_playlist_unavailable": "共享歌单服务暂不可用",
+        "music_playlist_failed": "歌单操作失败",
         "music_playback_failed": "音乐播放操作失败",
         "music_queue_full": "播放队列已满",
         "music_voice_channel_required": "请先加入语音频道",

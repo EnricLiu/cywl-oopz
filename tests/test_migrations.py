@@ -8,7 +8,7 @@ def test_initial_schema_models_and_migration_head_are_present() -> None:
     config = Config("alembic.ini")
     revisions = ScriptDirectory.from_config(config)
 
-    assert revisions.get_current_head() == "20260727_09"
+    assert revisions.get_current_head() == "20260727_10"
     assert set(Base.metadata.tables) == {
         "agent_memory_items",
         "agent_memory_preferences",
@@ -20,6 +20,8 @@ def test_initial_schema_models_and_migration_head_are_present() -> None:
         "conversation_sessions",
         "llm_models",
         "llm_providers",
+        "music_playlist_tracks",
+        "music_playlists",
         "rate_limit_buckets",
         "user_llm_preferences",
     }

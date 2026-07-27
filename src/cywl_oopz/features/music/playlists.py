@@ -1,0 +1,162 @@
+"""Area-scoped shared playlist use cases."""
+
+from __future__ import annotations
+
+import logging
+import unicodedata
+from uuid import UUID
+
+from cywl_oopz.core.observability import opaque_ref
+from cywl_oopz.features.agent.models import AgentIdentity
+from cywl_oopz.settings import MusicSettings
+
+from .errors import (
+    MusicAreaRequiredError,
+    MusicNotFoundError,
+    MusicPlaylistEmptyError,
+    MusicPlaylistNameError,
+    MusicPlaylistNotFoundError,
+)
+from .models import (
+    MusicPlaylist,
+    MusicPlaylistEntry,
+    MusicPlaylistSummary,
+    PlaylistQueueLoad,
+    PlaylistTrackRemoval,
+)
+from .ports import MusicPlaylistRepository
+from .service import MusicRequestService
+
+logger = logging.getLogger(__name__)
+
+
+class MusicPlaylistService:
+    """Coordinate catalog, durable playlists, and the in-memory playback queue."""
+
+    max_name_characters = 80
+
+    def __init__(
+        self,
+        settings: MusicSettings,
+        repository: MusicPlaylistRepository,
+        music: MusicRequestService,
+    ) -> None:
+        self._settings = settings
+        self._repository = repository
+        self._music = music
+
+    async def create(self, identity: AgentIdentity, name: str) -> MusicPlaylist:
+        area_id = self._area_id(identity)
+        display_name, normalized_name = self._normalize_name(name)
+        playlist = await self._repository.create(
+            area_id,
+            display_name,
+            normalized_name,
+            identity.person_id,
+        )
+        logger.info(
+            "Music playlist created: area=%s playlist=%s",
+            opaque_ref(area_id),
+            playlist.id,
+        )
+        return playlist
+
+    async def list(self, identity: AgentIdentity) -> tuple[MusicPlaylistSummary, ...]:
+        area_id = self._area_id(identity)
+        playlists = await self._repository.list(area_id)
+        logger.debug(
+            "Music playlists listed: area=%s count=%s",
+            opaque_ref(area_id),
+            len(playlists),
+        )
+        return playlists
+
+    async def get(self, identity: AgentIdentity, playlist_id: UUID) -> MusicPlaylist:
+        area_id = self._area_id(identity)
+        playlist = await self._repository.get(area_id, playlist_id)
+        if playlist is None:
+            raise MusicPlaylistNotFoundError("Music playlist was not found in this area")
+        return playlist
+
+    async def add(
+        self,
+        identity: AgentIdentity,
+        playlist_id: UUID,
+        query: str,
+    ) -> MusicPlaylistEntry:
+        area_id = self._area_id(identity)
+        matches = await self._music.search(query, limit=1)
+        if not matches:
+            raise MusicNotFoundError("No music matched the query")
+        entry = await self._repository.append(
+            area_id,
+            playlist_id,
+            matches[0],
+            identity.person_id,
+            max_tracks=self._settings.max_queue_length,
+        )
+        logger.info(
+            "Music playlist track appended: area=%s playlist=%s entry=%s position=%s",
+            opaque_ref(area_id),
+            playlist_id,
+            entry.id,
+            entry.position,
+        )
+        return entry
+
+    async def remove(
+        self,
+        identity: AgentIdentity,
+        playlist_id: UUID,
+        entry_id: UUID,
+    ) -> PlaylistTrackRemoval:
+        area_id = self._area_id(identity)
+        result = await self._repository.remove(area_id, playlist_id, entry_id)
+        logger.info(
+            "Music playlist track removed: area=%s playlist=%s entry=%s removed=%s",
+            opaque_ref(area_id),
+            playlist_id,
+            entry_id,
+            result.removed,
+        )
+        return result
+
+    async def load(
+        self,
+        identity: AgentIdentity,
+        playlist_id: UUID,
+    ) -> PlaylistQueueLoad:
+        playlist = await self.get(identity, playlist_id)
+        if not playlist.entries:
+            raise MusicPlaylistEmptyError("An empty playlist cannot rebuild playback")
+        queue = await self._music.replace_queue(
+            identity,
+            tuple(entry.track for entry in playlist.entries),
+        )
+        logger.info(
+            "Music playlist loaded into queue: area=%s playlist=%s tracks=%s",
+            opaque_ref(playlist.area_id),
+            playlist.id,
+            queue.loaded_count,
+        )
+        return PlaylistQueueLoad(playlist.id, playlist.name, queue)
+
+    @classmethod
+    def _normalize_name(cls, name: str) -> tuple[str, str]:
+        display_name = " ".join(unicodedata.normalize("NFKC", name).split())
+        if not display_name:
+            raise MusicPlaylistNameError("Music playlist name must not be empty")
+        normalized_name = display_name.casefold()
+        if (
+            len(display_name) > cls.max_name_characters
+            or len(normalized_name) > cls.max_name_characters
+        ):
+            raise MusicPlaylistNameError("Music playlist name is too long")
+        return display_name, normalized_name
+
+    @staticmethod
+    def _area_id(identity: AgentIdentity) -> str:
+        area_id = identity.conversation.area_id.strip()
+        if not area_id:
+            raise MusicAreaRequiredError("Shared music playlists require an OOPZ area")
+        return area_id

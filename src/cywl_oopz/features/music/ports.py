@@ -3,8 +3,17 @@
 from __future__ import annotations
 
 from typing import Protocol
+from uuid import UUID
 
-from .models import MusicTrack, PlayableTrack, VoiceChannelKey
+from .models import (
+    MusicPlaylist,
+    MusicPlaylistEntry,
+    MusicPlaylistSummary,
+    MusicTrack,
+    PlayableTrack,
+    PlaylistTrackRemoval,
+    VoiceChannelKey,
+)
 
 
 class MusicCatalog(Protocol):
@@ -46,3 +55,41 @@ class MusicVoiceGateway(Protocol):
 
     async def aclose(self) -> None:
         """Stop playback and leave the active voice channel."""
+
+
+class MusicPlaylistRepository(Protocol):
+    """Persistence boundary for area-shared playlists."""
+
+    async def create(
+        self,
+        area_id: str,
+        name: str,
+        normalized_name: str,
+        created_by_person_id: str,
+    ) -> MusicPlaylist:
+        """Create one empty playlist."""
+
+    async def list(self, area_id: str) -> tuple[MusicPlaylistSummary, ...]:
+        """List compact playlist metadata for exactly one area."""
+
+    async def get(self, area_id: str, playlist_id: UUID) -> MusicPlaylist | None:
+        """Load one playlist and its ordered entries."""
+
+    async def append(
+        self,
+        area_id: str,
+        playlist_id: UUID,
+        track: MusicTrack,
+        added_by_person_id: str,
+        *,
+        max_tracks: int,
+    ) -> MusicPlaylistEntry:
+        """Append one track while locking the owning playlist."""
+
+    async def remove(
+        self,
+        area_id: str,
+        playlist_id: UUID,
+        entry_id: UUID,
+    ) -> PlaylistTrackRemoval:
+        """Delete one entry and compact following positions."""

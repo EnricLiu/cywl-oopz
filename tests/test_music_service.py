@@ -249,6 +249,37 @@ async def test_music_service_selects_random_upcoming_tracks_in_shuffle_mode() ->
 
 
 @pytest.mark.asyncio
+async def test_music_service_rebuilds_queue_and_interrupts_current_track() -> None:
+    voice = FakeVoice()
+    service = MusicRequestService(settings(), FakeCatalog(), voice)
+
+    await service.enqueue(identity(), "old-current")
+    await eventually(lambda: len(voice.played) == 1)
+    await service.enqueue(identity(), "old-upcoming")
+
+    result = await service.replace_queue(
+        identity(),
+        (
+            MusicTrack("netease", "playlist-one", "Playlist One", ("artist",)),
+            MusicTrack("netease", "playlist-two", "Playlist Two", ("artist",)),
+        ),
+    )
+
+    assert result.loaded_count == 2
+    assert result.replaced_current is True
+    assert result.started_worker is False
+    assert voice.stop_calls == 1
+    await eventually(lambda: len(voice.played) == 2)
+    assert voice.played[1][1].endswith("/playlist-one.mp3")
+    snapshot = await service.queue(identity())
+    assert snapshot.current is not None
+    assert snapshot.current.track.title == "Playlist One"
+    assert [item.track.title for item in snapshot.upcoming] == ["Playlist Two"]
+
+    await service.aclose()
+
+
+@pytest.mark.asyncio
 async def test_music_service_requires_the_real_callers_voice_channel() -> None:
     voice = FakeVoice()
     voice.channels.clear()

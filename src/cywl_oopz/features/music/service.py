@@ -29,6 +29,7 @@ from .models import (
     PlaybackModeChange,
     PlaybackState,
     QueuedTrack,
+    QueueRebuildResult,
     VoiceChannelKey,
 )
 from .ports import MusicCatalog, MusicVoiceGateway
@@ -193,6 +194,49 @@ class MusicRequestService:
             changed,
         )
         return PlaybackModeChange(channel, mode, changed)
+
+    async def replace_queue(
+        self,
+        identity: AgentIdentity,
+        tracks: tuple[MusicTrack, ...],
+    ) -> QueueRebuildResult:
+        """Replace current playback and upcoming items with one ordered track set."""
+        if not tracks:
+            raise MusicQueryError("A rebuilt music queue must not be empty")
+        if len(tracks) > self._settings.max_queue_length:
+            raise MusicQueueFullError("The rebuilt music queue is too large")
+        channel = await self._channel_for(identity)
+        session = self._session(channel)
+        items = deque(QueuedTrack(track, identity.person_id) for track in tracks)
+        async with session.lock:
+            replaced_current = session.current is not None
+            session.queue = items
+            session.idempotent_enqueues.clear()
+            if replaced_current:
+                session.skip_requested.set()
+            else:
+                session.state = PlaybackState.WAITING
+            session.revision += 1
+            owns_voice = replaced_current and self._voice_owner == channel
+        if owns_voice:
+            try:
+                await self._voice.stop()
+            except Exception as exc:
+                logger.warning(
+                    "Could not stop current track while rebuilding queue: channel=%s error=%s",
+                    self._channel_ref(channel),
+                    type(exc).__name__,
+                )
+        started = self._tasks.start(channel, self._play_queue(channel, session))
+        logger.info(
+            "Music queue rebuilt: channel=%s tracks=%s replaced_current=%s "
+            "playback_worker_started=%s",
+            self._channel_ref(channel),
+            len(tracks),
+            replaced_current,
+            started,
+        )
+        return QueueRebuildResult(channel, len(tracks), replaced_current, started)
 
     async def skip(self, identity: AgentIdentity) -> bool:
         """Request one current track to stop; repeated calls before advance are harmless."""

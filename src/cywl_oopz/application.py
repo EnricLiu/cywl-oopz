@@ -55,6 +55,14 @@ from .features.agent.tools.music import (
     SetMusicPlaybackModeTool,
     SkipMusicTool,
 )
+from .features.agent.tools.playlists import (
+    AddMusicPlaylistTrackTool,
+    CreateMusicPlaylistTool,
+    GetMusicPlaylistTool,
+    ListMusicPlaylistsTool,
+    LoadMusicPlaylistTool,
+    RemoveMusicPlaylistTrackTool,
+)
 from .features.agent.tools.policy import ToolAvailabilityService, ToolPolicy
 from .features.agent.tools.registry import ToolRegistry
 from .features.agent.tools.web import (
@@ -84,6 +92,8 @@ from .features.chat.repository import SqlAlchemyConversationRepository
 from .features.chat.service import ChatService
 from .features.chat.tasks import ChatTaskSupervisor
 from .features.music.netease import NeteaseMusicCatalog
+from .features.music.playlist_repository import SqlAlchemyMusicPlaylistRepository
+from .features.music.playlists import MusicPlaylistService
 from .features.music.service import MusicRequestService
 from .features.web.browser import BrowserSessionManager
 from .features.web.errors import BrowserError
@@ -162,12 +172,18 @@ class BotApplication:
             ),
         ]
         self.music: MusicRequestService | None = None
+        self.music_playlists: MusicPlaylistService | None = None
         enabled_agent_tools = settings.agent.enabled_tools
         if settings.music.enabled:
             self.music = MusicRequestService(
                 settings.music,
                 NeteaseMusicCatalog(settings.music),
                 OopzMusicVoiceGateway(self.bot),
+            )
+            self.music_playlists = MusicPlaylistService(
+                settings.music,
+                SqlAlchemyMusicPlaylistRepository(self.database.session_factory),
+                self.music,
             )
             music_tool_options = {
                 "timeout_seconds": settings.agent.tool_timeout_seconds,
@@ -182,6 +198,15 @@ class BotApplication:
                     PauseMusicTool(self.music, **music_tool_options),
                     ResumeMusicTool(self.music, **music_tool_options),
                     SetMusicPlaybackModeTool(self.music, **music_tool_options),
+                    CreateMusicPlaylistTool(self.music_playlists, **music_tool_options),
+                    ListMusicPlaylistsTool(self.music_playlists, **music_tool_options),
+                    GetMusicPlaylistTool(self.music_playlists, **music_tool_options),
+                    AddMusicPlaylistTrackTool(self.music_playlists, **music_tool_options),
+                    RemoveMusicPlaylistTrackTool(
+                        self.music_playlists,
+                        **music_tool_options,
+                    ),
+                    LoadMusicPlaylistTool(self.music_playlists, **music_tool_options),
                 )
             )
         else:

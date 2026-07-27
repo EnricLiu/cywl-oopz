@@ -61,6 +61,12 @@ def test_app_settings_use_the_injected_oopz_credentials(monkeypatch) -> None:
         "browser_fill",
         "browser_press",
         "set_music_playback_mode",
+        "create_music_playlist",
+        "list_music_playlists",
+        "get_music_playlist",
+        "add_music_playlist_track",
+        "remove_music_playlist_track",
+        "load_music_playlist",
     )
     assert settings.agent.summary_enabled is True
     assert settings.agent.memory_enabled_by_default is True
