@@ -31,6 +31,16 @@ def test_parse_requires_prefix() -> None:
     assert router.parse("!ECHO one two") == ParsedCommand("echo", ("one", "two"))
 
 
+def test_parse_preserves_raw_json_argument_spacing() -> None:
+    router = CommandRouter("/")
+
+    parsed = router.parse('/tool echo_debug {"value": "one  two"}')
+
+    assert parsed is not None
+    assert parsed.name == "tool"
+    assert parsed.raw_arguments == 'echo_debug {"value": "one  two"}'
+
+
 @pytest.mark.asyncio
 async def test_dispatch_executes_registered_command() -> None:
     router = CommandRouter("!")

@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import json
+import logging
 from uuid import UUID
 
 from oopz_sdk.events.context import EventContext
 
 from cywl_oopz.commands.router import ParsedCommand
+from cywl_oopz.core.observability import exception_kind
 from cywl_oopz.features.chat.commands import ChatCommandController
+from cywl_oopz.features.chat.models import ChatInvocation, ConversationKey
 from cywl_oopz.features.chat.tasks import ChatTaskSupervisor
 
+from .direct_tools import DirectToolService
 from .memory import (
     MemoryCapacityError,
     MemoryDisabledError,
@@ -17,6 +22,8 @@ from .memory import (
     MemoryService,
 )
 from .service import AgentConversationService
+
+logger = logging.getLogger(__name__)
 
 
 class ProviderCommand(ChatCommandController):
@@ -110,6 +117,116 @@ class ToolsCommand(ChatCommandController):
             f"- {tool.name}（{effects[tool.effect.value]}）：{tool.description}" for tool in tools
         )
         await context.reply("\n".join(lines))
+
+
+class ToolCommand:
+    """Describe or directly execute one Agent tool for development debugging."""
+
+    name = "tool"
+    description = "直接执行 Agent 工具，或查看指定工具的 JSON Schema。"
+    max_reply_characters = 1900
+
+    def __init__(self, service: DirectToolService, prefix: str) -> None:
+        self._service = service
+        self._prefix = prefix
+
+    async def execute(self, command: ParsedCommand, context: EventContext) -> None:
+        parts = self._raw_arguments(command).split(maxsplit=1)
+        if not parts:
+            await self._reply(
+                context,
+                self._usage_error(),
+            )
+            return
+
+        tool_name = parts[0].casefold()
+        body = parts[1] if len(parts) == 2 else ""
+        description = self._service.describe(tool_name)
+        if description is None:
+            await self._reply(
+                context,
+                {"ok": False, "error": "tool_not_registered"},
+            )
+            return
+        if body == "--help":
+            await self._reply(context, {"ok": True, "data": description})
+            return
+        if not body:
+            await self._reply(context, self._usage_error())
+            return
+
+        try:
+            arguments = json.loads(body)
+        except json.JSONDecodeError as exc:
+            await self._reply(
+                context,
+                {
+                    "ok": False,
+                    "error": "invalid_json",
+                    "line": exc.lineno,
+                    "column": exc.colno,
+                },
+            )
+            return
+        if not isinstance(arguments, dict):
+            await self._reply(
+                context,
+                {"ok": False, "error": "json_body_must_be_object"},
+            )
+            return
+
+        try:
+            result = await self._service.execute(
+                ConversationKey.from_oopz_context(context),
+                ChatInvocation.from_oopz_context(context),
+                tool_name,
+                arguments,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Direct Agent tool command failed: tool=%s error=%s",
+                tool_name,
+                exception_kind(exc),
+            )
+            await self._reply(
+                context,
+                {"ok": False, "error": "tool_debug_unavailable"},
+            )
+            return
+        await self._reply(context, result.model_payload())
+
+    def _usage_error(self) -> dict[str, object]:
+        return {
+            "ok": False,
+            "error": "usage",
+            "usage": f"{self._prefix}tool <tool-id> <json-body|--help>",
+        }
+
+    @staticmethod
+    def _raw_arguments(command: ParsedCommand) -> str:
+        return command.raw_arguments.strip() or " ".join(command.arguments)
+
+    @classmethod
+    async def _reply(cls, context: EventContext, payload: dict[str, object]) -> None:
+        await context.reply(cls._render(payload))
+
+    @classmethod
+    def _render(cls, payload: dict[str, object]) -> str:
+        encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        if len(encoded) <= cls.max_reply_characters:
+            return encoded
+        preview = encoded[: cls.max_reply_characters // 2]
+        truncated: dict[str, object] = {
+            "ok": payload.get("ok") is True,
+            "truncated": True,
+            "preview": preview,
+        }
+        rendered = json.dumps(truncated, ensure_ascii=False, separators=(",", ":"))
+        while len(rendered) > cls.max_reply_characters and preview:
+            preview = preview[: len(preview) // 2]
+            truncated["preview"] = preview
+            rendered = json.dumps(truncated, ensure_ascii=False, separators=(",", ":"))
+        return rendered
 
 
 class MemoryCommand(ChatCommandController):

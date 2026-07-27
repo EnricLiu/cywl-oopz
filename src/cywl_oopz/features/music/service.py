@@ -49,7 +49,9 @@ class _MusicSession:
 class MusicRequestService:
     """Search, enqueue, inspect, and control bounded voice-channel queues."""
 
-    _FINISHED_BACKEND_STATES = frozenset({"finished", "idle", "stopped", "ended", "error"})
+    _FINISHED_BACKEND_STATES = frozenset(
+        {"finished", "idle", "joined", "stopped", "ended", "error"}
+    )
 
     def __init__(
         self,

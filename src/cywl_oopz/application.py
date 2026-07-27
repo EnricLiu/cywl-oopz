@@ -18,8 +18,9 @@ from .core.health import HealthRegistry, HealthState
 from .core.observability import exception_kind, opaque_ref
 from .core.tasks import TaskSupervisor
 from .features.agent.catalog import ProviderCatalogAdminService, ReloadableProviderCatalog
-from .features.agent.commands import MemoryCommand, ProviderCommand, ToolsCommand
+from .features.agent.commands import MemoryCommand, ProviderCommand, ToolCommand, ToolsCommand
 from .features.agent.context import AgentContextBuilder
+from .features.agent.direct_tools import DirectToolService
 from .features.agent.memory import MemoryService
 from .features.agent.memory_repository import SqlAlchemyMemoryRepository
 from .features.agent.models import ModelCapability
@@ -264,6 +265,12 @@ class BotApplication:
             ToolPolicy(),
             SqlAlchemyToolExecutionRepository(self.database.session_factory),
         )
+        self.direct_tools = DirectToolService(
+            settings.agent,
+            self.agent_tool_registry,
+            self.agent_tool_availability,
+            self.agent_selection,
+        )
         self.agent_models = AgentModelRegistry(self.agent_catalog)
         self.agent_summary_tasks = TaskSupervisor(lambda thread_id: f"agent-summary:{thread_id}")
         self.agent_summary_service = ThreadSummaryService(
@@ -352,6 +359,7 @@ class BotApplication:
         if self.settings.agent.enabled:
             self.commands.register(ProviderCommand(self.agent_chat, self.chat_tasks))
             self.commands.register(ToolsCommand(self.agent_chat))
+            self.commands.register(ToolCommand(self.direct_tools, self.settings.command_prefix))
             self.commands.register(MemoryCommand(self.agent_chat, self.agent_memory))
 
     async def run(self) -> None:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 from oopz_sdk.events.context import EventContext
@@ -15,6 +15,7 @@ class ParsedCommand:
 
     name: str
     arguments: tuple[str, ...]
+    raw_arguments: str = field(default="", compare=False)
 
 
 class Command(Protocol):
@@ -69,7 +70,13 @@ class CommandRouter:
         if not content.startswith(self.prefix):
             return None
 
-        parts = content[len(self.prefix) :].split()
+        command_line = content[len(self.prefix) :].lstrip()
+        parts = command_line.split(maxsplit=1)
         if not parts:
             return None
-        return ParsedCommand(name=parts[0].casefold(), arguments=tuple(parts[1:]))
+        raw_arguments = parts[1] if len(parts) == 2 else ""
+        return ParsedCommand(
+            name=parts[0].casefold(),
+            arguments=tuple(raw_arguments.split()),
+            raw_arguments=raw_arguments,
+        )
