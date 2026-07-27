@@ -245,6 +245,7 @@ class BotApplication:
                 name for name in enabled_agent_tools if name not in WEB_BROWSER_INTERACTION_TOOLS
             )
         self.agent_tool_registry = ToolRegistry(agent_tools)
+        logger.info(self.agent_tool_registry)
         self.agent_tool_availability = ToolAvailabilityService(
             self.agent_tool_registry,
             channel_settings,

@@ -86,7 +86,7 @@ class DuckDuckGoSearchGateway:
                 safesearch=request.safesearch.value,
                 timelimit=request.time_range.value if request.time_range else None,
                 max_results=request.max_results,
-                backend="duckduckgo",
+                backend="auto",
             )
         )
 

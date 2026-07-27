@@ -15,7 +15,9 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     try:
-        application = BotApplication(AppSettings.from_environment())
+        settings = AppSettings.from_environment()
+        logging.info(settings)
+        application = BotApplication(settings)
     except ConfigurationError as exc:
         logging.getLogger(__name__).error("Configuration error: %s", exc)
         raise SystemExit(2) from exc
