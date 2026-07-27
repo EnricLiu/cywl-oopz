@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
+
 from oopz_sdk import OopzBot
 
 from cywl_oopz.features.music.models import VoiceChannelKey
 
-DEFAULT_VOLUME = 2 #%
+DEFAULT_VOLUME = 2  # %
+
 
 class OopzMusicVoiceGateway:
     """Translate music operations into the single voice backend owned by OopzBot."""
@@ -32,7 +34,7 @@ class OopzMusicVoiceGateway:
                     channel=channel.channel_id,
                 )
                 self._current_channel = channel
-                
+
             await self._bot.voice.set_volume(DEFAULT_VOLUME)
             await self._bot.voice.play_url(stream_url)
 

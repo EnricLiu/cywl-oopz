@@ -18,12 +18,16 @@ class FakeVoice:
         self.urls: list[str] = []
         self.leaves = 0
         self.stops = 0
+        self.volumes: list[int] = []
 
     async def join(self, **values: str) -> None:
         self.joins.append(values)
 
     async def play_url(self, url: str) -> None:
         self.urls.append(url)
+
+    async def set_volume(self, volume: int) -> None:
+        self.volumes.append(volume)
 
     async def leave(self) -> None:
         self.leaves += 1
@@ -64,6 +68,7 @@ async def test_oopz_music_gateway_reuses_channel_and_switches_cleanly() -> None:
         {"area": "area", "channel": "other"},
     ]
     assert bot.voice.leaves == 1
+    assert bot.voice.volumes == [2, 2, 2]
 
     await gateway.aclose()
     assert bot.voice.stops == 1
