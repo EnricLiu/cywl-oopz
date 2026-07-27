@@ -54,7 +54,14 @@ from .features.agent.tools.music import (
 )
 from .features.agent.tools.policy import ToolAvailabilityService, ToolPolicy
 from .features.agent.tools.registry import ToolRegistry
-from .features.agent.tools.web import SearchWebTool
+from .features.agent.tools.web import (
+    BrowserCloseTool,
+    BrowserOpenTool,
+    BrowserSnapshotTool,
+    BrowserWaitTool,
+    ReadWebPageTool,
+    SearchWebTool,
+)
 from .features.chat.commands import (
     AmbientChatHandler,
     CancelChatCommand,
@@ -72,14 +79,23 @@ from .features.chat.service import ChatService
 from .features.chat.tasks import ChatTaskSupervisor
 from .features.music.netease import NeteaseMusicCatalog
 from .features.music.service import MusicRequestService
+from .features.web.browser import BrowserSessionManager
+from .features.web.errors import BrowserError
 from .features.web.service import WebSearchService
 from .integrations.oopz.agent_presenter import OopzAgentPresenterFactory
 from .integrations.oopz.editable_messages import OopzEditableMessageGateway
 from .integrations.oopz.message_renderer import OopzMessageRenderer
 from .integrations.oopz.music import OopzMusicVoiceGateway
 from .integrations.oopz.reactions import OopzReactionGateway
+from .integrations.web.agent_browser_mcp import AgentBrowserMcpGateway
 from .integrations.web.duckduckgo import DuckDuckGoSearchGateway
-from .settings import MUSIC_AGENT_TOOLS, WEB_SEARCH_AGENT_TOOLS, AppSettings
+from .settings import (
+    MUSIC_AGENT_TOOLS,
+    WEB_BROWSER_INTERACTION_TOOLS,
+    WEB_BROWSER_READ_TOOLS,
+    WEB_SEARCH_AGENT_TOOLS,
+    AppSettings,
+)
 from .storage.channel_settings import SqlAlchemyChannelSettingsRepository
 from .storage.database import Database
 
@@ -185,6 +201,38 @@ class BotApplication:
             enabled_agent_tools = tuple(
                 name for name in enabled_agent_tools if name not in WEB_SEARCH_AGENT_TOOLS
             )
+        self.browser: BrowserSessionManager | None = None
+        if settings.web.browser_enabled:
+            self.browser = BrowserSessionManager(
+                settings.web,
+                AgentBrowserMcpGateway(settings.web),
+            )
+            browser_tool_options = {
+                "timeout_seconds": max(
+                    settings.agent.tool_timeout_seconds,
+                    settings.web.browser_mcp_call_timeout_seconds + 2,
+                ),
+                "max_output_characters": settings.agent.max_tool_result_characters,
+            }
+            agent_tools.extend(
+                (
+                    ReadWebPageTool(self.browser, **browser_tool_options),
+                    BrowserOpenTool(self.browser, **browser_tool_options),
+                    BrowserSnapshotTool(self.browser, **browser_tool_options),
+                    BrowserWaitTool(self.browser, **browser_tool_options),
+                    BrowserCloseTool(self.browser, **browser_tool_options),
+                )
+            )
+        else:
+            enabled_agent_tools = tuple(
+                name
+                for name in enabled_agent_tools
+                if name not in WEB_BROWSER_READ_TOOLS and name not in WEB_BROWSER_INTERACTION_TOOLS
+            )
+        if not settings.web.browser_interaction_enabled:
+            enabled_agent_tools = tuple(
+                name for name in enabled_agent_tools if name not in WEB_BROWSER_INTERACTION_TOOLS
+            )
         self.agent_tool_registry = ToolRegistry(agent_tools)
         self.agent_tool_availability = ToolAvailabilityService(
             self.agent_tool_registry,
@@ -254,6 +302,10 @@ class BotApplication:
             else HealthState.DISABLED,
         )
         self.health.mark("oopz", HealthState.PENDING)
+        self.health.mark(
+            "browser",
+            HealthState.PENDING if settings.web.browser_enabled else HealthState.DISABLED,
+        )
 
     def _create_chat_provider(self) -> ChatProvider:
         if not self.settings.chat.enabled:
@@ -291,6 +343,22 @@ class BotApplication:
                 self.health.mark("database", HealthState.DEGRADED, "connection check failed")
                 raise
             self.health.mark("database", HealthState.HEALTHY, "connection check passed")
+            if self.browser is not None:
+                try:
+                    await self.browser.start()
+                except BrowserError:
+                    logger.exception("Failed to initialize agent-browser MCP")
+                    self.health.mark(
+                        "browser",
+                        HealthState.DEGRADED,
+                        "MCP initialization failed",
+                    )
+                else:
+                    self.health.mark(
+                        "browser",
+                        HealthState.HEALTHY,
+                        "MCP contract validated",
+                    )
             if self.settings.agent.enabled:
                 await self.agent_models.reload()
                 catalog = self.agent_catalog.snapshot
@@ -323,6 +391,8 @@ class BotApplication:
             await self.agent_summary_tasks.close()
             if self.music is not None:
                 await self.music.aclose()
+            if self.browser is not None:
+                await self.browser.aclose()
             if self.web_search is not None:
                 await self.web_search.aclose()
             await self.agent_engine.aclose()

@@ -9,6 +9,7 @@ from cywl_oopz.application import BotApplication
 from cywl_oopz.core.errors import ConfigurationError
 from cywl_oopz.features.agent.catalog import ProviderCatalog
 from cywl_oopz.features.agent.models import LlmModel, LlmProvider, ProviderProtocol
+from cywl_oopz.features.web.errors import BrowserUnavailableError
 from cywl_oopz.settings import AppSettings
 
 PROVIDER_ID = UUID("10000000-0000-0000-0000-000000000001")
@@ -116,6 +117,69 @@ async def test_composition_root_registers_web_search_only_when_enabled(monkeypat
         await application.agent_engine.aclose()
         await application._provider.aclose()
         await application.database.close()
+
+
+@pytest.mark.asyncio
+async def test_composition_root_registers_browser_read_tools_only_when_enabled(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(application_module, "OopzBot", FakeOopzBot)
+    disabled = BotApplication(settings("agent"))
+    enabled = BotApplication(
+        settings(
+            "agent",
+            CYWL_WEB_BROWSER_ENABLED="true",
+        )
+    )
+
+    browser_tools = {
+        "read_web_page",
+        "browser_open",
+        "browser_snapshot",
+        "browser_wait",
+        "browser_close",
+    }
+    assert disabled.browser is None
+    assert browser_tools.isdisjoint(disabled.agent_tool_registry.names)
+    assert enabled.browser is not None
+    assert browser_tools.issubset(enabled.agent_tool_registry.names)
+    assert {
+        "browser_click",
+        "browser_fill",
+        "browser_press",
+    }.isdisjoint(enabled.agent_tool_registry.names)
+
+    await enabled.browser.aclose()
+    for application in (disabled, enabled):
+        await application.agent_engine.aclose()
+        await application._provider.aclose()
+        await application.database.close()
+
+
+@pytest.mark.asyncio
+async def test_browser_startup_failure_degrades_health_without_stopping_bot(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(application_module, "OopzBot", FakeOopzBot)
+    application = BotApplication(settings("legacy", CYWL_WEB_BROWSER_ENABLED="true"))
+
+    async def no_op() -> None:
+        return None
+
+    async def unavailable() -> None:
+        raise BrowserUnavailableError
+
+    monkeypatch.setattr(application.database, "start", no_op)
+    monkeypatch.setattr(application.database, "close", no_op)
+    assert application.browser is not None
+    monkeypatch.setattr(application.browser, "start", unavailable)
+
+    await application.run()
+
+    browser_health = {check.name: check for check in application.health.snapshot()}["browser"]
+    assert application.bot.did_run is True
+    assert browser_health.state.value == "degraded"
+    assert browser_health.detail == "MCP initialization failed"
 
 
 @pytest.mark.asyncio

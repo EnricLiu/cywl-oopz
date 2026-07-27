@@ -34,7 +34,12 @@ from cywl_oopz.features.agent.tools.models import (
     ToolExecutionResult,
     ToolExecutionStatus,
 )
-from cywl_oopz.features.agent.tools.web import SearchWebInput, SearchWebOutput
+from cywl_oopz.features.agent.tools.web import (
+    BrowserDocumentOutput,
+    SearchWebInput,
+    SearchWebOutput,
+    WebPageUrlInput,
+)
 from cywl_oopz.features.chat.models import ConversationKey
 from cywl_oopz.features.chat.progress import ConversationProgressEvent, ProgressKind
 
@@ -155,6 +160,73 @@ class SearchWebRuntime:
                     }
                 ],
             },
+        )
+
+
+class WebResearchRuntime:
+    def __init__(self) -> None:
+        self._descriptors = {
+            "search_web": ToolDescriptor(
+                name="search_web",
+                display_name="搜索网页",
+                description="Search the public web.",
+                input_model=SearchWebInput,
+                output_model=SearchWebOutput,
+                effect=ToolEffect.READ,
+                timeout_seconds=1,
+                max_output_characters=4000,
+                concurrency_safe=True,
+                idempotent=True,
+            ),
+            "read_web_page": ToolDescriptor(
+                name="read_web_page",
+                display_name="阅读网页",
+                description="Read one public webpage.",
+                input_model=WebPageUrlInput,
+                output_model=BrowserDocumentOutput,
+                effect=ToolEffect.READ,
+                timeout_seconds=1,
+                max_output_characters=20_000,
+                concurrency_safe=False,
+                idempotent=True,
+            ),
+        }
+        self.calls: list[ToolCall] = []
+
+    def descriptors(self, names: tuple[str, ...]) -> tuple[ToolDescriptor, ...]:
+        return tuple(self._descriptors[name] for name in sorted(names))
+
+    async def execute(
+        self,
+        call: ToolCall,
+        context: ToolExecutionContext,
+    ) -> ToolExecutionResult:
+        del context
+        self.calls.append(call)
+        if call.name == "search_web":
+            output: dict[str, object] = {
+                "query": str(call.arguments["query"]),
+                "results": [
+                    {
+                        "title": "Primary source",
+                        "url": "https://example.com/source",
+                        "snippet": "A discovery snippet.",
+                    }
+                ],
+            }
+        else:
+            output = {
+                "title": "Primary source",
+                "url": str(call.arguments["url"]),
+                "content_type": "text/html",
+                "content": "The verified fact appears in the page body.",
+                "truncated": False,
+            }
+        return ToolExecutionResult(
+            call.call_id,
+            call.name,
+            ToolExecutionStatus.SUCCEEDED,
+            output,
         )
 
 
@@ -338,6 +410,60 @@ async def test_engine_can_search_then_return_a_cited_answer() -> None:
             ],
         },
     }
+
+
+@pytest.mark.asyncio
+async def test_engine_can_search_read_source_then_return_verified_citation() -> None:
+    async def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        del info
+        tool_returns = [
+            part
+            for message in messages
+            if isinstance(message, ModelRequest)
+            for part in message.parts
+            if isinstance(part, ToolReturnPart)
+        ]
+        if not tool_returns:
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        "search_web",
+                        {"query": "current verified topic"},
+                        "call-search",
+                    )
+                ]
+            )
+        if len(tool_returns) == 1:
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        "read_web_page",
+                        {"url": "https://example.com/source"},
+                        "call-read",
+                    )
+                ]
+            )
+        return ModelResponse(
+            parts=[
+                TextPart("已读取原始页面并核实。来源：Primary source（https://example.com/source）")
+            ]
+        )
+
+    runtime = WebResearchRuntime()
+    engine = PydanticAiAgentEngine(
+        StaticRegistry(streaming_model(respond)),
+        runtime,
+    )
+
+    result = await engine.run(request(enabled_tools=("search_web", "read_web_page")))
+
+    assert result.stop_reason is AgentStopReason.COMPLETED
+    assert [call.name for call in runtime.calls] == [
+        "search_web",
+        "read_web_page",
+    ]
+    assert "https://example.com/source" in result.output
+    assert result.tool_calls == 2
 
 
 @pytest.mark.asyncio

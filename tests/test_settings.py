@@ -52,6 +52,11 @@ def test_app_settings_use_the_injected_oopz_credentials(monkeypatch) -> None:
         "pause_music",
         "resume_music",
         "search_web",
+        "read_web_page",
+        "browser_open",
+        "browser_snapshot",
+        "browser_wait",
+        "browser_close",
     )
     assert settings.agent.summary_enabled is True
     assert settings.agent.memory_enabled_by_default is True
@@ -60,6 +65,7 @@ def test_app_settings_use_the_injected_oopz_credentials(monkeypatch) -> None:
     assert settings.music.enabled is False
     assert settings.web.search_enabled is True
     assert settings.web.search_safesearch is WebSearchSafeSearch.MODERATE
+    assert settings.web.browser_enabled is False
 
 
 def test_agent_mode_uses_database_catalog_without_legacy_llm_credentials() -> None:
@@ -193,6 +199,32 @@ def test_web_search_settings_validate_provider_bounds() -> None:
         WebToolsSettings.from_mapping({"CYWL_WEB_SEARCH_MAX_QUERY_CHARACTERS": "301"})
     with pytest.raises(ConfigurationError, match="MAX_CONCURRENCY"):
         WebToolsSettings.from_mapping({"CYWL_WEB_SEARCH_MAX_CONCURRENCY": "9"})
+
+
+def test_web_browser_settings_require_the_base_feature_and_bound_concurrency() -> None:
+    settings = WebToolsSettings.from_mapping(
+        {
+            "CYWL_WEB_BROWSER_ENABLED": "true",
+            "CYWL_WEB_BROWSER_SESSION_IDLE_SECONDS": "120",
+            "CYWL_WEB_BROWSER_MAX_CONCURRENCY": "4",
+            "CYWL_WEB_BROWSER_MCP_CALL_TIMEOUT_SECONDS": "7.5",
+        }
+    )
+
+    assert settings.browser_enabled is True
+    assert settings.browser_session_idle_seconds == 120
+    assert settings.browser_max_concurrency == 4
+    assert settings.browser_mcp_call_timeout_seconds == 7.5
+
+    with pytest.raises(ConfigurationError, match="requires"):
+        WebToolsSettings.from_mapping({"CYWL_WEB_BROWSER_INTERACTION_ENABLED": "true"})
+    with pytest.raises(ConfigurationError, match="MAX_CONCURRENCY"):
+        WebToolsSettings.from_mapping(
+            {
+                "CYWL_WEB_BROWSER_ENABLED": "true",
+                "CYWL_WEB_BROWSER_MAX_CONCURRENCY": "9",
+            }
+        )
 
 
 def test_from_environment_loads_dotenv_from_the_current_directory(tmp_path, monkeypatch) -> None:

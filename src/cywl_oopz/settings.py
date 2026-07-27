@@ -25,6 +25,11 @@ DEFAULT_AGENT_TOOLS = (
     "pause_music",
     "resume_music",
     "search_web",
+    "read_web_page",
+    "browser_open",
+    "browser_snapshot",
+    "browser_wait",
+    "browser_close",
 )
 
 MUSIC_AGENT_TOOLS = frozenset(
@@ -39,6 +44,22 @@ MUSIC_AGENT_TOOLS = frozenset(
 )
 
 WEB_SEARCH_AGENT_TOOLS = frozenset({"search_web"})
+WEB_BROWSER_READ_TOOLS = frozenset(
+    {
+        "read_web_page",
+        "browser_open",
+        "browser_snapshot",
+        "browser_wait",
+        "browser_close",
+    }
+)
+WEB_BROWSER_INTERACTION_TOOLS = frozenset(
+    {
+        "browser_click",
+        "browser_fill",
+        "browser_press",
+    }
+)
 
 DEFAULT_AGENT_SYSTEM_PROMPT = (
     "你是 CYWL，也就是虚拟歌手初音未来（Hatsune Miku）。"
@@ -510,6 +531,15 @@ class WebToolsSettings:
     search_timeout_seconds: float
     search_max_query_characters: int
     search_max_concurrency: int
+    browser_enabled: bool
+    browser_interaction_enabled: bool
+    browser_session_idle_seconds: int
+    browser_max_content_characters: int
+    browser_max_snapshot_characters: int
+    browser_max_concurrency: int
+    browser_mcp_init_timeout_seconds: float
+    browser_mcp_call_timeout_seconds: float
+    browser_daemon_idle_seconds: int
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, str]) -> WebToolsSettings:
@@ -548,7 +578,7 @@ class WebToolsSettings:
         )
         if max_concurrency > 8:
             raise ConfigurationError("CYWL_WEB_SEARCH_MAX_CONCURRENCY must not exceed 8")
-        return cls(
+        settings = cls(
             search_enabled=_boolean(values, "CYWL_WEB_SEARCH_ENABLED", True),
             search_region=region,
             search_safesearch=safesearch,
@@ -560,7 +590,55 @@ class WebToolsSettings:
             ),
             search_max_query_characters=max_query_characters,
             search_max_concurrency=max_concurrency,
+            browser_enabled=_boolean(values, "CYWL_WEB_BROWSER_ENABLED", False),
+            browser_interaction_enabled=_boolean(
+                values,
+                "CYWL_WEB_BROWSER_INTERACTION_ENABLED",
+                False,
+            ),
+            browser_session_idle_seconds=_positive_integer(
+                values,
+                "CYWL_WEB_BROWSER_SESSION_IDLE_SECONDS",
+                600,
+            ),
+            browser_max_content_characters=_positive_integer(
+                values,
+                "CYWL_WEB_BROWSER_MAX_CONTENT_CHARACTERS",
+                12_000,
+            ),
+            browser_max_snapshot_characters=_positive_integer(
+                values,
+                "CYWL_WEB_BROWSER_MAX_SNAPSHOT_CHARACTERS",
+                8_000,
+            ),
+            browser_max_concurrency=_positive_integer(
+                values,
+                "CYWL_WEB_BROWSER_MAX_CONCURRENCY",
+                2,
+            ),
+            browser_mcp_init_timeout_seconds=_positive_float(
+                values,
+                "CYWL_WEB_BROWSER_MCP_INIT_TIMEOUT_SECONDS",
+                10.0,
+            ),
+            browser_mcp_call_timeout_seconds=_positive_float(
+                values,
+                "CYWL_WEB_BROWSER_MCP_CALL_TIMEOUT_SECONDS",
+                20.0,
+            ),
+            browser_daemon_idle_seconds=_positive_integer(
+                values,
+                "CYWL_WEB_BROWSER_DAEMON_IDLE_SECONDS",
+                900,
+            ),
         )
+        if settings.browser_interaction_enabled and not settings.browser_enabled:
+            raise ConfigurationError(
+                "CYWL_WEB_BROWSER_INTERACTION_ENABLED requires CYWL_WEB_BROWSER_ENABLED=true"
+            )
+        if settings.browser_max_concurrency > 8:
+            raise ConfigurationError("CYWL_WEB_BROWSER_MAX_CONCURRENCY must not exceed 8")
+        return settings
 
 
 @dataclass(frozen=True, slots=True)

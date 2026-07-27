@@ -35,3 +35,42 @@ class WebSearchResult:
     title: str
     url: str
     snippet: str
+
+
+@dataclass(frozen=True, slots=True)
+class BrowserDocument:
+    """Bounded readable content from one public webpage."""
+
+    title: str
+    url: str
+    content_type: str
+    content: str
+    truncated: bool
+
+
+@dataclass(frozen=True, slots=True)
+class BrowserPageView:
+    """Current page identity and a bounded accessibility snapshot."""
+
+    title: str
+    url: str
+    snapshot: str
+    truncated: bool
+
+
+class BrowserWaitKind(StrEnum):
+    """Supported high-level wait conditions."""
+
+    LOAD = "load"
+    TEXT = "text"
+    SELECTOR = "selector"
+    MILLISECONDS = "milliseconds"
+
+
+@dataclass(frozen=True, slots=True)
+class BrowserWaitRequest:
+    """One bounded wait condition independent from MCP tool naming."""
+
+    kind: BrowserWaitKind
+    value: str | int
+    timeout_seconds: float
