@@ -25,6 +25,7 @@ from cywl_oopz.features.agent.models import (
 from cywl_oopz.features.agent.selection import ProviderSelectionService
 from cywl_oopz.features.agent.service import AgentConversationService
 from cywl_oopz.features.chat.models import ConversationKey
+from cywl_oopz.features.chat.progress import ConversationProgressEvent, ProgressKind
 from cywl_oopz.settings import AgentMode, AgentSettings
 
 PROVIDER_ID = UUID("10000000-0000-0000-0000-000000000001")
@@ -204,9 +205,11 @@ class RecordingEngine:
     def __init__(self, outputs: list[str] | None = None) -> None:
         self.outputs = outputs or ["answer"]
         self.requests = []
+        self.progress = []
 
-    async def run(self, request):
+    async def run(self, request, progress=None):
         self.requests.append(request)
+        self.progress.append(progress)
         return AgentRunResult(
             output=self.outputs.pop(0),
             stop_reason=AgentStopReason.COMPLETED,
@@ -220,7 +223,8 @@ class RecordingEngine:
 
 
 class FailingEngine(RecordingEngine):
-    async def run(self, request):
+    async def run(self, request, progress=None):
+        del progress
         self.requests.append(request)
         raise ProviderError("provider unavailable")
 
@@ -229,6 +233,8 @@ def agent_settings() -> AgentSettings:
     return AgentSettings(
         mode=AgentMode.AGENT,
         system_prompt="Agent system prompt",
+        live_display=False,
+        display_edit_interval_seconds=0.8,
         session_ttl_seconds=3600,
         max_history_messages=10,
         max_history_characters=1000,
@@ -307,6 +313,27 @@ async def test_agent_service_persists_turns_and_reuses_provider_neutral_history(
 
 
 @pytest.mark.asyncio
+async def test_agent_service_emits_accepted_and_passes_the_same_progress_sink(
+    chat_settings,
+) -> None:
+    class RecordingProgress:
+        def __init__(self) -> None:
+            self.events: list[ConversationProgressEvent] = []
+
+        async def emit(self, event: ConversationProgressEvent) -> None:
+            self.events.append(event)
+
+    engine = RecordingEngine()
+    progress = RecordingProgress()
+    service, _, _, _, _ = await build_service(chat_settings, engine)
+
+    await service.ask(key(), "question", progress=progress)
+
+    assert [event.kind for event in progress.events] == [ProgressKind.ACCEPTED]
+    assert engine.progress == [progress]
+
+
+@pytest.mark.asyncio
 async def test_agent_service_switches_thread_and_user_provider_preferences(
     chat_settings,
 ) -> None:
@@ -354,7 +381,8 @@ async def test_agent_service_cancellation_marks_run_and_releases_lock(chat_setti
     started = asyncio.Event()
 
     class WaitingEngine(RecordingEngine):
-        async def run(self, request):
+        async def run(self, request, progress=None):
+            del progress
             self.requests.append(request)
             started.set()
             await asyncio.Event().wait()
@@ -401,7 +429,8 @@ async def test_agent_service_persists_and_reuses_only_paired_tool_messages(
     )
 
     class PairingEngine(RecordingEngine):
-        async def run(self, request):
+        async def run(self, request, progress=None):
+            del progress
             self.requests.append(request)
             return AgentRunResult(
                 output="answer",

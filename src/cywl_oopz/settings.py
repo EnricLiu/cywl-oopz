@@ -271,6 +271,8 @@ class AgentSettings:
 
     mode: AgentMode
     system_prompt: str
+    live_display: bool
+    display_edit_interval_seconds: float
     session_ttl_seconds: int
     max_history_messages: int
     max_history_characters: int
@@ -311,6 +313,16 @@ class AgentSettings:
             mode=mode,
             system_prompt=values.get("CYWL_AGENT_SYSTEM_PROMPT", "").strip()
             or DEFAULT_AGENT_SYSTEM_PROMPT,
+            live_display=_boolean(
+                values,
+                "CYWL_AGENT_LIVE_DISPLAY",
+                False,
+            ),
+            display_edit_interval_seconds=_positive_float(
+                values,
+                "CYWL_AGENT_DISPLAY_EDIT_INTERVAL_SECONDS",
+                0.8,
+            ),
             session_ttl_seconds=_positive_integer(
                 values,
                 "CYWL_AGENT_SESSION_TTL_SECONDS",

@@ -71,6 +71,9 @@ from .features.chat.service import ChatService
 from .features.chat.tasks import ChatTaskSupervisor
 from .features.music.netease import NeteaseMusicCatalog
 from .features.music.service import MusicRequestService
+from .integrations.oopz.agent_presenter import OopzAgentPresenterFactory
+from .integrations.oopz.editable_messages import OopzEditableMessageGateway
+from .integrations.oopz.message_renderer import OopzMessageRenderer
 from .integrations.oopz.music import OopzMusicVoiceGateway
 from .integrations.oopz.reactions import OopzReactionGateway
 from .settings import MUSIC_AGENT_TOOLS, AppSettings
@@ -88,6 +91,12 @@ class BotApplication:
         self.health = HealthRegistry()
         self.database = Database(settings.database)
         self.bot = OopzBot(settings.oopz)
+        self.agent_presenters = OopzAgentPresenterFactory(
+            OopzEditableMessageGateway(self.bot),
+            OopzMessageRenderer(),
+            enabled=settings.agent.enabled and settings.agent.live_display,
+            edit_interval_seconds=settings.agent.display_edit_interval_seconds,
+        )
         self.commands = CommandRouter(settings.command_prefix)
         catalog_repository = SqlAlchemyProviderCatalogRepository(self.database.session_factory)
         self.agent_catalog = ReloadableProviderCatalog(catalog_repository)
@@ -201,8 +210,16 @@ class BotApplication:
             health=self.health,
         )
         self.chat = self.agent_chat if settings.agent.enabled else self.legacy_chat
-        self._mention_handler = MentionChatHandler(self.chat, settings.oopz.person_uid)
-        self._ambient_handler = AmbientChatHandler(self.chat, channel_settings)
+        self._mention_handler = MentionChatHandler(
+            self.chat,
+            settings.oopz.person_uid,
+            self.agent_presenters,
+        )
+        self._ambient_handler = AmbientChatHandler(
+            self.chat,
+            channel_settings,
+            self.agent_presenters,
+        )
         self._register_commands()
         self.bot.on_ready(self._on_ready)
         self.bot.on_message(self._on_message)
@@ -224,9 +241,17 @@ class BotApplication:
         self.commands.register(PingCommand())
         self.commands.register(HelpCommand(self.commands))
         self.commands.register(StatusCommand(self.health))
-        self.commands.register(ChatCommand(self.chat))
+        self.commands.register(ChatCommand(self.chat, self.agent_presenters))
         self.commands.register(NewConversationCommand(self.chat, self.chat_tasks))
-        self.commands.register(CancelChatCommand(self.chat, self.chat_tasks))
+        self.commands.register(
+            CancelChatCommand(
+                self.chat,
+                self.chat_tasks,
+                active_message_reports_cancel=(
+                    self.settings.agent.enabled and self.settings.agent.live_display
+                ),
+            )
+        )
         self.commands.register(ModelCommand(self.chat, self.chat_tasks))
         self.commands.register(ChatStatusCommand(self.chat))
         if self.settings.agent.enabled:

@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Protocol
 
 from .models import ChatInvocation, ChatResponse, ChatStatus, ConversationKey
+from .progress import ProgressSink
 
 
 class ChatUseCase(Protocol):
@@ -20,6 +21,7 @@ class ChatUseCase(Protocol):
         prompt: str,
         *,
         invocation: ChatInvocation | None = None,
+        progress: ProgressSink | None = None,
     ) -> ChatResponse:
         """Answer one prompt."""
 

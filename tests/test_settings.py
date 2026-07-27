@@ -51,6 +51,8 @@ def test_app_settings_use_the_injected_oopz_credentials(monkeypatch) -> None:
     )
     assert settings.agent.summary_enabled is True
     assert settings.agent.memory_enabled_by_default is True
+    assert settings.agent.live_display is False
+    assert settings.agent.display_edit_interval_seconds == 0.8
     assert settings.music.enabled is False
 
 
@@ -73,6 +75,27 @@ def test_agent_system_prompt_keeps_custom_base_instructions() -> None:
     )
 
     assert settings.agent.system_prompt == "你是社区里的点歌搭子。"
+
+
+def test_agent_live_display_settings_are_validated() -> None:
+    settings = AppSettings.from_mapping(
+        valid_environment()
+        | {
+            "CYWL_AGENT_LIVE_DISPLAY": "true",
+            "CYWL_AGENT_DISPLAY_EDIT_INTERVAL_SECONDS": "1.25",
+        }
+    )
+
+    assert settings.agent.live_display is True
+    assert settings.agent.display_edit_interval_seconds == 1.25
+
+    with pytest.raises(
+        ConfigurationError,
+        match="CYWL_AGENT_DISPLAY_EDIT_INTERVAL_SECONDS",
+    ):
+        AppSettings.from_mapping(
+            valid_environment() | {"CYWL_AGENT_DISPLAY_EDIT_INTERVAL_SECONDS": "0"}
+        )
 
 
 def test_agent_tools_can_be_disabled_independently() -> None:

@@ -15,6 +15,9 @@ def test_system_prompt_preserves_persona_and_defines_agent_loop_contract() -> No
     assert "结束循环并给出最终回复" in rendered
     assert "绝不伪造调用、结果或成功状态" in rendered
     assert "不要输出隐藏的逐步思考" in rendered
+    assert "约 1500 个字符" in rendered
+    assert "`**粗体**`" in rendered
+    assert "不要使用 Markdown 表格、代码围栏" in rendered
 
 
 def test_system_prompt_rejects_an_empty_persona() -> None:

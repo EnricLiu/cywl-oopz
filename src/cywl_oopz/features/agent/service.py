@@ -23,6 +23,12 @@ from cywl_oopz.features.chat.models import (
     ChatStatus,
     ConversationKey,
 )
+from cywl_oopz.features.chat.progress import (
+    ConversationProgressEvent,
+    ProgressKind,
+    ProgressSink,
+    emit_progress,
+)
 from cywl_oopz.features.chat.rate_limit import RateLimitService
 from cywl_oopz.settings import AgentSettings, ChatSettings
 
@@ -110,12 +116,14 @@ class AgentConversationService:
         prompt: str,
         *,
         invocation: ChatInvocation | None = None,
+        progress: ProgressSink | None = None,
     ) -> ChatResponse:
         """Run one bounded Agent turn with durable run, message, and tool records."""
         content = prompt.strip()
         if not content:
             raise ValueError("Agent prompt must not be empty")
         self._input_validator.validate_input(content)
+        await emit_progress(progress, ConversationProgressEvent(ProgressKind.ACCEPTED))
 
         async with self._locks.hold(key):
             async with await self._rate_limits.acquire(key):
@@ -172,7 +180,7 @@ class AgentConversationService:
                     limits=limits,
                 )
                 try:
-                    result = await self._engine.run(request)
+                    result = await self._engine.run(request, progress)
                 except asyncio.CancelledError:
                     await self._finish_after_interrupt(
                         state,

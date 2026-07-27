@@ -20,6 +20,7 @@ from .models import (
     ConversationKey,
     ConversationSession,
 )
+from .progress import ConversationProgressEvent, ProgressKind, ProgressSink, emit_progress
 from .provider import ChatProvider
 from .rate_limit import RateLimitService
 from .repository import ConversationRepository
@@ -61,6 +62,7 @@ class ChatService:
         prompt: str,
         *,
         invocation: ChatInvocation | None = None,
+        progress: ProgressSink | None = None,
     ) -> ChatResponse:
         """Answer one prompt while keeping the same session strictly ordered."""
         del invocation
@@ -69,6 +71,7 @@ class ChatService:
         if not content:
             raise ValueError("Chat prompt must not be empty")
         self._history.validate_input(content)
+        await emit_progress(progress, ConversationProgressEvent(ProgressKind.ACCEPTED))
 
         async with self._locks.hold(key):
             async with await self._rate_limits.acquire(key):

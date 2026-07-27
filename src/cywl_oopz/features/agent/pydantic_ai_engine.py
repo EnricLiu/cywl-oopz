@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -30,15 +29,18 @@ from pydantic_ai.messages import (
 )
 
 from cywl_oopz.core.errors import ProviderError, ProviderResponseError, ProviderTimeoutError
-from cywl_oopz.features.chat.progress import ConversationProgressEvent, ProgressKind, ProgressSink
+from cywl_oopz.features.chat.progress import (
+    ConversationProgressEvent,
+    ProgressKind,
+    ProgressSink,
+    emit_progress,
+)
 
 from .models import AgentMessage, AgentRunRequest, AgentRunResult, AgentStopReason
 from .progress import PydanticAiProgressMapper
 from .registry import AgentModelRegistry
 from .tools.models import ToolCall, ToolDescriptor, ToolExecutionContext
 from .tools.ports import AgentToolRuntime
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -84,7 +86,7 @@ class PydanticAiAgentEngine:
             total_tokens_limit=request.limits.max_total_tokens,
         )
         try:
-            await self._emit(progress, progress_mapper.thinking())
+            await emit_progress(progress, progress_mapper.thinking())
             async with asyncio.timeout(request.limits.timeout_seconds):
                 if dependencies is None:
                     event_stream = agent.run_stream_events(
@@ -105,7 +107,7 @@ class PydanticAiAgentEngine:
                         if isinstance(framework_event, AgentRunResultEvent):
                             result = framework_event.result
                         for mapped_event in progress_mapper.map(framework_event):
-                            await self._emit(progress, mapped_event)
+                            await emit_progress(progress, mapped_event)
                 if result is None:
                     raise ProviderResponseError("Agent stream ended without a result")
         except TimeoutError as exc:
@@ -125,7 +127,7 @@ class PydanticAiAgentEngine:
                 output="本次对话已达到运行预算，请缩短问题或开始新的对话。",
                 stop_reason=reason,
             )
-            await self._emit(
+            await emit_progress(
                 progress,
                 ConversationProgressEvent(
                     ProgressKind.COMPLETED,
@@ -151,22 +153,6 @@ class PydanticAiAgentEngine:
             tool_calls=usage.tool_calls,
             intermediate_messages=self._map_new_tool_messages(result.new_messages()),
         )
-
-    @staticmethod
-    async def _emit(
-        progress: ProgressSink | None,
-        event: ConversationProgressEvent,
-    ) -> None:
-        if progress is None:
-            return
-        try:
-            await progress.emit(event)
-        except Exception as exc:
-            logger.warning(
-                "Agent progress sink failed for %s: %s",
-                event.kind.value,
-                type(exc).__name__,
-            )
 
     async def aclose(self) -> None:
         """Close registry-owned clients."""

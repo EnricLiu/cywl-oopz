@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 
@@ -15,6 +16,8 @@ from cywl_oopz.features.chat.commands import (
     MentionChatHandler,
     NewConversationCommand,
 )
+from cywl_oopz.features.chat.models import ChatResponse, ConversationKey
+from cywl_oopz.features.chat.progress import ConversationProgressEvent, ProgressKind
 from cywl_oopz.features.chat.service import ChatService
 from cywl_oopz.features.chat.tasks import ChatTaskSupervisor
 from cywl_oopz.testing.chat import (
@@ -149,6 +152,133 @@ class FailingChatService:
 
     async def ask(self, *_: object, **__: object):
         raise self._error
+
+
+class OwnedPresentation:
+    owns_message = True
+
+    def __init__(self) -> None:
+        self.events: list[ConversationProgressEvent] = []
+        self.completed: ChatResponse | None = None
+        self.failed = ""
+        self.cancelled = False
+        self.closed = False
+
+    async def emit(self, event: ConversationProgressEvent) -> None:
+        self.events.append(event)
+
+    async def complete(self, response: ChatResponse) -> None:
+        self.completed = response
+
+    async def fail(self, message: str) -> None:
+        self.failed = message
+
+    async def cancel(self) -> None:
+        self.cancelled = True
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+class OwnedPresentationFactory:
+    def __init__(self, presentation: OwnedPresentation) -> None:
+        self.presentation = presentation
+
+    async def open(self, _: object) -> OwnedPresentation:
+        return self.presentation
+
+
+class ProgressChatService:
+    enabled = True
+
+    async def ask(self, *args: object, **kwargs: object) -> ChatResponse:
+        del args
+        progress = kwargs["progress"]
+        await progress.emit(ConversationProgressEvent(ProgressKind.THINKING))
+        return ChatResponse("只有这一条最终回答", "provider/model")
+
+
+@pytest.mark.asyncio
+async def test_owned_presentation_replaces_the_normal_final_reply() -> None:
+    presentation = OwnedPresentation()
+    router = CommandRouter("!")
+    router.register(
+        ChatCommand(
+            ProgressChatService(),
+            OwnedPresentationFactory(presentation),
+        )
+    )
+    message = FakeMessage("!chat hello")
+    context = context_for(message)
+
+    await router.dispatch(message, context)
+
+    assert context.replies == []
+    assert [event.kind for event in presentation.events] == [ProgressKind.THINKING]
+    assert presentation.completed is not None
+    assert presentation.completed.content == "只有这一条最终回答"
+    assert presentation.closed is True
+
+
+@pytest.mark.asyncio
+async def test_owned_presentation_keeps_safe_failure_in_the_original_message() -> None:
+    presentation = OwnedPresentation()
+    router = CommandRouter("!")
+    router.register(
+        ChatCommand(
+            FailingChatService(ProviderTimeoutError("timeout")),
+            OwnedPresentationFactory(presentation),
+        )
+    )
+    message = FakeMessage("!chat hello")
+    context = context_for(message)
+
+    await router.dispatch(message, context)
+
+    assert context.replies == []
+    assert presentation.failed == "模型响应超时，请稍后重试。"
+    assert presentation.closed is True
+
+
+@pytest.mark.asyncio
+async def test_cancel_updates_owned_message_without_a_second_command_reply() -> None:
+    presentation = OwnedPresentation()
+    supervisor = ChatTaskSupervisor()
+    started = asyncio.Event()
+
+    class WaitingService:
+        enabled = True
+
+        async def ask(self, *args: object, **kwargs: object) -> ChatResponse:
+            del args, kwargs
+            started.set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+    service = WaitingService()
+    chat = ChatCommand(service, OwnedPresentationFactory(presentation))
+    source_message = FakeMessage("!chat wait")
+    source_context = context_for(source_message)
+    key = ConversationKey.from_oopz_context(source_context)
+    operation = chat.execute(
+        CommandRouter("!").parse(source_message.plain_text),
+        source_context,
+    )
+    assert supervisor.start(key, operation) is True
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    cancel_context = context_for(FakeMessage("!cancel"))
+    cancel = CancelChatCommand(
+        service,
+        supervisor,
+        active_message_reports_cancel=True,
+    )
+    await cancel.execute(SimpleNamespace(), cancel_context)
+
+    assert presentation.cancelled is True
+    assert presentation.closed is True
+    assert source_context.replies == []
+    assert cancel_context.replies == []
 
 
 @pytest.mark.asyncio

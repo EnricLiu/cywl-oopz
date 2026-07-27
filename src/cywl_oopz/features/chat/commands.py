@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import UTC
 
@@ -21,6 +22,12 @@ from cywl_oopz.storage.channel_settings import ChannelSettingsRepository
 
 from .history import ChatInputTooLongError
 from .models import ChatInvocation, ConversationKey
+from .progress import (
+    ConversationPresenterFactory,
+    ConversationProgressSession,
+    NoopPresenterFactory,
+    NoopProgressSession,
+)
 from .tasks import ChatTaskSupervisor
 from .use_case import ChatUseCase
 
@@ -30,37 +37,93 @@ logger = logging.getLogger(__name__)
 class ChatCommandController:
     """Shared safe error mapping for chat-facing command controllers."""
 
-    def __init__(self, service: ChatUseCase) -> None:
+    def __init__(
+        self,
+        service: ChatUseCase,
+        presenter_factory: ConversationPresenterFactory | None = None,
+    ) -> None:
         self._service = service
+        self._presenters = presenter_factory or NoopPresenterFactory()
 
     @staticmethod
     def _key(context: EventContext) -> ConversationKey:
         return ConversationKey.from_oopz_context(context)
 
-    async def _reply_error(self, context: EventContext, error: Exception) -> None:
+    @staticmethod
+    def _error_message(error: Exception) -> str:
         if isinstance(error, FeatureDisabledError):
-            message = "文字对话功能当前未启用。"
-        elif isinstance(error, ChatInputTooLongError):
-            message = "这条消息太长，请缩短后再试。"
-        elif isinstance(error, RateLimitExceeded):
+            return "文字对话功能当前未启用。"
+        if isinstance(error, ChatInputTooLongError):
+            return "这条消息太长，请缩短后再试。"
+        if isinstance(error, RateLimitExceeded):
             if error.retry_after_seconds > 0:
-                message = f"请求过于频繁，请在 {error.retry_after_seconds:.1f} 秒后重试。"
+                return f"请求过于频繁，请在 {error.retry_after_seconds:.1f} 秒后重试。"
+            return "当前对话请求较多，请稍后重试。"
+        if isinstance(error, ProviderTimeoutError):
+            return "模型响应超时，请稍后重试。"
+        if isinstance(error, ProviderError):
+            return "模型服务暂时不可用，请稍后重试。"
+        if isinstance(error, DatabaseError):
+            return "会话服务暂时不可用，请稍后重试。"
+        if isinstance(error, AuthorizationError):
+            return "你没有执行此操作的权限。"
+        if isinstance(error, ValueError):
+            return "命令参数不正确，请使用 !help 查看用法。"
+        logger.exception("Unexpected chat command failure: %s", type(error).__name__)
+        return "处理请求时出现了问题，请稍后重试。"
+
+    async def _reply_error(self, context: EventContext, error: Exception) -> None:
+        await context.reply(self._error_message(error))
+
+    async def _ask_with_presenter(
+        self,
+        context: EventContext,
+        prompt: str,
+    ) -> bool:
+        """Run one shared chat path and keep terminal output in the owned message."""
+        try:
+            presentation = await self._presenters.open(context)
+        except Exception as exc:
+            logger.warning(
+                "Conversation presenter failed to open: %s",
+                type(exc).__name__,
+            )
+            presentation = NoopProgressSession()
+        try:
+            response = await self._service.ask(
+                self._key(context),
+                prompt,
+                invocation=ChatInvocation.from_oopz_context(context),
+                progress=presentation,
+            )
+        except asyncio.CancelledError:
+            await self._show_cancelled(context, presentation)
+            raise
+        except Exception as exc:
+            message = self._error_message(exc)
+            if presentation.owns_message:
+                await presentation.fail(message)
             else:
-                message = "当前对话请求较多，请稍后重试。"
-        elif isinstance(error, ProviderTimeoutError):
-            message = "模型响应超时，请稍后重试。"
-        elif isinstance(error, ProviderError):
-            message = "模型服务暂时不可用，请稍后重试。"
-        elif isinstance(error, DatabaseError):
-            message = "会话服务暂时不可用，请稍后重试。"
-        elif isinstance(error, AuthorizationError):
-            message = "你没有执行此操作的权限。"
-        elif isinstance(error, ValueError):
-            message = "命令参数不正确，请使用 !help 查看用法。"
+                await context.reply(message)
+            return False
         else:
-            logger.exception("Unexpected chat command failure: %s", type(error).__name__)
-            message = "处理请求时出现了问题，请稍后重试。"
-        await context.reply(message)
+            if presentation.owns_message:
+                await presentation.complete(response)
+            else:
+                await context.reply(response.content)
+            return True
+        finally:
+            await asyncio.shield(presentation.aclose())
+
+    @staticmethod
+    async def _show_cancelled(
+        context: EventContext,
+        presentation: ConversationProgressSession,
+    ) -> None:
+        if presentation.owns_message:
+            await asyncio.shield(presentation.cancel())
+        else:
+            await context.reply("已取消当前文字回复。")
 
 
 class ChatCommand(ChatCommandController):
@@ -74,23 +137,19 @@ class ChatCommand(ChatCommandController):
         if not prompt.strip():
             await context.reply("用法：!chat <想说的话>")
             return
-        try:
-            response = await self._service.ask(
-                self._key(context),
-                prompt,
-                invocation=ChatInvocation.from_oopz_context(context),
-            )
-        except Exception as exc:
-            await self._reply_error(context, exc)
-            return
-        await context.reply(response.content)
+        await self._ask_with_presenter(context, prompt)
 
 
 class MentionChatHandler(ChatCommandController):
     """Reply only when an incoming non-command message explicitly mentions this bot."""
 
-    def __init__(self, service: ChatUseCase, bot_person_id: str) -> None:
-        super().__init__(service)
+    def __init__(
+        self,
+        service: ChatUseCase,
+        bot_person_id: str,
+        presenter_factory: ConversationPresenterFactory | None = None,
+    ) -> None:
+        super().__init__(service, presenter_factory)
         self._bot_person_id = bot_person_id
 
     async def handle(self, message: OopzMessage, context: EventContext) -> bool:
@@ -101,16 +160,7 @@ class MentionChatHandler(ChatCommandController):
         if not prompt:
             await context.reply("你好！请在提及我后附上想问的内容，或使用 !chat <内容>。")
             return True
-        try:
-            response = await self._service.ask(
-                self._key(context),
-                prompt,
-                invocation=ChatInvocation.from_oopz_context(context),
-            )
-        except Exception as exc:
-            await self._reply_error(context, exc)
-            return True
-        await context.reply(response.content)
+        await self._ask_with_presenter(context, prompt)
         return True
 
     def matches(self, message: OopzMessage) -> bool:
@@ -124,8 +174,13 @@ class MentionChatHandler(ChatCommandController):
 class AmbientChatHandler(ChatCommandController):
     """Handle normal private messages and channels explicitly enabled in PostgreSQL."""
 
-    def __init__(self, service: ChatUseCase, channels: ChannelSettingsRepository) -> None:
-        super().__init__(service)
+    def __init__(
+        self,
+        service: ChatUseCase,
+        channels: ChannelSettingsRepository,
+        presenter_factory: ConversationPresenterFactory | None = None,
+    ) -> None:
+        super().__init__(service, presenter_factory)
         self._channels = channels
 
     async def matches(self, message: OopzMessage, context: EventContext) -> bool:
@@ -146,16 +201,7 @@ class AmbientChatHandler(ChatCommandController):
         prompt = (message.plain_text or message.text or message.content).strip()
         if not prompt:
             return False
-        try:
-            response = await self._service.ask(
-                self._key(context),
-                prompt,
-                invocation=ChatInvocation.from_oopz_context(context),
-            )
-        except Exception as exc:
-            await self._reply_error(context, exc)
-            return True
-        await context.reply(response.content)
+        await self._ask_with_presenter(context, prompt)
         return True
 
 
@@ -165,7 +211,11 @@ class NewConversationCommand(ChatCommandController):
     name = "new"
     description = "清空当前文字对话的上下文。"
 
-    def __init__(self, service: ChatUseCase, tasks: ChatTaskSupervisor) -> None:
+    def __init__(
+        self,
+        service: ChatUseCase,
+        tasks: ChatTaskSupervisor,
+    ) -> None:
         super().__init__(service)
         self._tasks = tasks
 
@@ -186,9 +236,16 @@ class CancelChatCommand(ChatCommandController):
     name = "cancel"
     description = "取消当前正在生成的文字回复。"
 
-    def __init__(self, service: ChatUseCase, tasks: ChatTaskSupervisor) -> None:
+    def __init__(
+        self,
+        service: ChatUseCase,
+        tasks: ChatTaskSupervisor,
+        *,
+        active_message_reports_cancel: bool = False,
+    ) -> None:
         super().__init__(service)
         self._tasks = tasks
+        self._active_message_reports_cancel = active_message_reports_cancel
 
     async def execute(self, _: ParsedCommand, context: EventContext) -> None:
         try:
@@ -197,7 +254,8 @@ class CancelChatCommand(ChatCommandController):
             await self._reply_error(context, exc)
             return
         if cancelled:
-            await context.reply("已取消当前文字回复。")
+            if not self._active_message_reports_cancel:
+                await context.reply("已取消当前文字回复。")
         else:
             await context.reply("当前没有正在生成的文字回复。")
 

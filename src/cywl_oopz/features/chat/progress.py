@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Protocol
+from typing import Any, Protocol
+
+from .models import ChatResponse
+
+logger = logging.getLogger(__name__)
 
 
 class ProgressKind(StrEnum):
@@ -76,8 +81,76 @@ class ProgressSink(Protocol):
         """Observe one lifecycle event without controlling Agent success."""
 
 
-class NoopProgressSink:
-    """Default sink used when live presentation is unavailable or disabled."""
+class ConversationProgressSession(ProgressSink, Protocol):
+    """Lifecycle owned by one user-visible conversational request."""
+
+    @property
+    def owns_message(self) -> bool:
+        """Whether this session created and now owns the response message."""
+
+    async def complete(self, response: ChatResponse) -> None:
+        """Flush a successful terminal response."""
+
+    async def fail(self, message: str) -> None:
+        """Flush a safe user-visible failure."""
+
+    async def cancel(self) -> None:
+        """Flush cancellation into the owned message."""
+
+    async def aclose(self) -> None:
+        """Release any session-owned background work."""
+
+
+class ConversationPresenterFactory(Protocol):
+    """Open one presentation session at an integration-owned context boundary."""
+
+    async def open(self, context: Any) -> ConversationProgressSession:
+        """Create a display message or return an unavailable no-op session."""
+
+
+class NoopProgressSession:
+    """Unavailable session used when live presentation is disabled or failed to open."""
+
+    @property
+    def owns_message(self) -> bool:
+        return False
 
     async def emit(self, event: ConversationProgressEvent) -> None:
         del event
+
+    async def complete(self, response: ChatResponse) -> None:
+        del response
+
+    async def fail(self, message: str) -> None:
+        del message
+
+    async def cancel(self) -> None:
+        return None
+
+    async def aclose(self) -> None:
+        return None
+
+
+class NoopPresenterFactory:
+    """Factory preserving the pre-live-display controller path."""
+
+    async def open(self, context: Any) -> ConversationProgressSession:
+        del context
+        return NoopProgressSession()
+
+
+async def emit_progress(
+    progress: ProgressSink | None,
+    event: ConversationProgressEvent,
+) -> None:
+    """Best-effort delivery that never controls conversation success."""
+    if progress is None:
+        return
+    try:
+        await progress.emit(event)
+    except Exception as exc:
+        logger.warning(
+            "Conversation progress sink failed for %s: %s",
+            event.kind.value,
+            type(exc).__name__,
+        )
