@@ -17,6 +17,7 @@ from pydantic_ai.providers.openai import OpenAIProvider
 
 from cywl_oopz.features.agent.models import (
     AgentIdentity,
+    AgentMessage,
     AgentModelRef,
     AgentRunLimits,
     AgentRunRequest,
@@ -24,6 +25,7 @@ from cywl_oopz.features.agent.models import (
     ModelCapability,
     ProviderProtocol,
 )
+from cywl_oopz.features.agent.prompts import AgentSystemPrompt
 from cywl_oopz.features.agent.pydantic_ai_engine import PydanticAiAgentEngine
 from cywl_oopz.features.agent.tools.models import (
     ToolCall,
@@ -220,6 +222,13 @@ async def test_live_provider_text_tools_streaming_and_usage() -> None:
         runtime = LiveToolRuntime()
         engine = PydanticAiAgentEngine(LiveModelRegistry(model), runtime)
         key = ConversationKey("private", "", "", "live-person")
+        live_context = (
+            AgentMessage(
+                "system",
+                "text",
+                {"text": AgentSystemPrompt("你是 CYWL 的开发冒烟测试助手。").render()},
+            ),
+        )
         started_at = time.perf_counter()
         agent_result = await engine.run(
             AgentRunRequest(
@@ -237,7 +246,7 @@ async def test_live_provider_text_tools_streaming_and_usage() -> None:
                     fallback_model_id=None,
                 ),
                 prompt=("必须调用 live_agent_status 一次；拿到结果后只用一句中文确认状态。"),
-                context=(),
+                context=live_context,
                 enabled_tools=("live_agent_status",),
                 limits=AgentRunLimits(timeout_seconds=90),
             )
@@ -264,7 +273,7 @@ async def test_live_provider_text_tools_streaming_and_usage() -> None:
                     "必须调用 enqueue_music 一次，query 使用“Blue Train John Coltrane”；"
                     "获得结果后用一句中文确认。"
                 ),
-                context=(),
+                context=live_context,
                 enabled_tools=("enqueue_music",),
                 limits=AgentRunLimits(timeout_seconds=90),
             )

@@ -61,6 +61,17 @@ def test_agent_mode_uses_database_catalog_without_legacy_llm_credentials() -> No
     assert settings.chat.enabled is False
 
 
+def test_agent_system_prompt_keeps_custom_base_instructions() -> None:
+    settings = AppSettings.from_mapping(
+        valid_environment()
+        | {
+            "CYWL_AGENT_SYSTEM_PROMPT": "你是社区里的点歌搭子。",
+        }
+    )
+
+    assert settings.agent.system_prompt == "你是社区里的点歌搭子。"
+
+
 def test_agent_tools_can_be_disabled_independently() -> None:
     settings = AppSettings.from_mapping(
         valid_environment()

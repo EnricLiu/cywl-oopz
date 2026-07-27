@@ -11,6 +11,7 @@ from cywl_oopz.settings import AgentSettings
 
 from .models import AgentIdentity, AgentMessage, AgentThread
 from .ports import AgentMessageRepository
+from .prompts import AgentSystemPrompt
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,7 @@ class AgentContextBuilder:
         self._settings = settings
         self._messages = messages
         self._memory = memory
+        self._system_prompt = AgentSystemPrompt(settings.system_prompt)
 
     async def build(
         self,
@@ -45,7 +47,7 @@ class AgentContextBuilder:
             AgentMessage(
                 "system",
                 "text",
-                {"text": self._settings.system_prompt},
+                {"text": self._system_prompt.render()},
             )
         ]
         if thread.summary.strip():

@@ -299,7 +299,7 @@ class AgentSettings:
         settings = cls(
             mode=mode,
             system_prompt=values.get("CYWL_AGENT_SYSTEM_PROMPT", "").strip()
-            or "你是 CYWL，一个友好、简洁、善于使用工具的 OOPZ 社区助手。",
+            or "你是 CYWL，一个友好、简洁的 OOPZ 社区助手。",
             session_ttl_seconds=_positive_integer(
                 values,
                 "CYWL_AGENT_SESSION_TTL_SECONDS",

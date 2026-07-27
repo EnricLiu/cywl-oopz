@@ -175,6 +175,8 @@ async def test_context_builder_orders_summary_memory_and_recent_messages() -> No
     ]
     assert messages.load_after_sequence == 2
     assert memory.person_ids == ["person"]
+    assert context[0].content["text"].startswith(settings().system_prompt)
+    assert "## Agent 工作循环" in context[0].content["text"]
     assert "Earlier facts." in context[1].content["text"]
 
     without_memory = await AgentContextBuilder(
