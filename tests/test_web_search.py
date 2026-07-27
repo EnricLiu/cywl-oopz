@@ -116,7 +116,7 @@ async def test_duckduckgo_gateway_runs_off_loop_and_normalizes_results() -> None
         "safesearch": "moderate",
         "timelimit": "w",
         "max_results": 5,
-        "backend": "duckduckgo",
+        "backend": "auto",
     }
     assert results == (
         WebSearchResult(
