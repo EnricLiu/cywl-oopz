@@ -41,6 +41,7 @@ class GetAgentStatusTool:
     def __init__(self, *, timeout_seconds: float, max_output_characters: int) -> None:
         self._descriptor = ToolDescriptor(
             name="get_agent_status",
+            display_name="查看 Agent 状态",
             description=("查看当前 Agent 模式、对话范围、可用工具和剩余的模型/工具调用预算。"),
             input_model=EmptyToolInput,
             output_model=AgentStatusOutput,
@@ -96,6 +97,7 @@ class GetChannelSettingsTool:
         self._channels = channels
         self._descriptor = ToolDescriptor(
             name="get_channel_settings",
+            display_name="查看频道设置",
             description="查看当前频道启用的聊天和 Agent 工具；私聊返回当前私聊范围。",
             input_model=EmptyToolInput,
             output_model=ChannelSettingsOutput,
@@ -162,6 +164,7 @@ class ReactToMessageTool:
         self._reactions = reactions
         self._descriptor = ToolDescriptor(
             name="react_to_message",
+            display_name="回应你的消息",
             description=(
                 "给触发当前对话的用户消息添加一个合适的表情反应；仅在确实能增强互动时使用。"
             ),

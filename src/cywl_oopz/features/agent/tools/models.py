@@ -34,6 +34,7 @@ class ToolDescriptor:
     """Stable tool schema and code-enforced execution policy."""
 
     name: str
+    display_name: str
     description: str
     input_model: type[BaseModel]
     output_model: type[BaseModel]
@@ -47,12 +48,15 @@ class ToolDescriptor:
 
     def __post_init__(self) -> None:
         name = self.name.strip()
+        display_name = self.display_name.strip()
         description = self.description.strip()
         version = self.version.strip()
         if not _TOOL_NAME.fullmatch(name):
             raise ValueError("Tool name must be a stable snake_case identifier")
-        if not description or not version:
-            raise ValueError("Tool description and version must not be empty")
+        if not display_name or not description or not version:
+            raise ValueError("Tool display name, description, and version must not be empty")
+        if len(display_name) > 48 or "\n" in display_name or "\r" in display_name:
+            raise ValueError("Tool display name must be one line of at most 48 characters")
         if self.timeout_seconds <= 0 or self.max_output_characters < 128:
             raise ValueError(
                 "Tool timeout must be positive and output limit at least 128 characters"
@@ -62,6 +66,7 @@ class ToolDescriptor:
         if self.effect is not ToolEffect.READ and not self.idempotent:
             raise ValueError("Write and admin tools must declare idempotency")
         object.__setattr__(self, "name", name)
+        object.__setattr__(self, "display_name", display_name)
         object.__setattr__(self, "description", description)
         object.__setattr__(self, "version", version)
 

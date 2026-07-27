@@ -60,6 +60,7 @@ class RecordingTool:
     ) -> None:
         self._descriptor = ToolDescriptor(
             name=name,
+            display_name=name,
             description="Double one integer.",
             input_model=NumberInput,
             output_model=NumberOutput,
@@ -176,6 +177,7 @@ def test_write_tools_must_declare_idempotency_and_registry_rejects_duplicates() 
     with pytest.raises(ValueError, match="idempotency"):
         ToolDescriptor(
             name="write",
+            display_name="write",
             description="write",
             input_model=NumberInput,
             output_model=NumberOutput,

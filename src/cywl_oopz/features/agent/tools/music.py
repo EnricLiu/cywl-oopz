@@ -95,6 +95,7 @@ class SearchMusicCatalogTool(_MusicTool):
         self._music = music
         self._descriptor = ToolDescriptor(
             name="search_music_catalog",
+            display_name="搜索歌曲",
             description="按歌曲名或歌手搜索音乐目录，返回候选但不点歌。",
             input_model=MusicSearchInput,
             output_model=MusicSearchOutput,
@@ -154,6 +155,7 @@ class EnqueueMusicTool(_MusicTool):
         self._music = music
         self._descriptor = ToolDescriptor(
             name="enqueue_music",
+            display_name="添加歌曲到队列",
             description=("为用户当前所在的 OOPZ 语音频道点歌；用户不在语音频道时会失败。"),
             input_model=EnqueueMusicInput,
             output_model=EnqueueMusicOutput,
@@ -242,6 +244,7 @@ class GetMusicQueueTool(_MusicTool):
         self._music = music
         self._descriptor = ToolDescriptor(
             name="get_music_queue",
+            display_name="查看播放队列",
             description="查看用户当前语音频道的正在播放歌曲和后续队列。",
             input_model=EmptyToolInput,
             output_model=MusicQueueOutput,
@@ -279,6 +282,7 @@ class _MusicControlTool(_MusicTool):
     """Shared descriptor plumbing for simple identity-scoped controls."""
 
     name: str
+    display_name: str
     description: str
 
     def __init__(
@@ -291,6 +295,7 @@ class _MusicControlTool(_MusicTool):
         self._music = music
         self._descriptor = ToolDescriptor(
             name=self.name,
+            display_name=self.display_name,
             description=self.description,
             input_model=EmptyToolInput,
             output_model=MusicControlOutput,
@@ -310,6 +315,7 @@ class SkipMusicTool(_MusicControlTool):
     """Skip the current track."""
 
     name = "skip_music"
+    display_name = "切换下一首"
     description = "跳过用户当前语音频道正在播放的歌曲；没有歌曲时返回未执行。"
 
     async def execute(
@@ -329,6 +335,7 @@ class PauseMusicTool(_MusicControlTool):
     """Pause the current track."""
 
     name = "pause_music"
+    display_name = "暂停播放"
     description = "暂停用户当前语音频道正在播放的歌曲。"
 
     async def execute(
@@ -348,6 +355,7 @@ class ResumeMusicTool(_MusicControlTool):
     """Resume the current track."""
 
     name = "resume_music"
+    display_name = "继续播放"
     description = "恢复用户当前语音频道已暂停的歌曲。"
 
     async def execute(

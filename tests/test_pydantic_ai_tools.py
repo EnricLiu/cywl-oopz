@@ -60,6 +60,7 @@ class RecordingRuntime:
         self._descriptors = {
             name: ToolDescriptor(
                 name=name,
+                display_name=name,
                 description=f"Execute {name}.",
                 input_model=ValueInput,
                 output_model=ValueOutput,

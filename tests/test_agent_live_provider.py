@@ -74,6 +74,7 @@ class LiveToolRuntime:
         self.called = False
         self.descriptor = ToolDescriptor(
             name="live_agent_status",
+            display_name="查看测试状态",
             description="返回开发冒烟测试的 Agent 状态。",
             input_model=LiveStatusInput,
             output_model=LiveStatusOutput,
@@ -122,6 +123,7 @@ class LiveMusicToolRuntime:
         self.queries: list[str] = []
         self.descriptor = ToolDescriptor(
             name="enqueue_music",
+            display_name="添加歌曲到队列",
             description="为用户当前语音频道点歌。",
             input_model=EnqueueMusicInput,
             output_model=EnqueueMusicOutput,
