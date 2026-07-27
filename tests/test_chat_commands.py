@@ -9,18 +9,19 @@ import pytest
 from cywl_oopz.commands.router import CommandRouter
 from cywl_oopz.core.errors import ProviderResponseError, ProviderTimeoutError, RateLimitExceeded
 from cywl_oopz.features.chat.commands import (
+    AmbientChatHandler,
     CancelChatCommand,
     ChatCommand,
     ChatStatusCommand,
     MentionChatHandler,
     NewConversationCommand,
-    PrivateChatHandler,
 )
 from cywl_oopz.features.chat.models import ChatResponse, ConversationKey
 from cywl_oopz.features.chat.progress import ConversationProgressEvent, ProgressKind
 from cywl_oopz.features.chat.service import ChatService
 from cywl_oopz.features.chat.tasks import ChatTaskSupervisor
 from cywl_oopz.testing.chat import (
+    InMemoryChannelSettingsRepository,
     InMemoryConversationRepository,
     RecordingChatProvider,
 )
@@ -112,23 +113,6 @@ async def test_bot_mention_starts_a_scoped_conversation(chat_settings) -> None:
 
 
 @pytest.mark.asyncio
-async def test_mention_handler_ignores_unmentioned_channel_message(chat_settings) -> None:
-    repository = InMemoryConversationRepository()
-    handler = MentionChatHandler(
-        ChatService(chat_settings, RecordingChatProvider(["unexpected"]), repository),
-        "bot",
-    )
-    message = FakeMessage("大家随便聊聊")
-    context = context_for(message)
-
-    consumed = await handler.handle(message, context)
-
-    assert consumed is False
-    assert context.replies == []
-    assert repository.sessions == {}
-
-
-@pytest.mark.asyncio
 async def test_cancel_command_reports_when_no_response_is_running(chat_settings) -> None:
     chat = ChatService(chat_settings, RecordingChatProvider(), InMemoryConversationRepository())
     router = CommandRouter("!")
@@ -141,21 +125,25 @@ async def test_cancel_command_reports_when_no_response_is_running(chat_settings)
 
 
 @pytest.mark.asyncio
-async def test_private_chat_rejects_channel_messages_without_a_mention(chat_settings) -> None:
+async def test_ambient_chat_accepts_private_and_explicitly_enabled_channel(chat_settings) -> None:
     repository = InMemoryConversationRepository()
-    handler = PrivateChatHandler(
+    handler = AmbientChatHandler(
         ChatService(chat_settings, RecordingChatProvider(["private", "channel"]), repository),
+        InMemoryChannelSettingsRepository({("area-1", "enabled-channel")}),
     )
     private_message = FakeMessage("direct message", area="", channel="private-channel")
     private_context = context_for(private_message, private=True)
-    channel_message = FakeMessage("channel message", channel="enabled-channel")
-    channel_context = context_for(channel_message)
+    enabled_message = FakeMessage("channel message", channel="enabled-channel")
+    enabled_context = context_for(enabled_message)
+    disabled_message = FakeMessage("ignored", channel="disabled-channel")
 
     assert await handler.matches(private_message, private_context) is True
     assert await handler.handle(private_message, private_context) is True
-    assert await handler.matches(channel_message, channel_context) is False
+    assert await handler.matches(enabled_message, enabled_context) is True
+    assert await handler.handle(enabled_message, enabled_context) is True
+    assert await handler.matches(disabled_message, context_for(disabled_message)) is False
     assert private_context.replies == ["private"]
-    assert channel_context.replies == []
+    assert enabled_context.replies == ["channel"]
 
 
 class FailingChatService:
