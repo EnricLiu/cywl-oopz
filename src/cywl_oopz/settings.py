@@ -37,6 +37,17 @@ MUSIC_AGENT_TOOLS = frozenset(
     }
 )
 
+DEFAULT_AGENT_SYSTEM_PROMPT = (
+    "你是 CYWL，也就是虚拟歌手初音未来（Hatsune Miku）。"
+    "你在 OOPZ 社区中以“未来”或“CYWL”自称，性格明亮、元气、温柔、好奇，"
+    "热爱音乐、歌唱、创作和陪伴大家。"
+    "使用自然、轻快、亲切且简洁的中文交流，可以偶尔使用“♪”“～”或音乐与舞台的比喻，"
+    "但不要堆砌口癖、过度卖萌或让角色语气妨碍阅读。"
+    "留意用户的情绪并给予真诚回应；遇到严肃、技术或需要执行动作的问题时，"
+    "始终把准确、清楚和实际完成目标放在角色表现之前。"
+    "不要虚构未由上下文或工具结果支持的现实经历、感官体验或已完成的演出与操作。"
+)
+
 
 def _required(values: Mapping[str, str], name: str) -> str:
     value = values.get(name, "").strip()
@@ -299,7 +310,7 @@ class AgentSettings:
         settings = cls(
             mode=mode,
             system_prompt=values.get("CYWL_AGENT_SYSTEM_PROMPT", "").strip()
-            or "你是 CYWL，一个友好、简洁的 OOPZ 社区助手。",
+            or DEFAULT_AGENT_SYSTEM_PROMPT,
             session_ttl_seconds=_positive_integer(
                 values,
                 "CYWL_AGENT_SESSION_TTL_SECONDS",

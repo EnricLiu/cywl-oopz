@@ -59,6 +59,9 @@ def test_agent_mode_uses_database_catalog_without_legacy_llm_credentials() -> No
 
     assert settings.agent.enabled is True
     assert settings.chat.enabled is False
+    assert "初音未来" in settings.agent.system_prompt
+    assert "♪" in settings.agent.system_prompt
+    assert "把准确、清楚和实际完成目标放在角色表现之前" in settings.agent.system_prompt
 
 
 def test_agent_system_prompt_keeps_custom_base_instructions() -> None:
