@@ -18,7 +18,6 @@ from cywl_oopz.core.errors import (
     ProviderTimeoutError,
     RateLimitExceeded,
 )
-from cywl_oopz.storage.channel_settings import ChannelSettingsRepository
 
 from .history import ChatInputTooLongError
 from .models import ChatInvocation, ConversationKey
@@ -171,30 +170,16 @@ class MentionChatHandler(ChatCommandController):
         )
 
 
-class AmbientChatHandler(ChatCommandController):
-    """Handle normal private messages and channels explicitly enabled in PostgreSQL."""
-
-    def __init__(
-        self,
-        service: ChatUseCase,
-        channels: ChannelSettingsRepository,
-        presenter_factory: ConversationPresenterFactory | None = None,
-    ) -> None:
-        super().__init__(service, presenter_factory)
-        self._channels = channels
+class PrivateChatHandler(ChatCommandController):
+    """Handle ordinary private messages; channel conversation requires a mention."""
 
     async def matches(self, message: OopzMessage, context: EventContext) -> bool:
-        """Apply the persisted trigger policy without inspecting message content."""
+        """Accept only direct messages without weakening the channel mention gate."""
+        del message
         if not self._service.enabled:
             return False
         event = getattr(context, "event", None)
-        if bool(getattr(event, "is_private", False)):
-            return True
-        area_id = str(getattr(message, "area", "")).strip()
-        channel_id = str(getattr(message, "channel", "")).strip()
-        if not area_id or not channel_id:
-            return False
-        return await self._channels.is_chat_enabled(area_id, channel_id)
+        return bool(getattr(event, "is_private", False))
 
     async def handle(self, message: OopzMessage, context: EventContext) -> bool:
         """Answer a message already accepted by ``matches``."""

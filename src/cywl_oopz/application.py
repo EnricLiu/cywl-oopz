@@ -55,13 +55,13 @@ from .features.agent.tools.music import (
 from .features.agent.tools.policy import ToolAvailabilityService, ToolPolicy
 from .features.agent.tools.registry import ToolRegistry
 from .features.chat.commands import (
-    AmbientChatHandler,
     CancelChatCommand,
     ChatCommand,
     ChatStatusCommand,
     MentionChatHandler,
     ModelCommand,
     NewConversationCommand,
+    PrivateChatHandler,
 )
 from .features.chat.models import ConversationKey
 from .features.chat.openai_compatible import OpenAICompatibleChatProvider
@@ -215,9 +215,8 @@ class BotApplication:
             settings.oopz.person_uid,
             self.agent_presenters,
         )
-        self._ambient_handler = AmbientChatHandler(
+        self._private_handler = PrivateChatHandler(
             self.chat,
-            channel_settings,
             self.agent_presenters,
         )
         self._register_commands()
@@ -321,13 +320,8 @@ class BotApplication:
         if self._mention_handler.matches(message):
             await self._start_chat_task(context, self._mention_handler.handle(message, context))
             return
-        try:
-            ambient_enabled = await self._ambient_handler.matches(message, context)
-        except DatabaseError:
-            logger.exception("Failed to evaluate ambient chat policy")
-            return
-        if ambient_enabled:
-            await self._start_chat_task(context, self._ambient_handler.handle(message, context))
+        if await self._private_handler.matches(message, context):
+            await self._start_chat_task(context, self._private_handler.handle(message, context))
 
     async def _start_chat_task(
         self,

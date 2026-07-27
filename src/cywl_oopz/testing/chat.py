@@ -54,13 +54,3 @@ class RecordingChatProvider:
         if not self._responses:
             return "test response"
         return self._responses.pop(0)
-
-
-class InMemoryChannelSettingsRepository:
-    """Channel policy fake with explicit opt-in pairs."""
-
-    def __init__(self, enabled: set[tuple[str, str]] | None = None) -> None:
-        self.enabled = enabled or set()
-
-    async def is_chat_enabled(self, area_id: str, channel_id: str) -> bool:
-        return (area_id, channel_id) in self.enabled
