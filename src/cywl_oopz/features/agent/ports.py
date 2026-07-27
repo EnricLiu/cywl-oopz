@@ -7,6 +7,7 @@ from typing import Protocol
 from uuid import UUID
 
 from cywl_oopz.features.chat.models import ConversationKey
+from cywl_oopz.features.chat.progress import ProgressSink
 
 from .models import (
     AgentMessage,
@@ -24,7 +25,11 @@ from .models import (
 class AgentEngine(Protocol):
     """Framework-neutral boundary for a bounded Agent implementation."""
 
-    async def run(self, request: AgentRunRequest) -> AgentRunResult:
+    async def run(
+        self,
+        request: AgentRunRequest,
+        progress: ProgressSink | None = None,
+    ) -> AgentRunResult:
         """Run one already-pinned request."""
 
     async def aclose(self) -> None:

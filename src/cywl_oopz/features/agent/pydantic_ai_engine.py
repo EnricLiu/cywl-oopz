@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass, replace
 from typing import Any
 
 from pydantic_ai import (
     Agent,
+    AgentRunResultEvent,
     ModelAPIError,
     ModelHTTPError,
     RunContext,
@@ -28,11 +30,15 @@ from pydantic_ai.messages import (
 )
 
 from cywl_oopz.core.errors import ProviderError, ProviderResponseError, ProviderTimeoutError
+from cywl_oopz.features.chat.progress import ConversationProgressEvent, ProgressKind, ProgressSink
 
 from .models import AgentMessage, AgentRunRequest, AgentRunResult, AgentStopReason
+from .progress import PydanticAiProgressMapper
 from .registry import AgentModelRegistry
 from .tools.models import ToolCall, ToolDescriptor, ToolExecutionContext
 from .tools.ports import AgentToolRuntime
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -53,11 +59,16 @@ class PydanticAiAgentEngine:
         self._registry = registry
         self._tools = tools
 
-    async def run(self, request: AgentRunRequest) -> AgentRunResult:
+    async def run(
+        self,
+        request: AgentRunRequest,
+        progress: ProgressSink | None = None,
+    ) -> AgentRunResult:
         """Run an Agent loop with hard wall-clock, model, token, and tool budgets."""
         model = await self._registry.model(request.model)
         instructions, history = self._map_context(request.context)
-        framework_tools, dependencies = self._build_tools(request)
+        framework_tools, dependencies, descriptors = self._build_tools(request)
+        progress_mapper = PydanticAiProgressMapper(descriptors)
         if framework_tools:
             agent = Agent(
                 model,
@@ -73,20 +84,30 @@ class PydanticAiAgentEngine:
             total_tokens_limit=request.limits.max_total_tokens,
         )
         try:
+            await self._emit(progress, progress_mapper.thinking())
             async with asyncio.timeout(request.limits.timeout_seconds):
                 if dependencies is None:
-                    result = await agent.run(
+                    event_stream = agent.run_stream_events(
                         request.prompt,
                         message_history=history,
                         usage_limits=usage_limits,
                     )
                 else:
-                    result = await agent.run(
+                    event_stream = agent.run_stream_events(
                         request.prompt,
                         deps=dependencies,
                         message_history=history,
                         usage_limits=usage_limits,
                     )
+                result = None
+                async with event_stream as events:
+                    async for framework_event in events:
+                        if isinstance(framework_event, AgentRunResultEvent):
+                            result = framework_event.result
+                        for mapped_event in progress_mapper.map(framework_event):
+                            await self._emit(progress, mapped_event)
+                if result is None:
+                    raise ProviderResponseError("Agent stream ended without a result")
         except TimeoutError as exc:
             raise ProviderTimeoutError("Agent run timed out") from exc
         except UsageLimitExceeded as exc:
@@ -100,10 +121,18 @@ class PydanticAiAgentEngine:
                     else AgentStopReason.MODEL_REQUEST_LIMIT
                 )
             )
-            return AgentRunResult(
+            exhausted = AgentRunResult(
                 output="本次对话已达到运行预算，请缩短问题或开始新的对话。",
                 stop_reason=reason,
             )
+            await self._emit(
+                progress,
+                ConversationProgressEvent(
+                    ProgressKind.COMPLETED,
+                    text=exhausted.output,
+                ),
+            )
+            return exhausted
         except (ModelAPIError, ModelHTTPError) as exc:
             raise ProviderError("Agent model request failed") from exc
         except (UnexpectedModelBehavior, UserError) as exc:
@@ -122,6 +151,22 @@ class PydanticAiAgentEngine:
             tool_calls=usage.tool_calls,
             intermediate_messages=self._map_new_tool_messages(result.new_messages()),
         )
+
+    @staticmethod
+    async def _emit(
+        progress: ProgressSink | None,
+        event: ConversationProgressEvent,
+    ) -> None:
+        if progress is None:
+            return
+        try:
+            await progress.emit(event)
+        except Exception as exc:
+            logger.warning(
+                "Agent progress sink failed for %s: %s",
+                event.kind.value,
+                type(exc).__name__,
+            )
 
     async def aclose(self) -> None:
         """Close registry-owned clients."""
@@ -189,9 +234,13 @@ class PydanticAiAgentEngine:
     def _build_tools(
         self,
         request: AgentRunRequest,
-    ) -> tuple[list[Tool[_ToolRunDependencies]], _ToolRunDependencies | None]:
+    ) -> tuple[
+        list[Tool[_ToolRunDependencies]],
+        _ToolRunDependencies | None,
+        tuple[ToolDescriptor, ...],
+    ]:
         if not request.enabled_tools:
-            return [], None
+            return [], None, ()
         if self._tools is None:
             raise ProviderResponseError("Agent tools are not configured")
         descriptors = self._tools.descriptors(request.enabled_tools)
@@ -215,7 +264,7 @@ class PydanticAiAgentEngine:
             self._framework_tool(descriptor.name, descriptor, dependencies)
             for descriptor in descriptors
         ]
-        return framework_tools, dependencies
+        return framework_tools, dependencies, descriptors
 
     @staticmethod
     def _framework_tool(

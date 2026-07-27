@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from uuid import uuid4
 
 import pytest
@@ -13,7 +14,7 @@ from pydantic_ai.messages import (
     ToolCallPart,
     ToolReturnPart,
 )
-from pydantic_ai.models.function import AgentInfo, FunctionModel
+from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 
 from cywl_oopz.features.agent.models import (
     AgentIdentity,
@@ -34,6 +35,7 @@ from cywl_oopz.features.agent.tools.models import (
     ToolExecutionStatus,
 )
 from cywl_oopz.features.chat.models import ConversationKey
+from cywl_oopz.features.chat.progress import ConversationProgressEvent, ProgressKind
 
 
 class ValueInput(BaseModel):
@@ -112,6 +114,32 @@ class FailingRuntime(RecordingRuntime):
         )
 
 
+class RecordingProgress:
+    def __init__(self) -> None:
+        self.events: list[ConversationProgressEvent] = []
+
+    async def emit(self, event: ConversationProgressEvent) -> None:
+        self.events.append(event)
+
+
+def streaming_model(respond) -> FunctionModel:
+    async def stream(messages: list[ModelMessage], info: AgentInfo):
+        response = await respond(messages, info)
+        for index, part in enumerate(response.parts):
+            if isinstance(part, TextPart):
+                yield part.content
+            elif isinstance(part, ToolCallPart):
+                yield {
+                    index: DeltaToolCall(
+                        name=part.tool_name,
+                        json_args=json.dumps(part.args),
+                        tool_call_id=part.tool_call_id,
+                    )
+                }
+
+    return FunctionModel(stream_function=stream)
+
+
 def request(
     *,
     enabled_tools: tuple[str, ...],
@@ -162,10 +190,11 @@ async def test_engine_runs_tool_loop_and_maps_provider_neutral_pairs() -> None:
 
     runtime = RecordingRuntime()
     engine = PydanticAiAgentEngine(
-        StaticRegistry(FunctionModel(respond)),
+        StaticRegistry(streaming_model(respond)),
         runtime,
     )
-    result = await engine.run(request(enabled_tools=("double",)))
+    progress = RecordingProgress()
+    result = await engine.run(request(enabled_tools=("double",)), progress)
 
     assert result.output == "工具执行完成。"
     assert result.stop_reason is AgentStopReason.COMPLETED
@@ -176,6 +205,15 @@ async def test_engine_runs_tool_loop_and_maps_provider_neutral_pairs() -> None:
     ]
     assert runtime.calls[0][0].call_id == "call-double"
     assert runtime.calls[0][1].identity.person_id == "person"
+    assert [event.kind for event in progress.events] == [
+        ProgressKind.THINKING,
+        ProgressKind.TOOL_STARTED,
+        ProgressKind.TOOL_SUCCEEDED,
+        ProgressKind.TEXT_RESET,
+        ProgressKind.TEXT_DELTA,
+        ProgressKind.COMPLETED,
+    ]
+    assert progress.events[1].tool_display_name == "double"
 
 
 @pytest.mark.asyncio
@@ -194,7 +232,7 @@ async def test_engine_returns_tool_failure_as_data_and_allows_model_recovery() -
         return ModelResponse(parts=[ToolCallPart("double", {"value": 4}, "call-fail")])
 
     engine = PydanticAiAgentEngine(
-        StaticRegistry(FunctionModel(respond)),
+        StaticRegistry(streaming_model(respond)),
         FailingRuntime(),
     )
 
@@ -224,7 +262,7 @@ async def test_engine_enforces_tool_call_and_parallel_budgets() -> None:
 
     runtime = RecordingRuntime(names)
     engine = PydanticAiAgentEngine(
-        StaticRegistry(FunctionModel(parallel_response)),
+        StaticRegistry(streaming_model(parallel_response)),
         runtime,
     )
     result = await engine.run(
@@ -249,7 +287,7 @@ async def test_engine_enforces_tool_call_and_parallel_budgets() -> None:
         return ModelResponse(parts=[ToolCallPart("double", {"value": 1}, f"call-{uuid4()}")])
 
     limited = PydanticAiAgentEngine(
-        StaticRegistry(FunctionModel(endless_tools)),
+        StaticRegistry(streaming_model(endless_tools)),
         RecordingRuntime(),
     )
     exhausted = await limited.run(
