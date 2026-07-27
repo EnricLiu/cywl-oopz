@@ -22,7 +22,7 @@ from .models import (
     BrowserPageView,
     BrowserWaitRequest,
 )
-from .ports import BrowserGateway
+from .ports import BrowserGateway, BrowserProgressObserver
 
 _Result = TypeVar("_Result")
 
@@ -101,20 +101,40 @@ class BrowserSessionManager:
         """Start and validate the shared MCP provider."""
         await self._gateway.start()
 
-    async def read(self, key: ConversationKey, url: str) -> BrowserDocument:
+    async def read(
+        self,
+        key: ConversationKey,
+        url: str,
+        *,
+        progress: BrowserProgressObserver | None = None,
+    ) -> BrowserDocument:
         """Read a validated public URL in this conversation's isolated session."""
         validated_url = self._url_policy.validate(url)
         return await self._run(
             key,
-            lambda session: self._gateway.read(session, validated_url),
+            lambda session: self._gateway.read(
+                session,
+                validated_url,
+                progress=progress,
+            ),
         )
 
-    async def open(self, key: ConversationKey, url: str) -> BrowserPageView:
+    async def open(
+        self,
+        key: ConversationKey,
+        url: str,
+        *,
+        progress: BrowserProgressObserver | None = None,
+    ) -> BrowserPageView:
         """Navigate the conversation's session to a validated public URL."""
         validated_url = self._url_policy.validate(url)
         return await self._run(
             key,
-            lambda session: self._gateway.open(session, validated_url),
+            lambda session: self._gateway.open(
+                session,
+                validated_url,
+                progress=progress,
+            ),
         )
 
     async def snapshot(
@@ -123,6 +143,7 @@ class BrowserSessionManager:
         *,
         interactive: bool = True,
         compact: bool = True,
+        progress: BrowserProgressObserver | None = None,
     ) -> BrowserPageView:
         """Inspect the current page without accepting a model-controlled session."""
         return await self._run(
@@ -131,6 +152,7 @@ class BrowserSessionManager:
                 session,
                 interactive=interactive,
                 compact=compact,
+                progress=progress,
             ),
         )
 
@@ -138,18 +160,34 @@ class BrowserSessionManager:
         self,
         key: ConversationKey,
         request: BrowserWaitRequest,
+        *,
+        progress: BrowserProgressObserver | None = None,
     ) -> BrowserPageView:
         """Wait in the current page and always return a fresh snapshot."""
         return await self._run(
             key,
-            lambda session: self._gateway.wait(session, request),
+            lambda session: self._gateway.wait(
+                session,
+                request,
+                progress=progress,
+            ),
         )
 
-    async def click(self, key: ConversationKey, ref: str) -> BrowserPageView:
+    async def click(
+        self,
+        key: ConversationKey,
+        ref: str,
+        *,
+        progress: BrowserProgressObserver | None = None,
+    ) -> BrowserPageView:
         """Click a fresh snapshot ref without retrying the write."""
         return await self._run(
             key,
-            lambda session: self._gateway.click(session, ref),
+            lambda session: self._gateway.click(
+                session,
+                ref,
+                progress=progress,
+            ),
             retry_unavailable=False,
         )
 
@@ -158,19 +196,36 @@ class BrowserSessionManager:
         key: ConversationKey,
         ref: str,
         text: str,
+        *,
+        progress: BrowserProgressObserver | None = None,
     ) -> BrowserActionResult:
         """Fill a fresh snapshot ref without retrying the write."""
         return await self._run(
             key,
-            lambda session: self._gateway.fill(session, ref, text),
+            lambda session: self._gateway.fill(
+                session,
+                ref,
+                text,
+                progress=progress,
+            ),
             retry_unavailable=False,
         )
 
-    async def press(self, key: ConversationKey, key_name: str) -> BrowserPageView:
+    async def press(
+        self,
+        key: ConversationKey,
+        key_name: str,
+        *,
+        progress: BrowserProgressObserver | None = None,
+    ) -> BrowserPageView:
         """Press an allowed key without retrying the write."""
         return await self._run(
             key,
-            lambda session: self._gateway.press(session, key_name),
+            lambda session: self._gateway.press(
+                session,
+                key_name,
+                progress=progress,
+            ),
             retry_unavailable=False,
         )
 

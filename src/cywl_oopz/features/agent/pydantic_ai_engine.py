@@ -32,7 +32,7 @@ from cywl_oopz.core.errors import ProviderError, ProviderResponseError, Provider
 from cywl_oopz.features.chat.progress import ProgressSink, emit_progress
 
 from .models import AgentMessage, AgentRunRequest, AgentRunResult, AgentStopReason
-from .progress import PydanticAiProgressMapper
+from .progress import ConversationToolProgressReporter, PydanticAiProgressMapper
 from .registry import AgentModelRegistry
 from .tools.models import ToolCall, ToolDescriptor, ToolExecutionContext
 from .tools.ports import AgentToolRuntime
@@ -43,6 +43,7 @@ class _ToolRunDependencies:
     runtime: AgentToolRuntime
     context: ToolExecutionContext
     semaphore: asyncio.Semaphore
+    progress: ProgressSink | None
 
 
 class PydanticAiAgentEngine:
@@ -64,7 +65,7 @@ class PydanticAiAgentEngine:
         """Run an Agent loop with hard wall-clock, model, token, and tool budgets."""
         model = await self._registry.model(request.model)
         instructions, history = self._map_context(request.context)
-        framework_tools, dependencies, descriptors = self._build_tools(request)
+        framework_tools, dependencies, descriptors = self._build_tools(request, progress)
         progress_mapper = PydanticAiProgressMapper(descriptors)
         if framework_tools:
             agent = Agent(
@@ -208,6 +209,7 @@ class PydanticAiAgentEngine:
     def _build_tools(
         self,
         request: AgentRunRequest,
+        progress: ProgressSink | None,
     ) -> tuple[
         list[Tool[_ToolRunDependencies]],
         _ToolRunDependencies | None,
@@ -233,6 +235,7 @@ class PydanticAiAgentEngine:
             runtime=self._tools,
             context=context,
             semaphore=asyncio.Semaphore(request.limits.max_parallel_tools),
+            progress=progress,
         )
         framework_tools = [
             self._framework_tool(descriptor.name, descriptor, dependencies)
@@ -257,6 +260,16 @@ class PydanticAiAgentEngine:
                 dependencies.context,
                 model_requests_used=context.usage.requests,
                 tool_calls_used=context.usage.tool_calls,
+                progress=(
+                    ConversationToolProgressReporter(
+                        dependencies.progress,
+                        call_id=call_id,
+                        tool_name=name,
+                        tool_display_name=descriptor.display_name,
+                    )
+                    if dependencies.progress is not None
+                    else None
+                ),
             )
             async with dependencies.semaphore:
                 result = await dependencies.runtime.execute(

@@ -229,6 +229,17 @@ def test_tool_update_mutates_the_existing_running_step_with_structured_details()
     assert state.steps[0].preview_lines == ("百度一下，你就知道",)
 
 
+def test_late_tool_update_cannot_reopen_a_terminal_tool_step() -> None:
+    state = reduce(
+        tool_event(ProgressKind.TOOL_STARTED, "call-1"),
+        tool_event(ProgressKind.TOOL_SUCCEEDED, "call-1", summary="调用完成"),
+        tool_event(ProgressKind.TOOL_UPDATED, "call-1", summary="迟到的更新"),
+    )
+
+    assert state.steps[0].status is ToolStepStatus.SUCCEEDED
+    assert state.steps[0].summary == "调用完成"
+
+
 def test_completed_event_carries_terminal_run_statistics() -> None:
     state = reduce(
         event(

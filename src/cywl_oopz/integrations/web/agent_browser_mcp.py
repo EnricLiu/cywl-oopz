@@ -26,9 +26,12 @@ from cywl_oopz.features.web.models import (
     BrowserActionResult,
     BrowserDocument,
     BrowserPageView,
+    BrowserProgressStage,
+    BrowserProgressUpdate,
     BrowserWaitKind,
     BrowserWaitRequest,
 )
+from cywl_oopz.features.web.ports import BrowserProgressObserver
 from cywl_oopz.settings import WebToolsSettings
 
 logger = logging.getLogger(__name__)
@@ -174,7 +177,13 @@ class AgentBrowserMcpGateway:
             read_timeout=self._settings.browser_mcp_call_timeout_seconds,
         )
 
-    async def open(self, session: str, url: str) -> BrowserPageView:
+    async def open(
+        self,
+        session: str,
+        url: str,
+        *,
+        progress: BrowserProgressObserver | None = None,
+    ) -> BrowserPageView:
         """Navigate and return a fresh compact interactive snapshot."""
         await self._call(
             "agent_browser_open",
@@ -184,9 +193,24 @@ class AgentBrowserMcpGateway:
                 **self._common(session),
             },
         )
-        return await self.snapshot(session, interactive=True, compact=True)
+        await self._report(
+            progress,
+            BrowserProgressUpdate(BrowserProgressStage.NAVIGATED, url=url),
+        )
+        return await self.snapshot(
+            session,
+            interactive=True,
+            compact=True,
+            progress=progress,
+        )
 
-    async def read(self, session: str, url: str | None) -> BrowserDocument:
+    async def read(
+        self,
+        session: str,
+        url: str | None,
+        *,
+        progress: BrowserProgressObserver | None = None,
+    ) -> BrowserDocument:
         """Read HTML/Markdown content without requiring a Markdown content type."""
         arguments: dict[str, Any] = self._common(session)
         if url is not None:
@@ -197,6 +221,14 @@ class AgentBrowserMcpGateway:
             self._settings.browser_max_content_characters,
         )
         final_url = str(data.get("finalUrl") or data.get("url") or url or "")
+        await self._report(
+            progress,
+            BrowserProgressUpdate(
+                BrowserProgressStage.CONTENT_READY,
+                url=final_url,
+                preview_lines=self._preview_lines(content),
+            ),
+        )
         try:
             title_data = await self._call(
                 "agent_browser_get_title",
@@ -205,6 +237,14 @@ class AgentBrowserMcpGateway:
             title = str(title_data.get("title", "")).strip()
         except BrowserError:
             title = ""
+        await self._report(
+            progress,
+            BrowserProgressUpdate(
+                BrowserProgressStage.IDENTITY_READY,
+                title=title,
+                url=final_url,
+            ),
+        )
         return BrowserDocument(
             title=title or final_url,
             url=final_url,
@@ -219,8 +259,13 @@ class AgentBrowserMcpGateway:
         *,
         interactive: bool,
         compact: bool,
+        progress: BrowserProgressObserver | None = None,
     ) -> BrowserPageView:
         """Return bounded snapshot text plus provider-confirmed URL and title."""
+        await self._report(
+            progress,
+            BrowserProgressUpdate(BrowserProgressStage.EXTRACTING),
+        )
         snapshot_data = await self._call(
             "agent_browser_snapshot",
             {
@@ -242,11 +287,29 @@ class AgentBrowserMcpGateway:
             str(snapshot_data.get("snapshot", "")),
             self._settings.browser_max_snapshot_characters,
         )
-        return BrowserPageView(
-            title=str(title_data.get("title", "")).strip(),
-            url=str(
-                url_data.get("url") or snapshot_data.get("origin") or snapshot_data.get("url") or ""
+        await self._report(
+            progress,
+            BrowserProgressUpdate(
+                BrowserProgressStage.SNAPSHOT_READY,
+                url=str(snapshot_data.get("origin") or snapshot_data.get("url") or ""),
+                preview_lines=self._preview_lines(snapshot),
             ),
+        )
+        final_url = str(
+            url_data.get("url") or snapshot_data.get("origin") or snapshot_data.get("url") or ""
+        )
+        title = str(title_data.get("title", "")).strip()
+        await self._report(
+            progress,
+            BrowserProgressUpdate(
+                BrowserProgressStage.IDENTITY_READY,
+                title=title,
+                url=final_url,
+            ),
+        )
+        return BrowserPageView(
+            title=title,
+            url=final_url,
             snapshot=snapshot,
             truncated=truncated,
         )
@@ -255,6 +318,8 @@ class AgentBrowserMcpGateway:
         self,
         session: str,
         request: BrowserWaitRequest,
+        *,
+        progress: BrowserProgressObserver | None = None,
     ) -> BrowserPageView:
         """Map one project wait condition to a fixed upstream method."""
         timeout_ms = max(int(request.timeout_seconds * 1_000), 1)
@@ -272,9 +337,24 @@ class AgentBrowserMcpGateway:
             method = "agent_browser_wait_ms"
             arguments.update(ms=int(request.value))
         await self._call(method, arguments)
-        return await self.snapshot(session, interactive=True, compact=True)
+        await self._report(
+            progress,
+            BrowserProgressUpdate(BrowserProgressStage.ACTION_APPLIED),
+        )
+        return await self.snapshot(
+            session,
+            interactive=True,
+            compact=True,
+            progress=progress,
+        )
 
-    async def click(self, session: str, ref: str) -> BrowserPageView:
+    async def click(
+        self,
+        session: str,
+        ref: str,
+        *,
+        progress: BrowserProgressObserver | None = None,
+    ) -> BrowserPageView:
         """Click a current accessibility ref and return a fresh snapshot."""
         await self._call(
             "agent_browser_click",
@@ -284,13 +364,24 @@ class AgentBrowserMcpGateway:
                 **self._common(session),
             },
         )
-        return await self.snapshot(session, interactive=True, compact=True)
+        await self._report(
+            progress,
+            BrowserProgressUpdate(BrowserProgressStage.ACTION_APPLIED),
+        )
+        return await self.snapshot(
+            session,
+            interactive=True,
+            compact=True,
+            progress=progress,
+        )
 
     async def fill(
         self,
         session: str,
         ref: str,
         text: str,
+        *,
+        progress: BrowserProgressObserver | None = None,
     ) -> BrowserActionResult:
         """Fill one field and return provider-confirmed current page identity."""
         await self._call(
@@ -301,6 +392,10 @@ class AgentBrowserMcpGateway:
                 **self._common(session),
             },
         )
+        await self._report(
+            progress,
+            BrowserProgressUpdate(BrowserProgressStage.ACTION_APPLIED),
+        )
         url_data = await self._call(
             "agent_browser_get_url",
             self._common(session),
@@ -309,13 +404,29 @@ class AgentBrowserMcpGateway:
             "agent_browser_get_title",
             self._common(session),
         )
+        title = str(title_data.get("title", "")).strip()
+        url = str(url_data.get("url", ""))
+        await self._report(
+            progress,
+            BrowserProgressUpdate(
+                BrowserProgressStage.IDENTITY_READY,
+                title=title,
+                url=url,
+            ),
+        )
         return BrowserActionResult(
-            title=str(title_data.get("title", "")).strip(),
-            url=str(url_data.get("url", "")),
+            title=title,
+            url=url,
             applied=True,
         )
 
-    async def press(self, session: str, key: str) -> BrowserPageView:
+    async def press(
+        self,
+        session: str,
+        key: str,
+        *,
+        progress: BrowserProgressObserver | None = None,
+    ) -> BrowserPageView:
         """Press one project-validated key and return a fresh snapshot."""
         await self._call(
             "agent_browser_press",
@@ -324,7 +435,16 @@ class AgentBrowserMcpGateway:
                 **self._common(session),
             },
         )
-        return await self.snapshot(session, interactive=True, compact=True)
+        await self._report(
+            progress,
+            BrowserProgressUpdate(BrowserProgressStage.ACTION_APPLIED),
+        )
+        return await self.snapshot(
+            session,
+            interactive=True,
+            compact=True,
+            progress=progress,
+        )
 
     async def close_session(self, session: str) -> None:
         """Close only the selected project-owned session, never all sessions."""
@@ -342,6 +462,32 @@ class AgentBrowserMcpGateway:
                 1,
             ),
         }
+
+    @staticmethod
+    async def _report(
+        progress: BrowserProgressObserver | None,
+        update: BrowserProgressUpdate,
+    ) -> None:
+        if progress is None:
+            return
+        try:
+            await progress.update(update)
+        except Exception:
+            return
+
+    @staticmethod
+    def _preview_lines(value: str) -> tuple[str, ...]:
+        lines: list[str] = []
+        seen: set[str] = set()
+        for raw_line in value.splitlines():
+            line = " ".join(raw_line.split()).strip()
+            if not line or line in seen:
+                continue
+            seen.add(line)
+            lines.append(line[:119] + "…" if len(line) > 120 else line)
+            if len(lines) == 3:
+                break
+        return tuple(lines)
 
     async def _call(self, method: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if method not in _REQUIRED_SCHEMAS:

@@ -20,6 +20,8 @@ from cywl_oopz.features.agent.tools.builtin import EmptyToolInput
 from cywl_oopz.features.agent.tools.models import (
     ToolExecutionContext,
     ToolExecutionError,
+    ToolProgressReporter,
+    ToolProgressUpdate,
 )
 from cywl_oopz.features.agent.tools.web import (
     BrowserClickTool,
@@ -50,9 +52,12 @@ from cywl_oopz.features.web.models import (
     BrowserActionResult,
     BrowserDocument,
     BrowserPageView,
+    BrowserProgressStage,
+    BrowserProgressUpdate,
     BrowserWaitKind,
     BrowserWaitRequest,
 )
+from cywl_oopz.features.web.ports import BrowserProgressObserver
 from cywl_oopz.integrations.web.agent_browser_mcp import AgentBrowserMcpGateway
 from cywl_oopz.settings import WebToolsSettings
 
@@ -86,7 +91,9 @@ def conversation(person: str, channel: str = "channel") -> ConversationKey:
     return ConversationKey("channel", "area", channel, person)
 
 
-def tool_context() -> ToolExecutionContext:
+def tool_context(
+    progress: ToolProgressReporter | None = None,
+) -> ToolExecutionContext:
     return ToolExecutionContext(
         run_id=uuid4(),
         identity=AgentIdentity("person", conversation("person")),
@@ -98,7 +105,24 @@ def tool_context() -> ToolExecutionContext:
             "browser_wait",
             "browser_close",
         ),
+        progress=progress,
     )
+
+
+class RecordingToolProgress:
+    def __init__(self) -> None:
+        self.updates: list[ToolProgressUpdate] = []
+
+    async def update(self, update: ToolProgressUpdate) -> None:
+        self.updates.append(update)
+
+
+class RecordingBrowserProgress:
+    def __init__(self) -> None:
+        self.updates: list[BrowserProgressUpdate] = []
+
+    async def update(self, update: BrowserProgressUpdate) -> None:
+        self.updates.append(update)
 
 
 class FakeBrowserGateway:
@@ -140,11 +164,34 @@ class FakeBrowserGateway:
             self.active_by_session[session] -= 1
         return BrowserPageView("Title", url, "snapshot", False)
 
-    async def open(self, session: str, url: str) -> BrowserPageView:
+    async def open(
+        self,
+        session: str,
+        url: str,
+        *,
+        progress: BrowserProgressObserver | None = None,
+    ) -> BrowserPageView:
+        if progress is not None:
+            await progress.update(BrowserProgressUpdate(BrowserProgressStage.NAVIGATED, url=url))
         return await self._page(session, url)
 
-    async def read(self, session: str, url: str | None) -> BrowserDocument:
+    async def read(
+        self,
+        session: str,
+        url: str | None,
+        *,
+        progress: BrowserProgressObserver | None = None,
+    ) -> BrowserDocument:
         page = await self._page(session, url or "https://current.example")
+        if progress is not None:
+            await progress.update(
+                BrowserProgressUpdate(
+                    BrowserProgressStage.CONTENT_READY,
+                    title=page.title,
+                    url=page.url,
+                    preview_lines=("页面正文预览",),
+                )
+            )
         return BrowserDocument(page.title, page.url, "text/html", "content", False)
 
     async def snapshot(
@@ -153,20 +200,29 @@ class FakeBrowserGateway:
         *,
         interactive: bool,
         compact: bool,
+        progress: BrowserProgressObserver | None = None,
     ) -> BrowserPageView:
-        del interactive, compact
+        del interactive, compact, progress
         return await self._page(session, "https://current.example")
 
     async def wait(
         self,
         session: str,
         request: BrowserWaitRequest,
+        *,
+        progress: BrowserProgressObserver | None = None,
     ) -> BrowserPageView:
-        del request
+        del request, progress
         return await self._page(session, "https://current.example")
 
-    async def click(self, session: str, ref: str) -> BrowserPageView:
-        del ref
+    async def click(
+        self,
+        session: str,
+        ref: str,
+        *,
+        progress: BrowserProgressObserver | None = None,
+    ) -> BrowserPageView:
+        del ref, progress
         return await self._page(session, "https://clicked.example")
 
     async def fill(
@@ -174,13 +230,21 @@ class FakeBrowserGateway:
         session: str,
         ref: str,
         text: str,
+        *,
+        progress: BrowserProgressObserver | None = None,
     ) -> BrowserActionResult:
-        del ref, text
+        del ref, text, progress
         self.sessions.append(session)
         return BrowserActionResult("Filled", "https://current.example", True)
 
-    async def press(self, session: str, key: str) -> BrowserPageView:
-        del key
+    async def press(
+        self,
+        session: str,
+        key: str,
+        *,
+        progress: BrowserProgressObserver | None = None,
+    ) -> BrowserPageView:
+        del key, progress
         return await self._page(session, "https://pressed.example")
 
     async def close_session(self, session: str) -> None:
@@ -434,6 +498,40 @@ async def test_agent_browser_gateway_validates_contract_and_bounds_outputs() -> 
 
 
 @pytest.mark.asyncio
+async def test_agent_browser_gateway_reports_real_read_and_navigation_milestones() -> None:
+    toolset = FakeMcpToolset()
+    gateway = AgentBrowserMcpGateway(
+        web_settings(),
+        toolset_factory=lambda: toolset,
+    )
+    progress = RecordingBrowserProgress()
+
+    await gateway.read(
+        "session",
+        "https://example.com/article",
+        progress=progress,
+    )
+    await gateway.open(
+        "session",
+        "https://example.com/app",
+        progress=progress,
+    )
+    await gateway.aclose()
+
+    assert [update.stage for update in progress.updates] == [
+        BrowserProgressStage.CONTENT_READY,
+        BrowserProgressStage.IDENTITY_READY,
+        BrowserProgressStage.NAVIGATED,
+        BrowserProgressStage.EXTRACTING,
+        BrowserProgressStage.SNAPSHOT_READY,
+        BrowserProgressStage.IDENTITY_READY,
+    ]
+    assert progress.updates[0].url == "https://example.com/"
+    assert progress.updates[0].preview_lines == ("abcdefghijklmnopqrstuvwxyz",)
+    assert progress.updates[-1].title == "Example Domain"
+
+
+@pytest.mark.asyncio
 async def test_agent_browser_gateway_rejects_contract_drift_and_maps_errors() -> None:
     incomplete = FakeMcpToolset(missing="agent_browser_read")
     invalid = AgentBrowserMcpGateway(
@@ -548,6 +646,32 @@ async def test_browser_agent_tools_use_trusted_conversation_and_stable_errors() 
     with pytest.raises(ValidationError):
         BrowserPressInput(key="Control+Alt+Delete")
     await manager.aclose()
+
+
+@pytest.mark.asyncio
+async def test_read_web_tool_adapts_browser_milestones_to_display_safe_updates() -> None:
+    gateway = FakeBrowserGateway()
+    manager = BrowserSessionManager(web_settings(), gateway)
+    reporter = RecordingToolProgress()
+    context = tool_context(reporter)
+    tool = ReadWebPageTool(
+        manager,
+        timeout_seconds=5,
+        max_output_characters=20_000,
+    )
+
+    await tool.execute(
+        context,
+        WebPageUrlInput(url="https://example.com/article"),
+    )
+    await manager.aclose()
+
+    assert [update.summary for update in reporter.updates] == [
+        "等待页面响应",
+        "Title",
+    ]
+    assert reporter.updates[-1].subject == "example.com"
+    assert reporter.updates[-1].preview_lines == ("页面正文预览",)
 
 
 @pytest.mark.asyncio

@@ -8,10 +8,18 @@ from .models import (
     BrowserActionResult,
     BrowserDocument,
     BrowserPageView,
+    BrowserProgressUpdate,
     BrowserWaitRequest,
     WebSearchRequest,
     WebSearchResult,
 )
+
+
+class BrowserProgressObserver(Protocol):
+    """Best-effort observer for real provider milestones."""
+
+    async def update(self, update: BrowserProgressUpdate) -> None:
+        """Observe one bounded browser milestone."""
 
 
 class WebSearchGateway(Protocol):
@@ -33,10 +41,22 @@ class BrowserGateway(Protocol):
     async def restart(self) -> None:
         """Rebuild a failed provider transport once."""
 
-    async def open(self, session: str, url: str) -> BrowserPageView:
+    async def open(
+        self,
+        session: str,
+        url: str,
+        *,
+        progress: BrowserProgressObserver | None = None,
+    ) -> BrowserPageView:
         """Navigate and return the new page snapshot."""
 
-    async def read(self, session: str, url: str | None) -> BrowserDocument:
+    async def read(
+        self,
+        session: str,
+        url: str | None,
+        *,
+        progress: BrowserProgressObserver | None = None,
+    ) -> BrowserDocument:
         """Read a URL or the active page as bounded text."""
 
     async def snapshot(
@@ -45,6 +65,7 @@ class BrowserGateway(Protocol):
         *,
         interactive: bool,
         compact: bool,
+        progress: BrowserProgressObserver | None = None,
     ) -> BrowserPageView:
         """Return the current bounded accessibility snapshot."""
 
@@ -52,10 +73,18 @@ class BrowserGateway(Protocol):
         self,
         session: str,
         request: BrowserWaitRequest,
+        *,
+        progress: BrowserProgressObserver | None = None,
     ) -> BrowserPageView:
         """Wait for a supported condition and return fresh page state."""
 
-    async def click(self, session: str, ref: str) -> BrowserPageView:
+    async def click(
+        self,
+        session: str,
+        ref: str,
+        *,
+        progress: BrowserProgressObserver | None = None,
+    ) -> BrowserPageView:
         """Click one current snapshot ref and return fresh page state."""
 
     async def fill(
@@ -63,10 +92,18 @@ class BrowserGateway(Protocol):
         session: str,
         ref: str,
         text: str,
+        *,
+        progress: BrowserProgressObserver | None = None,
     ) -> BrowserActionResult:
         """Fill one current snapshot ref without submitting the page."""
 
-    async def press(self, session: str, key: str) -> BrowserPageView:
+    async def press(
+        self,
+        session: str,
+        key: str,
+        *,
+        progress: BrowserProgressObserver | None = None,
+    ) -> BrowserPageView:
         """Press one allowed key and return fresh page state."""
 
     async def close_session(self, session: str) -> None:

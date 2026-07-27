@@ -14,10 +14,50 @@ from pydantic_ai.messages import (
     ToolReturnPart,
 )
 
-from cywl_oopz.features.chat.progress import ConversationProgressEvent, ProgressKind
+from cywl_oopz.features.chat.progress import (
+    ConversationProgressEvent,
+    ProgressKind,
+    ProgressSink,
+    emit_progress,
+)
 
 from .tool_progress import ToolProgressCatalog, ToolProgressPresentation
-from .tools.models import ToolDescriptor
+from .tools.models import ToolDescriptor, ToolProgressUpdate
+
+
+class ConversationToolProgressReporter:
+    """Bind safe tool updates to one conversation call identity."""
+
+    def __init__(
+        self,
+        progress: ProgressSink,
+        *,
+        call_id: str,
+        tool_name: str,
+        tool_display_name: str,
+    ) -> None:
+        self._progress = progress
+        self._call_id = call_id
+        self._tool_name = tool_name
+        self._tool_display_name = tool_display_name
+        self._sequence = 0
+
+    async def update(self, update: ToolProgressUpdate) -> None:
+        self._sequence += 1
+        await emit_progress(
+            self._progress,
+            ConversationProgressEvent(
+                ProgressKind.TOOL_UPDATED,
+                event_id=f"tool-update-{self._call_id}-{self._sequence}",
+                call_id=self._call_id,
+                tool_name=self._tool_name,
+                tool_display_name=self._tool_display_name,
+                tool_subject=update.subject,
+                tool_summary=update.summary,
+                tool_items=update.items,
+                tool_preview_lines=update.preview_lines,
+            ),
+        )
 
 
 class PydanticAiProgressMapper:

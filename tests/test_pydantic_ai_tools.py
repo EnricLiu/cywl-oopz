@@ -124,6 +124,19 @@ class FailingRuntime(RecordingRuntime):
         )
 
 
+class ReportingRuntime(RecordingRuntime):
+    async def execute(
+        self,
+        call: ToolCall,
+        context: ToolExecutionContext,
+    ) -> ToolExecutionResult:
+        await context.report_progress(
+            summary="正在计算真实结果",
+            preview_lines=("第一条中间信息",),
+        )
+        return await super().execute(call, context)
+
+
 class SearchWebRuntime:
     def __init__(self) -> None:
         self._descriptor = ToolDescriptor(
@@ -414,6 +427,34 @@ async def test_engine_runs_tool_loop_and_maps_provider_neutral_pairs() -> None:
         ProgressKind.TEXT_DELTA,
     ]
     assert progress.events[1].tool_display_name == "double"
+
+
+@pytest.mark.asyncio
+async def test_engine_binds_call_scoped_semantic_tool_progress() -> None:
+    async def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        del info
+        if has_tool_returns(messages):
+            return ModelResponse(parts=[TextPart("完成。")])
+        return ModelResponse(parts=[ToolCallPart("double", {"value": 4}, "call-double")])
+
+    progress = RecordingProgress()
+    runtime = ReportingRuntime()
+    engine = PydanticAiAgentEngine(
+        StaticRegistry(streaming_model(respond)),
+        runtime,
+    )
+
+    await engine.run(request(enabled_tools=("double",)), progress)
+
+    updates = [event for event in progress.events if event.kind is ProgressKind.TOOL_UPDATED]
+    assert len(updates) == 1
+    assert updates[0].call_id == "call-double"
+    assert updates[0].tool_name == "double"
+    assert updates[0].tool_display_name == "double"
+    assert updates[0].tool_summary == "正在计算真实结果"
+    assert updates[0].tool_preview_lines == ("第一条中间信息",)
+    assert runtime.calls[0][1].progress is not None
+    assert "progress" not in repr(runtime.calls[0][1])
 
 
 @pytest.mark.asyncio

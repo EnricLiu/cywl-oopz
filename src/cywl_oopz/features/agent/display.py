@@ -115,6 +115,12 @@ class AgentLoopReducer:
         if kind is ProgressKind.TOOL_STARTED:
             return self._with_tool(state, event, ToolStepStatus.RUNNING)
         if kind is ProgressKind.TOOL_UPDATED:
+            existing = next(
+                (step for step in state.steps if step.call_id == event.call_id),
+                None,
+            )
+            if existing is not None and existing.status is not ToolStepStatus.RUNNING:
+                return state
             return self._with_tool(state, event, ToolStepStatus.RUNNING)
         if kind is ProgressKind.TOOL_SUCCEEDED:
             return self._with_tool(state, event, ToolStepStatus.SUCCEEDED)

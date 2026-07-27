@@ -67,6 +67,27 @@ class BrowserActionResult:
     applied: bool
 
 
+class BrowserProgressStage(StrEnum):
+    """Provider-neutral milestones emitted by multi-step browser operations."""
+
+    NAVIGATED = "navigated"
+    EXTRACTING = "extracting"
+    CONTENT_READY = "content_ready"
+    SNAPSHOT_READY = "snapshot_ready"
+    ACTION_APPLIED = "action_applied"
+    IDENTITY_READY = "identity_ready"
+
+
+@dataclass(frozen=True, slots=True)
+class BrowserProgressUpdate:
+    """Small real milestone suitable for adaptation into a user-facing view."""
+
+    stage: BrowserProgressStage
+    title: str = ""
+    url: str = ""
+    preview_lines: tuple[str, ...] = ()
+
+
 class BrowserWaitKind(StrEnum):
     """Supported high-level wait conditions."""
 

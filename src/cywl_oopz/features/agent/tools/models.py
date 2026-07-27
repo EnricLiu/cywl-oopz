@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Protocol
 from uuid import UUID
 
 from pydantic import BaseModel
@@ -16,6 +16,45 @@ from cywl_oopz.core.lifecycle import ToolEffect, ToolExecutionStatus
 from cywl_oopz.features.agent.models import AgentIdentity, AgentRunLimits
 
 _TOOL_NAME = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
+_WHITESPACE = re.compile(r"\s+")
+
+
+@dataclass(frozen=True, slots=True)
+class ToolProgressUpdate:
+    """Bounded, display-safe intermediate state reported by a running tool."""
+
+    subject: str = ""
+    summary: str = ""
+    items: tuple[str, ...] = ()
+    preview_lines: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "subject", self._line(self.subject, 80))
+        object.__setattr__(self, "summary", self._line(self.summary, 100))
+        object.__setattr__(
+            self,
+            "items",
+            tuple(self._line(item, 180) for item in self.items[:3] if item),
+        )
+        object.__setattr__(
+            self,
+            "preview_lines",
+            tuple(self._line(line, 120) for line in self.preview_lines[:3] if line),
+        )
+
+    @staticmethod
+    def _line(value: str, limit: int) -> str:
+        normalized = _WHITESPACE.sub(" ", str(value)).strip()
+        if len(normalized) <= limit:
+            return normalized
+        return normalized[: limit - 1] + "…"
+
+
+class ToolProgressReporter(Protocol):
+    """Call-scoped sink for nonterminal tool progress."""
+
+    async def update(self, update: ToolProgressUpdate) -> None:
+        """Publish one best-effort semantic update."""
 
 
 class ToolExecutionError(Exception):
@@ -86,6 +125,33 @@ class ToolExecutionContext:
     enabled_tools: tuple[str, ...]
     model_requests_used: int = 0
     tool_calls_used: int = 0
+    progress: ToolProgressReporter | None = field(
+        default=None,
+        compare=False,
+        repr=False,
+    )
+
+    async def report_progress(
+        self,
+        *,
+        subject: str = "",
+        summary: str = "",
+        items: tuple[str, ...] = (),
+        preview_lines: tuple[str, ...] = (),
+    ) -> None:
+        """Report display-only state without controlling tool success."""
+        if self.progress is None:
+            return
+        update = ToolProgressUpdate(
+            subject=subject,
+            summary=summary,
+            items=items,
+            preview_lines=preview_lines,
+        )
+        try:
+            await self.progress.update(update)
+        except Exception:
+            return
 
 
 @dataclass(frozen=True, slots=True)

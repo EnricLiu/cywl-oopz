@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Literal, Never, Self
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -25,11 +26,14 @@ from cywl_oopz.features.web.errors import (
 from cywl_oopz.features.web.models import (
     BrowserDocument,
     BrowserPageView,
+    BrowserProgressStage,
+    BrowserProgressUpdate,
     BrowserWaitKind,
     BrowserWaitRequest,
     WebSearchResult,
     WebSearchTimeRange,
 )
+from cywl_oopz.features.web.ports import BrowserProgressObserver
 from cywl_oopz.features.web.service import WebSearchService
 
 from .builtin import EmptyToolInput
@@ -265,12 +269,53 @@ class _BrowserTool:
     def __init__(self, browser: BrowserSessionManager) -> None:
         self._browser = browser
 
+    @staticmethod
+    def _progress(
+        context: ToolExecutionContext,
+    ) -> BrowserProgressObserver | None:
+        if context.progress is None:
+            return None
+        return _ToolBrowserProgressObserver(context)
+
     @classmethod
     def _raise_tool_error(cls, error: BrowserError) -> Never:
         for error_type, code in cls._ERROR_CODES.items():
             if isinstance(error, error_type):
                 raise ToolExecutionError(code) from error
         raise ToolExecutionError("browser_failed") from error
+
+
+class _ToolBrowserProgressObserver:
+    """Adapt neutral browser milestones to one call-scoped tool reporter."""
+
+    _summaries = {
+        BrowserProgressStage.NAVIGATED: "页面已打开，正在提取结构",
+        BrowserProgressStage.EXTRACTING: "正在提取页面结构",
+        BrowserProgressStage.CONTENT_READY: "已获取正文，正在确认页面信息",
+        BrowserProgressStage.SNAPSHOT_READY: "已获取页面结构，正在确认页面信息",
+        BrowserProgressStage.ACTION_APPLIED: "操作已完成，正在刷新页面",
+        BrowserProgressStage.IDENTITY_READY: "页面状态已更新",
+    }
+
+    def __init__(self, context: ToolExecutionContext) -> None:
+        self._context = context
+
+    async def update(self, update: BrowserProgressUpdate) -> None:
+        summary = update.title.strip() or self._summaries[update.stage]
+        await self._context.report_progress(
+            subject=self._host(update.url),
+            summary=summary,
+            preview_lines=update.preview_lines,
+        )
+
+    @staticmethod
+    def _host(url: str) -> str:
+        if not url:
+            return ""
+        try:
+            return urlsplit(url).netloc or url
+        except ValueError:
+            return url
 
 
 class ReadWebPageTool(_BrowserTool):
@@ -310,10 +355,12 @@ class ReadWebPageTool(_BrowserTool):
         arguments: BaseModel,
     ) -> BaseModel:
         values = WebPageUrlInput.model_validate(arguments)
+        await context.report_progress(summary="等待页面响应")
         try:
             document = await self._browser.read(
                 context.identity.conversation,
                 values.url,
+                progress=self._progress(context),
             )
         except BrowserError as exc:
             self._raise_tool_error(exc)
@@ -354,10 +401,12 @@ class BrowserOpenTool(_BrowserTool):
         arguments: BaseModel,
     ) -> BaseModel:
         values = WebPageUrlInput.model_validate(arguments)
+        await context.report_progress(summary="正在打开网页")
         try:
             page = await self._browser.open(
                 context.identity.conversation,
                 values.url,
+                progress=self._progress(context),
             )
         except BrowserError as exc:
             self._raise_tool_error(exc)
@@ -398,11 +447,13 @@ class BrowserSnapshotTool(_BrowserTool):
         arguments: BaseModel,
     ) -> BaseModel:
         values = BrowserSnapshotInput.model_validate(arguments)
+        await context.report_progress(summary="正在提取页面结构")
         try:
             page = await self._browser.snapshot(
                 context.identity.conversation,
                 interactive=values.interactive,
                 compact=values.compact,
+                progress=self._progress(context),
             )
         except BrowserError as exc:
             self._raise_tool_error(exc)
@@ -443,10 +494,12 @@ class BrowserWaitTool(_BrowserTool):
         arguments: BaseModel,
     ) -> BaseModel:
         values = BrowserWaitInput.model_validate(arguments)
+        await context.report_progress(summary="正在等待指定条件")
         try:
             page = await self._browser.wait(
                 context.identity.conversation,
                 values.request(),
+                progress=self._progress(context),
             )
         except BrowserError as exc:
             self._raise_tool_error(exc)
@@ -487,6 +540,7 @@ class BrowserCloseTool(_BrowserTool):
         arguments: BaseModel,
     ) -> BaseModel:
         del arguments
+        await context.report_progress(summary="正在关闭浏览器")
         try:
             closed = await self._browser.close(context.identity.conversation)
         except BrowserError as exc:
@@ -581,10 +635,12 @@ class BrowserClickTool(_BrowserTool):
         arguments: BaseModel,
     ) -> BaseModel:
         values = BrowserRefInput.model_validate(arguments)
+        await context.report_progress(summary="正在点击并刷新页面")
         try:
             page = await self._browser.click(
                 context.identity.conversation,
                 values.ref,
+                progress=self._progress(context),
             )
         except BrowserError as exc:
             self._raise_tool_error(exc)
@@ -626,11 +682,13 @@ class BrowserFillTool(_BrowserTool):
         arguments: BaseModel,
     ) -> BaseModel:
         values = BrowserFillInput.model_validate(arguments)
+        await context.report_progress(summary="正在填写输入框")
         try:
             result = await self._browser.fill(
                 context.identity.conversation,
                 values.ref,
                 values.text,
+                progress=self._progress(context),
             )
         except BrowserError as exc:
             self._raise_tool_error(exc)
@@ -678,10 +736,12 @@ class BrowserPressTool(_BrowserTool):
         arguments: BaseModel,
     ) -> BaseModel:
         values = BrowserPressInput.model_validate(arguments)
+        await context.report_progress(summary="正在发送按键")
         try:
             page = await self._browser.press(
                 context.identity.conversation,
                 values.key,
+                progress=self._progress(context),
             )
         except BrowserError as exc:
             self._raise_tool_error(exc)
