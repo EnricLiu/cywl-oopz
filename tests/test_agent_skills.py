@@ -265,6 +265,30 @@ def test_skill_availability_requires_loader_and_every_declared_tool() -> None:
     ] == ["web-research"]
 
 
+def test_known_tool_dependency_is_valid_but_does_not_grant_runtime_availability() -> None:
+    music = replace(
+        skill(),
+        name="music-curator",
+        display_name="音乐策划",
+        required_tools=frozenset({"list_music_playlists"}),
+    )
+    snapshot = AgentSkillCatalogSnapshot.build(
+        (music,),
+        generation=1,
+        registered_tools=frozenset({"list_music_playlists"}),
+        max_available_skills=8,
+    )
+
+    assert snapshot.diagnostics == ()
+    assert (
+        SkillAvailabilityService().resolve(
+            snapshot,
+            ("load_agent_skill",),
+        )
+        == ()
+    )
+
+
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [

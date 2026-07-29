@@ -178,6 +178,8 @@ async def test_skill_scope_enforces_visibility_activation_resource_and_context_l
         await scope.read_resource(web.name, web.resources[0].id)
 
     activated = await scope.load(web.name)
+    with pytest.raises(AgentSkillScopeError, match="skill_resource_not_found"):
+        await scope.read_resource(web.name, music.resources[0].id)
     loaded = await scope.read_resource(web.name, web.resources[0].id)
     repeated = await scope.read_resource(web.name, web.resources[0].id)
 
