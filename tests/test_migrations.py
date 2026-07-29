@@ -8,7 +8,7 @@ def test_initial_schema_models_and_migration_head_are_present() -> None:
     config = Config("alembic.ini")
     revisions = ScriptDirectory.from_config(config)
 
-    assert revisions.get_current_head() == "20260729_14"
+    assert revisions.get_current_head() == "20260729_15"
     assert set(Base.metadata.tables) == {
         "agent_memory_items",
         "agent_memory_preferences",
@@ -16,6 +16,7 @@ def test_initial_schema_models_and_migration_head_are_present() -> None:
         "agent_runs",
         "agent_skill_catalog_state",
         "agent_skill_resources",
+        "agent_skill_shares",
         "agent_skills",
         "agent_threads",
         "agent_tool_executions",
@@ -39,6 +40,15 @@ def test_initial_schema_models_and_migration_head_are_present() -> None:
     assert (
         Base.metadata.tables["agent_skill_resources"].c.kind.type.name
         == "agent_skill_resource_kind"
+    )
+    agent_skills = Base.metadata.tables["agent_skills"]
+    assert agent_skills.c.ownership_kind.type.name == "agent_skill_ownership_kind"
+    assert {index.name for index in agent_skills.indexes} >= {
+        "ux_agent_skills_builtin_name",
+        "ux_agent_skills_personal_owner_name",
+    }
+    assert (
+        Base.metadata.tables["agent_skill_shares"].c.status.type.name == "agent_skill_share_status"
     )
     llm_models = Base.metadata.tables["llm_models"]
     assert llm_models.c.provider_id.unique is not True

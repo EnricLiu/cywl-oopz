@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import UTC, datetime
 from types import MappingProxyType
 from uuid import uuid4
 
@@ -15,8 +16,13 @@ from cywl_oopz.features.agent.skills.catalog import (
 )
 from cywl_oopz.features.agent.skills.models import (
     AgentSkill,
+    AgentSkillDiscovery,
     AgentSkillResource,
+    AgentSkillShare,
+    SkillAccessKind,
+    SkillOwnershipKind,
     SkillResourceKind,
+    SkillShareStatus,
 )
 
 
@@ -123,6 +129,58 @@ def test_skill_domain_rejects_duplicate_resource_identity_and_position() -> None
 
     with pytest.raises(ValueError, match="positions"):
         skill(resources=(first, duplicate_position))
+
+
+def test_personal_skill_requires_one_owner_and_archive_disables_it() -> None:
+    personal = replace(
+        skill(),
+        ownership_kind=SkillOwnershipKind.PERSONAL,
+        owner_person_id=" person ",
+    )
+
+    assert personal.owner_person_id == "person"
+    assert personal.ownership_kind is SkillOwnershipKind.PERSONAL
+
+    with pytest.raises(ValueError, match="must not have an owner"):
+        replace(skill(), owner_person_id="person")
+    with pytest.raises(ValueError, match="requires an owner"):
+        replace(skill(), ownership_kind=SkillOwnershipKind.PERSONAL)
+    with pytest.raises(ValueError, match="must not be enabled"):
+        replace(
+            personal,
+            archived_at=datetime.now(UTC),
+            enabled=True,
+        )
+
+
+def test_discovery_and_share_values_validate_user_visible_identity() -> None:
+    source = skill()
+    discovery = AgentSkillDiscovery(
+        id=source.id,
+        name=source.name,
+        display_name=source.display_name,
+        description=source.description,
+        version=source.version,
+        revision=source.revision,
+        required_tools=source.required_tools,
+        access=SkillAccessKind.BUILTIN,
+    )
+    now = datetime.now(UTC)
+    pending = AgentSkillShare(
+        id=uuid4(),
+        skill_id=source.id,
+        recipient_person_id=" recipient ",
+        status=SkillShareStatus.PENDING,
+        created_at=now,
+        updated_at=now,
+    )
+
+    assert discovery.access is SkillAccessKind.BUILTIN
+    assert pending.recipient_person_id == "recipient"
+    with pytest.raises(ValueError, match="must not have a response"):
+        replace(pending, responded_at=now)
+    with pytest.raises(ValueError, match="requires a response"):
+        replace(pending, status=SkillShareStatus.ACCEPTED)
 
 
 def test_skill_catalog_is_stable_immutable_and_skips_unknown_tool_dependencies() -> None:

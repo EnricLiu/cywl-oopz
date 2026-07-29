@@ -6,18 +6,33 @@ from .catalog import (
     AgentSkillCatalogSnapshot,
     ReloadableAgentSkillCatalog,
 )
-from .models import AgentSkill, AgentSkillResource, SkillResourceKind
-from .ports import AgentSkillRepository
+from .models import (
+    AgentSkill,
+    AgentSkillDiscovery,
+    AgentSkillResource,
+    AgentSkillShare,
+    SkillAccessKind,
+    SkillOwnershipKind,
+    SkillResourceKind,
+    SkillShareStatus,
+)
+from .ports import AgentSkillLibraryRepository, AgentSkillRepository
 from .scope import AgentSkillRunScope
 
 __all__ = (
     "AgentSkill",
     "AgentSkillCatalogDiagnostic",
     "AgentSkillCatalogSnapshot",
+    "AgentSkillDiscovery",
+    "AgentSkillLibraryRepository",
     "AgentSkillRepository",
     "AgentSkillResource",
     "AgentSkillRunScope",
+    "AgentSkillShare",
     "ReloadableAgentSkillCatalog",
+    "SkillAccessKind",
     "SkillAvailabilityService",
+    "SkillOwnershipKind",
     "SkillResourceKind",
+    "SkillShareStatus",
 )

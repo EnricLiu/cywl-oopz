@@ -40,7 +40,16 @@ from cywl_oopz.features.agent.repository import (
 )
 from cywl_oopz.features.agent.selection import ProviderSelectionService
 from cywl_oopz.features.agent.skills.catalog import ReloadableAgentSkillCatalog
-from cywl_oopz.features.agent.skills.models import SkillResourceKind
+from cywl_oopz.features.agent.skills.errors import (
+    AgentSkillConflictError,
+    AgentSkillNotFoundError,
+)
+from cywl_oopz.features.agent.skills.models import (
+    AgentSkill,
+    SkillOwnershipKind,
+    SkillResourceKind,
+    SkillShareStatus,
+)
 from cywl_oopz.features.agent.skills.repository import (
     SqlAlchemyAgentSkillRepository,
 )
@@ -300,6 +309,80 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
         assert loaded_skill.required_tools == frozenset({"search_web", "read_web_page"})
         assert loaded_skill.resources[0].id == resource_row["id"]
         assert loaded_skill.resources[0].kind is SkillResourceKind.REFERENCE
+        assert loaded_skill.ownership_kind is SkillOwnershipKind.BUILTIN
+        assert loaded_skill.owner_person_id is None
+
+        first_personal = AgentSkill(
+            id=uuid4(),
+            name="travel-planner",
+            display_name="旅行规划",
+            description="为 owner 规划旅行。",
+            instructions="根据 owner 的目标整理行程。",
+            version="1",
+            revision=1,
+            required_tools=frozenset(),
+            resources=(),
+            metadata={"preferences": {"seasons": ["spring", "autumn"]}},
+            ownership_kind=SkillOwnershipKind.PERSONAL,
+            owner_person_id="owner-one",
+        )
+        second_personal = replace(
+            first_personal,
+            id=uuid4(),
+            display_name="另一位用户的旅行规划",
+            owner_person_id="owner-two",
+        )
+        await skill_repository.add_personal(first_personal)
+        await skill_repository.add_personal(second_personal)
+        with pytest.raises(AgentSkillConflictError):
+            await skill_repository.add_personal(replace(first_personal, id=uuid4()))
+
+        builtin_ids = {skill.id for skill in await skill_repository.load_enabled()}
+        assert first_personal.id not in builtin_ids
+        assert second_personal.id not in builtin_ids
+        owner_one_ids = {skill.id for skill in await skill_repository.load_accessible("owner-one")}
+        unrelated_ids = {skill.id for skill in await skill_repository.load_accessible("recipient")}
+        assert first_personal.id in owner_one_ids
+        assert second_personal.id not in owner_one_ids
+        assert first_personal.id not in unrelated_ids
+        owned_skill = await skill_repository.get_owned(" owner-one ", first_personal.id)
+        assert owned_skill is not None
+        assert owned_skill.metadata["preferences"] == {"seasons": ("spring", "autumn")}
+        assert await skill_repository.get_owned("owner-two", first_personal.id) is None
+
+        invitation_time = datetime.now(UTC)
+        invitation = await skill_repository.invite(
+            "owner-one",
+            first_personal.id,
+            "recipient",
+            invitation_time,
+        )
+        assert invitation.status is SkillShareStatus.PENDING
+        assert first_personal.id not in {
+            skill.id for skill in await skill_repository.load_accessible("recipient")
+        }
+        with pytest.raises(AgentSkillNotFoundError):
+            await skill_repository.respond(
+                "other-recipient",
+                invitation.id,
+                SkillShareStatus.ACCEPTED,
+                invitation_time,
+            )
+        accepted = await skill_repository.respond(
+            "recipient",
+            invitation.id,
+            SkillShareStatus.ACCEPTED,
+            invitation_time,
+        )
+        assert accepted.status is SkillShareStatus.ACCEPTED
+        assert first_personal.id in {
+            skill.id for skill in await skill_repository.load_accessible("recipient")
+        }
+        assert await skill_repository.revoke("owner-two", invitation.id) is False
+        assert await skill_repository.revoke("owner-one", invitation.id) is True
+        assert first_personal.id not in {
+            skill.id for skill in await skill_repository.load_accessible("recipient")
+        }
         skill_catalog = ReloadableAgentSkillCatalog(
             skill_repository,
             registered_tools=DEFAULT_AGENT_TOOLS,
@@ -448,7 +531,9 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
                             ('agent_runs', 'selection_source'),
                             ('agent_tool_executions', 'effect'),
                             ('agent_tool_executions', 'status'),
-                            ('agent_skill_resources', 'kind')
+                            ('agent_skill_resources', 'kind'),
+                            ('agent_skills', 'ownership_kind'),
+                            ('agent_skill_shares', 'status')
                           )
                         """
                         )
@@ -467,6 +552,8 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
             ("agent_tool_executions", "effect"): "tool_effect",
             ("agent_tool_executions", "status"): "tool_execution_status",
             ("agent_skill_resources", "kind"): "agent_skill_resource_kind",
+            ("agent_skills", "ownership_kind"): "agent_skill_ownership_kind",
+            ("agent_skill_shares", "status"): "agent_skill_share_status",
         }
 
         provider_id = uuid4()

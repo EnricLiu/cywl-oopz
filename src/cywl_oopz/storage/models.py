@@ -34,7 +34,11 @@ from cywl_oopz.core.lifecycle import (
     ToolEffect,
     ToolExecutionStatus,
 )
-from cywl_oopz.features.agent.skills.models import SkillResourceKind
+from cywl_oopz.features.agent.skills.models import (
+    SkillOwnershipKind,
+    SkillResourceKind,
+    SkillShareStatus,
+)
 
 CURRENT_TIMESTAMP = text("CURRENT_TIMESTAMP")
 GENERATED_UUID = text("gen_random_uuid()")
@@ -109,6 +113,18 @@ TOOL_EXECUTION_STATUS_ENUM = Enum(
 AGENT_SKILL_RESOURCE_KIND_ENUM = Enum(
     SkillResourceKind,
     name="agent_skill_resource_kind",
+    values_callable=_enum_values,
+    validate_strings=True,
+)
+AGENT_SKILL_OWNERSHIP_KIND_ENUM = Enum(
+    SkillOwnershipKind,
+    name="agent_skill_ownership_kind",
+    values_callable=_enum_values,
+    validate_strings=True,
+)
+AGENT_SKILL_SHARE_STATUS_ENUM = Enum(
+    SkillShareStatus,
+    name="agent_skill_share_status",
     values_callable=_enum_values,
     validate_strings=True,
 )
@@ -264,10 +280,23 @@ class MusicPlaylistTrackRecord(Base):
 
 
 class AgentSkillRecord(Base):
-    """One globally enabled progressive-disclosure Agent skill."""
+    """One builtin or user-owned progressive-disclosure Agent skill."""
 
     __tablename__ = "agent_skills"
     __table_args__ = (
+        Index(
+            "ux_agent_skills_builtin_name",
+            "name",
+            unique=True,
+            postgresql_where=text("ownership_kind = 'builtin'"),
+        ),
+        Index(
+            "ux_agent_skills_personal_owner_name",
+            "owner_person_id",
+            "name",
+            unique=True,
+            postgresql_where=text("ownership_kind = 'personal'"),
+        ),
         CheckConstraint(
             "name ~ '^[a-z][a-z0-9-]{0,63}$'",
             name="ck_agent_skills_name",
@@ -297,6 +326,12 @@ class AgentSkillRecord(Base):
             "jsonb_typeof(metadata) = 'object'",
             name="ck_agent_skills_metadata_object",
         ),
+        CheckConstraint(
+            "(ownership_kind = 'builtin' AND owner_person_id IS NULL) OR "
+            "(ownership_kind = 'personal' AND "
+            "char_length(btrim(owner_person_id)) > 0)",
+            name="ck_agent_skills_ownership",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(
@@ -305,7 +340,7 @@ class AgentSkillRecord(Base):
         default=uuid4,
         server_default=GENERATED_UUID,
     )
-    name: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    name: Mapped[str] = mapped_column(String(64), nullable=False)
     display_name: Mapped[str] = mapped_column(String(80), nullable=False)
     description: Mapped[str] = mapped_column(String(1024), nullable=False)
     instructions: Mapped[str] = mapped_column(Text, nullable=False)
@@ -334,6 +369,17 @@ class AgentSkillRecord(Base):
         default=True,
         server_default=TRUE,
         nullable=False,
+    )
+    ownership_kind: Mapped[SkillOwnershipKind] = mapped_column(
+        AGENT_SKILL_OWNERSHIP_KIND_ENUM,
+        default=SkillOwnershipKind.BUILTIN,
+        server_default=text("'builtin'"),
+        nullable=False,
+    )
+    owner_person_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    archived_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -408,6 +454,61 @@ class AgentSkillResourceRecord(Base):
         default=utc_now,
         server_default=CURRENT_TIMESTAMP,
         nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        server_default=CURRENT_TIMESTAMP,
+        server_onupdate=FetchedValue(),
+        nullable=False,
+    )
+
+
+class AgentSkillShareRecord(Base):
+    """One recipient invitation or accepted read grant for a personal Skill."""
+
+    __tablename__ = "agent_skill_shares"
+    __table_args__ = (
+        UniqueConstraint("skill_id", "recipient_person_id"),
+        Index(
+            "ix_agent_skill_shares_recipient_status",
+            "recipient_person_id",
+            "status",
+        ),
+        Index("ix_agent_skill_shares_skill_status", "skill_id", "status"),
+        CheckConstraint(
+            "(status = 'pending' AND responded_at IS NULL) OR "
+            "(status IN ('accepted', 'declined') AND responded_at IS NOT NULL)",
+            name="ck_agent_skill_shares_response",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid,
+        primary_key=True,
+        default=uuid4,
+        server_default=GENERATED_UUID,
+    )
+    skill_id: Mapped[UUID] = mapped_column(
+        ForeignKey("agent_skills.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    recipient_person_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    status: Mapped[SkillShareStatus] = mapped_column(
+        AGENT_SKILL_SHARE_STATUS_ENUM,
+        default=SkillShareStatus.PENDING,
+        server_default=text("'pending'"),
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        server_default=CURRENT_TIMESTAMP,
+        nullable=False,
+    )
+    responded_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
