@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
@@ -67,11 +69,20 @@ class FakeCatalogRepository:
     ) -> None:
         self.providers = providers
         self.models = models
+        self.provider_loads = 0
+        self.model_loads = 0
+        self.error: Exception | None = None
 
     async def load_providers(self) -> tuple[LlmProvider, ...]:
+        self.provider_loads += 1
+        if self.error is not None:
+            raise self.error
         return self.providers
 
     async def load_models(self) -> tuple[LlmModel, ...]:
+        self.model_loads += 1
+        if self.error is not None:
+            raise self.error
         return self.models
 
 
@@ -81,6 +92,106 @@ class FakeSelectionRepository:
 
     async def load_candidates(self, _: ConversationKey) -> ModelSelectionCandidates:
         return self.candidates
+
+
+@pytest.mark.asyncio
+async def test_provider_catalog_refreshes_after_ttl_and_coalesces_concurrent_checks() -> None:
+    repository = FakeCatalogRepository(
+        (provider(),),
+        (model(MODEL_ID, application_default=True),),
+    )
+    now = [100.0]
+    catalog = ReloadableProviderCatalog(
+        repository,
+        refresh_seconds=10,
+        clock=lambda: now[0],
+    )
+    await catalog.reload()
+    original = catalog.snapshot
+
+    assert await catalog.refresh_if_stale() is False
+    assert repository.provider_loads == 1
+    assert repository.model_loads == 1
+
+    repository.models = (
+        replace(
+            repository.models[0],
+            remote_model_name="updated-remote",
+            display_name="Updated model",
+        ),
+    )
+    now[0] = 111
+    refreshed = await asyncio.gather(
+        catalog.refresh_if_stale(),
+        catalog.refresh_if_stale(),
+        catalog.refresh_if_stale(),
+    )
+
+    assert refreshed.count(True) == 1
+    assert catalog.snapshot is not original
+    assert catalog.snapshot.models[MODEL_ID].remote_model_name == "updated-remote"
+    assert repository.provider_loads == 2
+    assert repository.model_loads == 2
+
+
+@pytest.mark.asyncio
+async def test_provider_catalog_retains_snapshot_on_refresh_failure_and_force_retries() -> None:
+    repository = FakeCatalogRepository(
+        (provider(),),
+        (model(MODEL_ID, application_default=True),),
+    )
+    now = [0.0]
+    catalog = ReloadableProviderCatalog(
+        repository,
+        refresh_seconds=10,
+        clock=lambda: now[0],
+    )
+    await catalog.reload()
+    previous = catalog.snapshot
+
+    repository.error = RuntimeError("database unavailable")
+    now[0] = 11
+    assert await catalog.refresh_if_stale() is False
+    assert catalog.snapshot is previous
+
+    repository.error = None
+    repository.models = (replace(repository.models[0], display_name="Recovered"),)
+    assert await catalog.refresh_if_stale() is False
+    assert await catalog.refresh_if_stale(force=True) is True
+    assert catalog.snapshot.models[MODEL_ID].display_name == "Recovered"
+
+
+@pytest.mark.asyncio
+async def test_provider_selection_refreshes_database_catalog_at_run_boundary() -> None:
+    repository = FakeCatalogRepository(
+        (provider(),),
+        (model(MODEL_ID, application_default=True),),
+    )
+    now = [0.0]
+    catalog = ReloadableProviderCatalog(
+        repository,
+        refresh_seconds=5,
+        clock=lambda: now[0],
+    )
+    await catalog.reload()
+    selection = ProviderSelectionService(
+        catalog,
+        FakeSelectionRepository(ModelSelectionCandidates()),
+    )
+
+    repository.models = (
+        replace(
+            repository.models[0],
+            remote_model_name="database-updated",
+        ),
+    )
+    now[0] = 6
+    selected = await selection.resolve(
+        ConversationKey("private", "", "", "person"),
+        required_capabilities=frozenset({ModelCapability.TOOL_CALLING}),
+    )
+
+    assert selected.model.remote_model_name == "database-updated"
 
 
 @pytest.mark.asyncio

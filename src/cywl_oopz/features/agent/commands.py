@@ -198,6 +198,7 @@ class AgentModelCommand(ChatCommandController):
 
     async def _show_models(self, context: EventContext, key: ConversationKey) -> None:
         try:
+            await self._agent.refresh_model_catalog()
             selection = await self._agent.current_selection(key)
             choices = self._agent.list_model_choices()
         except Exception as exc:
@@ -273,6 +274,7 @@ class ProviderCommand(ChatCommandController):
 
     async def _show_providers(self, context: EventContext, key: ConversationKey) -> None:
         try:
+            await self._agent.refresh_model_catalog()
             selection = await self._agent.current_selection(key)
             choices = self._agent.list_model_choices()
         except Exception as exc:

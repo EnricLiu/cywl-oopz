@@ -76,6 +76,7 @@ def test_app_settings_use_the_injected_oopz_credentials(monkeypatch) -> None:
     assert settings.agent.memory_enabled_by_default is True
     assert settings.agent.live_display is False
     assert settings.agent.display_edit_interval_seconds == 0.8
+    assert settings.agent.provider_catalog_refresh_seconds == 10
     assert settings.agent.skills_enabled is True
     assert settings.agent.skill_catalog_refresh_seconds == 30
     assert settings.agent.max_available_skills == 32
@@ -173,6 +174,25 @@ def test_agent_skill_catalog_settings_are_validated() -> None:
             valid_environment()
             | {
                 "CYWL_AGENT_SKILL_CATALOG_REFRESH_SECONDS": "0",
+            }
+        )
+
+
+def test_agent_provider_catalog_refresh_setting_is_validated() -> None:
+    settings = AppSettings.from_mapping(
+        valid_environment()
+        | {
+            "CYWL_AGENT_PROVIDER_CATALOG_REFRESH_SECONDS": "2.5",
+        }
+    )
+
+    assert settings.agent.provider_catalog_refresh_seconds == 2.5
+
+    with pytest.raises(ConfigurationError, match="PROVIDER_CATALOG_REFRESH_SECONDS"):
+        AppSettings.from_mapping(
+            valid_environment()
+            | {
+                "CYWL_AGENT_PROVIDER_CATALOG_REFRESH_SECONDS": "0",
             }
         )
 

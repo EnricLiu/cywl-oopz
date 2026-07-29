@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Mapping
+import time
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 from uuid import UUID
+
+from cywl_oopz.core.observability import exception_kind
 
 from .models import AgentModelRef, LlmModel, LlmProvider, ModelCapability
 from .ports import ProviderCatalogAdminRepository, ProviderCatalogRepository
@@ -159,11 +162,22 @@ class ProviderCatalog:
 
 
 class ReloadableProviderCatalog:
-    """Own one atomically replaced catalog snapshot."""
+    """Refresh immutable Provider/model snapshots at safe operation boundaries."""
 
-    def __init__(self, repository: ProviderCatalogRepository) -> None:
+    def __init__(
+        self,
+        repository: ProviderCatalogRepository,
+        *,
+        refresh_seconds: float = 10.0,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        if refresh_seconds <= 0:
+            raise ValueError("Provider catalog refresh interval must be positive")
         self._repository = repository
+        self._refresh_seconds = refresh_seconds
+        self._clock = clock
         self._catalog = ProviderCatalog.build((), ())
+        self._next_refresh_at = 0.0
         self._reload_lock = asyncio.Lock()
 
     @property
@@ -171,22 +185,61 @@ class ReloadableProviderCatalog:
         """Return the current immutable snapshot without holding a lock."""
         return self._catalog
 
+    async def refresh_if_stale(self, *, force: bool = False) -> bool:
+        """Publish fresh database configuration after the TTL, retaining failures."""
+        now = self._clock()
+        if not force and now < self._next_refresh_at:
+            return False
+        async with self._reload_lock:
+            now = self._clock()
+            if not force and now < self._next_refresh_at:
+                return False
+            try:
+                await self._reload_locked(now)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._next_refresh_at = now + self._refresh_seconds
+                logger.warning(
+                    "Agent provider catalog refresh failed; retaining previous snapshot: "
+                    "providers=%s models=%s error=%s",
+                    len(self._catalog.providers),
+                    len(self._catalog.models),
+                    exception_kind(exc),
+                )
+                return False
+            return True
+
     async def reload(self) -> ProviderCatalog:
         """Load and validate a replacement before publishing it."""
         async with self._reload_lock:
-            logger.debug("Reloading Agent provider catalog")
-            providers, models = await asyncio.gather(
-                self._repository.load_providers(),
-                self._repository.load_models(),
-            )
-            replacement = ProviderCatalog.build(providers, models)
-            self._catalog = replacement
-            logger.info(
-                "Agent provider catalog reloaded: providers=%s models=%s",
-                len(providers),
-                len(models),
-            )
-            return replacement
+            now = self._clock()
+            try:
+                return await self._reload_locked(now)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self._next_refresh_at = now + self._refresh_seconds
+                raise
+
+    async def _reload_locked(self, now: float) -> ProviderCatalog:
+        """Load, validate, and atomically publish while the caller holds the lock."""
+        started_at = time.perf_counter()
+        logger.debug("Reloading Agent provider catalog")
+        providers, models = await asyncio.gather(
+            self._repository.load_providers(),
+            self._repository.load_models(),
+        )
+        replacement = ProviderCatalog.build(providers, models)
+        self._catalog = replacement
+        self._next_refresh_at = now + self._refresh_seconds
+        logger.info(
+            "Agent provider catalog reloaded: providers=%s models=%s elapsed_seconds=%.3f",
+            len(providers),
+            len(models),
+            time.perf_counter() - started_at,
+        )
+        return replacement
 
 
 class ProviderCatalogAdminService:

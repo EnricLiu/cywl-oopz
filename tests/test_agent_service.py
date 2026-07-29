@@ -36,6 +36,7 @@ DEFAULT_MODEL_ID = UUID("10000000-0000-0000-0000-000000000002")
 OTHER_MODEL_ID = UUID("10000000-0000-0000-0000-000000000003")
 SECOND_PROVIDER_ID = UUID("20000000-0000-0000-0000-000000000001")
 SECOND_OTHER_MODEL_ID = UUID("20000000-0000-0000-0000-000000000002")
+RUNTIME_MODEL_ID = UUID("10000000-0000-0000-0000-000000000004")
 
 
 class InMemoryCatalogRepository:
@@ -531,6 +532,44 @@ async def test_agent_service_model_short_alias_uses_current_provider(
 
     assert selected == "provider/other"
     assert current.model.model_id == OTHER_MODEL_ID
+
+
+@pytest.mark.asyncio
+async def test_agent_service_force_refreshes_database_before_explicit_model_switch(
+    chat_settings,
+) -> None:
+    repository = InMemoryCatalogRepository()
+    service, _, _, _, _ = await build_service(
+        chat_settings,
+        catalog_repository=repository,
+    )
+    repository.models += (
+        LlmModel(
+            id=RUNTIME_MODEL_ID,
+            provider_id=PROVIDER_ID,
+            alias="runtime",
+            remote_model_name="runtime-remote",
+            display_name="Runtime",
+            enabled=True,
+            is_provider_default=False,
+            is_application_default=False,
+            capabilities=frozenset({ModelCapability.TOOL_CALLING}),
+        ),
+    )
+
+    selected = await service.select_provider(
+        key(),
+        "provider",
+        "runtime",
+        user_default=False,
+    )
+
+    assert selected == "provider/runtime"
+    assert service.list_models() == (
+        "provider/default",
+        "provider/other",
+        "provider/runtime",
+    )
 
 
 @pytest.mark.asyncio

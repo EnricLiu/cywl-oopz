@@ -359,6 +359,7 @@ class AgentConversationService:
         choice = model.strip()
         if not choice:
             raise ValueError("Model choice must not be empty")
+        await self._catalog.refresh_if_stale(force=True)
         snapshot = self._catalog.snapshot
         if "/" in choice:
             provider_alias, model_alias = choice.split("/", 1)
@@ -405,6 +406,7 @@ class AgentConversationService:
         user_default: bool,
     ) -> str:
         """Select a Provider default or named model for a thread or user."""
+        await self._catalog.refresh_if_stale(force=True)
         reference = self._catalog.snapshot.find_selectable(
             provider_alias,
             model_alias,
@@ -444,6 +446,10 @@ class AgentConversationService:
     def list_models(self) -> tuple[str, ...]:
         """Retain the former safe alias list for non-command callers."""
         return tuple(choice.qualified_alias for choice in self.list_model_choices())
+
+    async def refresh_model_catalog(self) -> bool:
+        """Force a safe database refresh for interactive catalog commands."""
+        return await self._catalog.refresh_if_stale(force=True)
 
     async def current_selection(self, key: ConversationKey) -> ModelSelection:
         """Resolve current selection for status and Provider commands."""
