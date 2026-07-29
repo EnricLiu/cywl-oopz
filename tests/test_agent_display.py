@@ -11,7 +11,7 @@ from cywl_oopz.features.agent.display import (
 from cywl_oopz.features.chat.progress import ConversationProgressEvent, ProgressKind
 
 
-def event(kind: ProgressKind, **values: str) -> ConversationProgressEvent:
+def event(kind: ProgressKind, **values: object) -> ConversationProgressEvent:
     return ConversationProgressEvent(kind, **values)
 
 
@@ -144,6 +144,37 @@ def test_new_model_turn_resets_the_previous_draft() -> None:
     assert state.current_draft == "新回答"
 
 
+def test_model_retry_tracks_waiting_state_and_returns_to_thinking() -> None:
+    waiting = reduce(
+        event(ProgressKind.TEXT_RESET),
+        event(ProgressKind.TEXT_DELTA, text="未完成的草稿"),
+        event(
+            ProgressKind.MODEL_RETRY,
+            retry_attempt=1,
+            retry_max_attempts=2,
+            retry_delay_seconds=1.25,
+            retry_reason="上游服务异常（HTTP 503）",
+        ),
+    )
+
+    assert waiting.phase is DisplayPhase.RETRYING
+    assert waiting.current_draft == ""
+    assert waiting.provider_retry_count == 1
+    assert waiting.retry_attempt == 1
+    assert waiting.retry_max_attempts == 2
+    assert waiting.retry_delay_seconds == 1.25
+    assert waiting.retry_reason == "上游服务异常（HTTP 503）"
+
+    resumed = reduce(event(ProgressKind.THINKING), initial=waiting)
+
+    assert resumed.phase is DisplayPhase.THINKING
+    assert resumed.provider_retry_count == 1
+    assert resumed.retry_attempt is None
+    assert resumed.retry_max_attempts is None
+    assert resumed.retry_delay_seconds is None
+    assert resumed.retry_reason == ""
+
+
 def test_duplicate_event_id_and_duplicate_tool_status_are_idempotent() -> None:
     reducer = AgentLoopReducer()
     state = reducer.apply(
@@ -201,6 +232,17 @@ def test_progress_event_rejects_raw_or_incomplete_shapes() -> None:
         event(ProgressKind.COMPLETED)
     with pytest.raises(TypeError):
         ConversationProgressEvent(ProgressKind.TOOL_STARTED, arguments={"secret": True})  # type: ignore[call-arg]
+    with pytest.raises(ValueError, match="valid attempt"):
+        event(ProgressKind.MODEL_RETRY)
+    with pytest.raises(ValueError, match="bounded reason"):
+        event(
+            ProgressKind.MODEL_RETRY,
+            retry_attempt=1,
+            retry_max_attempts=2,
+            retry_delay_seconds=0.5,
+        )
+    with pytest.raises(ValueError, match="Only model retry"):
+        event(ProgressKind.THINKING, retry_attempt=1)
 
 
 def test_tool_update_mutates_the_existing_running_step_with_structured_details() -> None:

@@ -148,6 +148,7 @@ class OopzRenderContext:
     """Ephemeral activity values that do not belong in reducer state."""
 
     running_elapsed_seconds: tuple[tuple[str, float], ...] = ()
+    retry_remaining_seconds: float | None = None
     activity_frame: int = 0
 
     def elapsed_for(self, call_id: str) -> float | None:
@@ -199,14 +200,25 @@ class OopzMessageRenderer:
         state: AgentLoopViewState,
         context: OopzRenderContext,
     ) -> str:
-        header = {
-            DisplayPhase.CREATED: "✨ **初音未来 正在准备回答…**",
-            DisplayPhase.ACCEPTED: "✨ **初音未来 正在准备回答…**",
-            DisplayPhase.THINKING: "♪ **初音未来 正在思考…**",
-            DisplayPhase.TOOL_RUNNING: "🛠 **初音未来 正在处理…**",
-            DisplayPhase.DRAFTING: "🎤 **初音未来 正在组织回答…**",
-        }.get(state.phase, "♪ **初音未来 正在思考…**")
+        if state.phase is DisplayPhase.RETRYING:
+            dots = "." * (context.activity_frame % 3 + 1)
+            header = f"🔄 **初音未来 正在重新连接{dots}**"
+        else:
+            header = {
+                DisplayPhase.CREATED: "✨ **初音未来 正在准备回答…**",
+                DisplayPhase.ACCEPTED: "✨ **初音未来 正在准备回答…**",
+                DisplayPhase.THINKING: "♪ **初音未来 正在思考…**",
+                DisplayPhase.TOOL_RUNNING: "🛠 **初音未来 正在处理…**",
+                DisplayPhase.DRAFTING: "🎤 **初音未来 正在组织回答…**",
+            }.get(state.phase, "♪ **初音未来 正在思考…**")
         lines = [header]
+        if state.phase is DisplayPhase.RETRYING:
+            details = f"↻ 第 {state.retry_attempt}/{state.retry_max_attempts} 次重试"
+            if context.retry_remaining_seconds is not None:
+                details += f" · 约 {context.retry_remaining_seconds:.1f}s 后继续"
+            if state.retry_reason:
+                details += f" · {self._normalizer.plain_text(state.retry_reason)[:80]}"
+            lines.append(details)
         lines.extend(self._step_lines(state, context))
         if state.current_draft:
             draft = self._normalizer.normalize(state.current_draft)
@@ -396,6 +408,8 @@ class OopzMessageRenderer:
             statistics.append(f"{state.elapsed_seconds:.1f}s")
         if state.tool_calls is not None:
             statistics.append(f"{state.tool_calls} 次工具")
+        if state.provider_retry_count:
+            statistics.append(f"{state.provider_retry_count} 次重试")
         if state.input_tokens is not None or state.output_tokens is not None:
             total_tokens = (state.input_tokens or 0) + (state.output_tokens or 0)
             statistics.append(f"{OopzMessageRenderer._compact_number(total_tokens)} tokens")

@@ -348,6 +348,7 @@ class AgentSettings:
     memory_context_items: int
     memory_max_item_characters: int
     stale_run_after_seconds: int
+    provider_max_retries: int = 2
     skills_enabled: bool = True
     skill_catalog_refresh_seconds: float = 30.0
     max_available_skills: int = 32
@@ -486,6 +487,12 @@ class AgentSettings:
                 "CYWL_AGENT_STALE_RUN_AFTER_SECONDS",
                 90,
             ),
+            provider_max_retries=_positive_integer(
+                values,
+                "CYWL_AGENT_PROVIDER_MAX_RETRIES",
+                2,
+                allow_zero=True,
+            ),
             skills_enabled=_boolean(
                 values,
                 "CYWL_AGENT_SKILLS_ENABLED",
@@ -536,6 +543,8 @@ class AgentSettings:
             raise ConfigurationError(
                 "CYWL_AGENT_MEMORY_CONTEXT_ITEMS must not exceed CYWL_AGENT_MEMORY_MAX_ITEMS"
             )
+        if settings.provider_max_retries > 5:
+            raise ConfigurationError("CYWL_AGENT_PROVIDER_MAX_RETRIES must not exceed 5")
         if settings.max_skill_instruction_characters > settings.max_skill_context_characters:
             raise ConfigurationError(
                 "CYWL_AGENT_MAX_SKILL_INSTRUCTION_CHARACTERS must not exceed "

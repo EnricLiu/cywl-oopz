@@ -14,6 +14,7 @@ class DisplayPhase(StrEnum):
     CREATED = "created"
     ACCEPTED = "accepted"
     THINKING = "thinking"
+    RETRYING = "retrying"
     TOOL_RUNNING = "tool_running"
     DRAFTING = "drafting"
     SUCCEEDED = "succeeded"
@@ -60,6 +61,11 @@ class AgentLoopViewState:
     tool_calls: int | None = None
     completed_step_count: int = 0
     failed_step_count: int = 0
+    provider_retry_count: int = 0
+    retry_attempt: int | None = None
+    retry_max_attempts: int | None = None
+    retry_delay_seconds: float | None = None
+    retry_reason: str = ""
     terminal: bool = False
     revision: int = 0
     seen_event_ids: frozenset[str] = frozenset()
@@ -103,6 +109,21 @@ class AgentLoopReducer:
                     if self._has_running_step(state.steps)
                     else DisplayPhase.THINKING
                 ),
+                retry_attempt=None,
+                retry_max_attempts=None,
+                retry_delay_seconds=None,
+                retry_reason="",
+            )
+        if kind is ProgressKind.MODEL_RETRY:
+            return replace(
+                state,
+                phase=DisplayPhase.RETRYING,
+                current_draft="",
+                provider_retry_count=state.provider_retry_count + 1,
+                retry_attempt=event.retry_attempt,
+                retry_max_attempts=event.retry_max_attempts,
+                retry_delay_seconds=event.retry_delay_seconds,
+                retry_reason=event.retry_reason,
             )
         if kind is ProgressKind.TEXT_RESET:
             return replace(state, phase=DisplayPhase.DRAFTING, current_draft="")

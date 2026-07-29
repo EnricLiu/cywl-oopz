@@ -13,6 +13,7 @@ from cywl_oopz.core.observability import opaque_ref
 from cywl_oopz.features.agent.display import (
     AgentLoopReducer,
     AgentLoopViewState,
+    DisplayPhase,
     ToolStepStatus,
 )
 from cywl_oopz.features.chat.models import ChatResponse
@@ -36,6 +37,7 @@ _SEMANTIC_KINDS = frozenset(
     {
         ProgressKind.ACCEPTED,
         ProgressKind.THINKING,
+        ProgressKind.MODEL_RETRY,
         ProgressKind.TEXT_RESET,
         ProgressKind.TOOL_STARTED,
         ProgressKind.TOOL_UPDATED,
@@ -103,6 +105,7 @@ class OopzAgentLoopMessage:
         self._next_edit_at = 0.0
         self._retryable_failures = 0
         self._tool_started_at: dict[str, float] = {}
+        self._retry_started_at: float | None = None
         self._activity_frame = 0
 
     @property
@@ -129,8 +132,16 @@ class OopzAgentLoopMessage:
 
     async def emit(self, event: ConversationProgressEvent) -> None:
         async with self._state_lock:
+            previous_phase = self._state.phase
             if event.kind is ProgressKind.TOOL_STARTED:
                 self._tool_started_at.setdefault(event.call_id, self._now())
+            elif event.kind is ProgressKind.MODEL_RETRY:
+                self._retry_started_at = self._now()
+                self._activity_frame = 0
+                self._next_edit_at = 0.0
+            elif event.kind is ProgressKind.THINKING and previous_phase is DisplayPhase.RETRYING:
+                self._retry_started_at = None
+                self._next_edit_at = 0.0
             elif event.kind in {
                 ProgressKind.TOOL_SUCCEEDED,
                 ProgressKind.TOOL_FAILED,
@@ -142,6 +153,7 @@ class OopzAgentLoopMessage:
                 ProgressKind.CANCELLED,
             }:
                 self._tool_started_at.clear()
+                self._retry_started_at = None
             previous_revision = self._state.revision
             self._state = self._reducer.apply(self._state, event)
             if self._state.revision == previous_revision:
@@ -233,9 +245,9 @@ class OopzAgentLoopMessage:
             except TimeoutError:
                 heartbeat_due = True
             self._wake.clear()
-            has_running_step = self._has_running_step()
+            has_live_activity = self._has_live_activity()
             if self._dirty_revision <= self._flushed_revision and not (
-                heartbeat_due and has_running_step
+                heartbeat_due and has_live_activity
             ):
                 if self._closing:
                     return
@@ -305,8 +317,10 @@ class OopzAgentLoopMessage:
             if self._dirty_revision > revision:
                 self._wake.set()
 
-    def _has_running_step(self) -> bool:
-        return any(step.status is ToolStepStatus.RUNNING for step in self._state.steps)
+    def _has_live_activity(self) -> bool:
+        return self._state.phase is DisplayPhase.RETRYING or any(
+            step.status is ToolStepStatus.RUNNING for step in self._state.steps
+        )
 
     def _render_context(self, state: AgentLoopViewState) -> OopzRenderContext:
         now = self._now()
@@ -318,8 +332,19 @@ class OopzAgentLoopMessage:
             for step in state.steps
             if (started_at := self._tool_started_at.get(step.call_id)) is not None
         )
+        retry_remaining = None
+        if (
+            state.phase is DisplayPhase.RETRYING
+            and state.retry_delay_seconds is not None
+            and self._retry_started_at is not None
+        ):
+            retry_remaining = max(
+                state.retry_delay_seconds - (now - self._retry_started_at),
+                0.0,
+            )
         return OopzRenderContext(
             running_elapsed_seconds=elapsed,
+            retry_remaining_seconds=retry_remaining,
             activity_frame=self._activity_frame,
         )
 

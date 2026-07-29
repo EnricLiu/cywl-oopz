@@ -35,6 +35,7 @@ from cywl_oopz.features.chat.progress import ProgressSink, emit_progress
 
 from .models import AgentMessage, AgentRunRequest, AgentRunResult, AgentStopReason
 from .progress import ConversationToolProgressReporter, PydanticAiProgressMapper
+from .provider_retry import bind_provider_retry_progress
 from .registry import AgentModelRegistry
 from .tools.models import ToolCall, ToolDescriptor, ToolExecutionContext
 from .tools.ports import AgentToolRuntime
@@ -96,30 +97,31 @@ class PydanticAiAgentEngine:
             total_tokens_limit=request.limits.max_total_tokens,
         )
         try:
-            await emit_progress(progress, progress_mapper.thinking())
-            async with asyncio.timeout(request.limits.timeout_seconds):
-                if dependencies is None:
-                    event_stream = agent.run_stream_events(
-                        request.prompt,
-                        message_history=history,
-                        usage_limits=usage_limits,
-                    )
-                else:
-                    event_stream = agent.run_stream_events(
-                        request.prompt,
-                        deps=dependencies,
-                        message_history=history,
-                        usage_limits=usage_limits,
-                    )
-                result = None
-                async with event_stream as events:
-                    async for framework_event in events:
-                        if isinstance(framework_event, AgentRunResultEvent):
-                            result = framework_event.result
-                        for mapped_event in progress_mapper.map(framework_event):
-                            await emit_progress(progress, mapped_event)
-                if result is None:
-                    raise ProviderResponseError("Agent stream ended without a result")
+            with bind_provider_retry_progress(progress):
+                await emit_progress(progress, progress_mapper.thinking())
+                async with asyncio.timeout(request.limits.timeout_seconds):
+                    if dependencies is None:
+                        event_stream = agent.run_stream_events(
+                            request.prompt,
+                            message_history=history,
+                            usage_limits=usage_limits,
+                        )
+                    else:
+                        event_stream = agent.run_stream_events(
+                            request.prompt,
+                            deps=dependencies,
+                            message_history=history,
+                            usage_limits=usage_limits,
+                        )
+                    result = None
+                    async with event_stream as events:
+                        async for framework_event in events:
+                            if isinstance(framework_event, AgentRunResultEvent):
+                                result = framework_event.result
+                            for mapped_event in progress_mapper.map(framework_event):
+                                await emit_progress(progress, mapped_event)
+                    if result is None:
+                        raise ProviderResponseError("Agent stream ended without a result")
         except TimeoutError as exc:
             logger.warning(
                 "Agent engine timed out: run=%s error=%s", request.run_id, exception_kind(exc)

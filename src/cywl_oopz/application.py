@@ -350,7 +350,10 @@ class BotApplication:
             self.agent_tool_availability,
             self.agent_selection,
         )
-        self.agent_models = AgentModelRegistry(self.agent_catalog)
+        self.agent_models = AgentModelRegistry(
+            self.agent_catalog,
+            default_max_retries=settings.agent.provider_max_retries,
+        )
         self.agent_summary_tasks = TaskSupervisor(lambda thread_id: f"agent-summary:{thread_id}")
         self.agent_summary_service = ThreadSummaryService(
             settings.agent,

@@ -17,6 +17,7 @@ class ProgressKind(StrEnum):
 
     ACCEPTED = "accepted"
     THINKING = "thinking"
+    MODEL_RETRY = "model_retry"
     TEXT_RESET = "text_reset"
     TEXT_DELTA = "text_delta"
     TOOL_STARTED = "tool_started"
@@ -64,6 +65,10 @@ class ConversationProgressEvent:
     output_tokens: int | None = None
     model_requests: int | None = None
     tool_calls: int | None = None
+    retry_attempt: int | None = None
+    retry_max_attempts: int | None = None
+    retry_delay_seconds: float | None = None
+    retry_reason: str = ""
 
     def __post_init__(self) -> None:
         if self.kind in _TOOL_KINDS:
@@ -96,6 +101,31 @@ class ConversationProgressEvent:
             or self.tool_preview_lines
         ):
             raise ValueError("Only tool progress may carry tool identity")
+        retry_values = (
+            self.retry_attempt,
+            self.retry_max_attempts,
+            self.retry_delay_seconds,
+        )
+        if self.kind is ProgressKind.MODEL_RETRY:
+            if (
+                self.retry_attempt is None
+                or self.retry_max_attempts is None
+                or self.retry_delay_seconds is None
+                or self.retry_attempt <= 0
+                or self.retry_max_attempts <= 0
+                or self.retry_attempt > self.retry_max_attempts
+                or self.retry_delay_seconds < 0
+            ):
+                raise ValueError("Model retry progress requires valid attempt and delay values")
+            if (
+                not self.retry_reason.strip()
+                or len(self.retry_reason) > 80
+                or "\n" in self.retry_reason
+                or "\r" in self.retry_reason
+            ):
+                raise ValueError("Model retry progress requires one bounded reason")
+        elif any(value is not None for value in retry_values) or self.retry_reason:
+            raise ValueError("Only model retry progress may carry retry details")
         if self.kind in _TEXT_KINDS and not self.text:
             raise ValueError(f"{self.kind.value} progress requires text")
         if self.kind not in _TEXT_KINDS and self.text:

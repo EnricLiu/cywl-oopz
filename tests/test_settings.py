@@ -76,6 +76,7 @@ def test_app_settings_use_the_injected_oopz_credentials(monkeypatch) -> None:
     assert settings.agent.memory_enabled_by_default is True
     assert settings.agent.live_display is False
     assert settings.agent.display_edit_interval_seconds == 0.8
+    assert settings.agent.provider_max_retries == 2
     assert settings.agent.skills_enabled is True
     assert settings.agent.skill_catalog_refresh_seconds == 30
     assert settings.agent.max_available_skills == 32
@@ -130,6 +131,17 @@ def test_agent_live_display_settings_are_validated() -> None:
         AppSettings.from_mapping(
             valid_environment() | {"CYWL_AGENT_DISPLAY_EDIT_INTERVAL_SECONDS": "0"}
         )
+
+
+def test_agent_provider_retry_limit_is_configurable_and_bounded() -> None:
+    settings = AppSettings.from_mapping(
+        valid_environment() | {"CYWL_AGENT_PROVIDER_MAX_RETRIES": "0"}
+    )
+
+    assert settings.agent.provider_max_retries == 0
+
+    with pytest.raises(ConfigurationError, match="PROVIDER_MAX_RETRIES"):
+        AppSettings.from_mapping(valid_environment() | {"CYWL_AGENT_PROVIDER_MAX_RETRIES": "6"})
 
 
 def test_agent_tools_can_be_disabled_independently() -> None:

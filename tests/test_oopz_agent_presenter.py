@@ -219,6 +219,35 @@ async def test_running_tool_heartbeats_without_mutating_reducer_state_and_stops_
 
 
 @pytest.mark.asyncio
+async def test_provider_retry_is_shown_immediately_and_counted_at_terminal() -> None:
+    gateway = FakeGateway()
+    session = await opened_session(gateway)
+
+    await session.emit(
+        ConversationProgressEvent(
+            ProgressKind.MODEL_RETRY,
+            retry_attempt=1,
+            retry_max_attempts=2,
+            retry_delay_seconds=1.25,
+            retry_reason="上游服务异常（HTTP 503）",
+        )
+    )
+    async with asyncio.timeout(1):
+        while not any("正在重新连接" in snapshot for snapshot in gateway.edits):
+            await asyncio.sleep(0)
+
+    retry_snapshot = gateway.edits[-1]
+    assert "第 1/2 次重试" in retry_snapshot
+    assert "HTTP 503" in retry_snapshot
+
+    await session.emit(ConversationProgressEvent(ProgressKind.THINKING))
+    await session.complete(ChatResponse("连接恢复啦♪", "provider/model"))
+    await session.aclose()
+
+    assert gateway.edits[-1] == "🎵 **初音未来** · 1 次重试\n连接恢复啦♪"
+
+
+@pytest.mark.asyncio
 async def test_revision_arriving_during_edit_flushes_the_latest_terminal_snapshot() -> None:
     gateway = FakeGateway()
     gateway.edit_started = asyncio.Event()

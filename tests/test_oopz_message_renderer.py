@@ -34,6 +34,7 @@ def step(index: int, status: ToolStepStatus) -> ToolStepView:
         (DisplayPhase.CREATED, "正在准备回答"),
         (DisplayPhase.ACCEPTED, "正在准备回答"),
         (DisplayPhase.THINKING, "正在思考"),
+        (DisplayPhase.RETRYING, "正在重新连接"),
         (DisplayPhase.TOOL_RUNNING, "正在处理"),
         (DisplayPhase.DRAFTING, "正在组织回答"),
         (DisplayPhase.CANCELLED, "已取消当前回答"),
@@ -115,6 +116,23 @@ def test_terminal_success_removes_tool_chrome_and_keeps_the_answer() -> None:
 
     assert rendered == "🎵 **初音未来**\n这是最终回答♪"
     assert "步骤 1" not in rendered
+
+
+def test_retrying_model_shows_attempt_countdown_and_safe_reason() -> None:
+    rendered = OopzMessageRenderer().render(
+        AgentLoopViewState(
+            phase=DisplayPhase.RETRYING,
+            provider_retry_count=1,
+            retry_attempt=1,
+            retry_max_attempts=2,
+            retry_delay_seconds=1.25,
+            retry_reason="上游服务异常（HTTP 503）",
+        ),
+        OopzRenderContext(retry_remaining_seconds=0.8, activity_frame=1),
+    )
+
+    assert "🔄 **初音未来 正在重新连接..**" in rendered
+    assert "↻ 第 1/2 次重试 · 约 0.8s 后继续 · 上游服务异常（HTTP 503）" in rendered
 
 
 def test_long_final_answer_keeps_head_tail_and_omission_marker() -> None:
@@ -369,11 +387,12 @@ def test_success_header_shows_compact_agent_run_statistics() -> None:
             output_tokens=345,
             model_requests=3,
             tool_calls=2,
+            provider_retry_count=1,
             terminal=True,
         )
     )
 
-    assert rendered == "🎵 **初音未来** · 12.3s · 2 次工具 · 2.1k tokens\n完成啦♪"
+    assert rendered == "🎵 **初音未来** · 12.3s · 2 次工具 · 1 次重试 · 2.1k tokens\n完成啦♪"
 
 
 def test_random_unicode_is_always_bounded_and_balanced() -> None:
