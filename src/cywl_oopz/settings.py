@@ -40,6 +40,8 @@ DEFAULT_AGENT_TOOLS = (
     "add_music_playlist_track",
     "remove_music_playlist_track",
     "load_music_playlist",
+    "load_agent_skill",
+    "read_agent_skill_resource",
 )
 
 MUSIC_AGENT_TOOLS = frozenset(
@@ -75,6 +77,12 @@ WEB_BROWSER_INTERACTION_TOOLS = frozenset(
         "browser_click",
         "browser_fill",
         "browser_press",
+    }
+)
+SKILL_AGENT_TOOLS = frozenset(
+    {
+        "load_agent_skill",
+        "read_agent_skill_resource",
     }
 )
 
@@ -339,6 +347,11 @@ class AgentSettings:
     skills_enabled: bool = True
     skill_catalog_refresh_seconds: float = 30.0
     max_available_skills: int = 32
+    max_skill_activations: int = 3
+    max_skill_resources: int = 4
+    max_skill_instruction_characters: int = 12_000
+    max_skill_resource_characters: int = 12_000
+    max_skill_context_characters: int = 24_000
 
     @property
     def enabled(self) -> bool:
@@ -484,6 +497,31 @@ class AgentSettings:
                 "CYWL_AGENT_MAX_AVAILABLE_SKILLS",
                 32,
             ),
+            max_skill_activations=_positive_integer(
+                values,
+                "CYWL_AGENT_MAX_SKILL_ACTIVATIONS",
+                3,
+            ),
+            max_skill_resources=_positive_integer(
+                values,
+                "CYWL_AGENT_MAX_SKILL_RESOURCES",
+                4,
+            ),
+            max_skill_instruction_characters=_positive_integer(
+                values,
+                "CYWL_AGENT_MAX_SKILL_INSTRUCTION_CHARACTERS",
+                12_000,
+            ),
+            max_skill_resource_characters=_positive_integer(
+                values,
+                "CYWL_AGENT_MAX_SKILL_RESOURCE_CHARACTERS",
+                12_000,
+            ),
+            max_skill_context_characters=_positive_integer(
+                values,
+                "CYWL_AGENT_MAX_SKILL_CONTEXT_CHARACTERS",
+                24_000,
+            ),
         )
         if settings.summary_retain_messages >= settings.summary_trigger_messages:
             raise ConfigurationError(
@@ -493,6 +531,16 @@ class AgentSettings:
         if settings.memory_context_items > settings.memory_max_items:
             raise ConfigurationError(
                 "CYWL_AGENT_MEMORY_CONTEXT_ITEMS must not exceed CYWL_AGENT_MEMORY_MAX_ITEMS"
+            )
+        if settings.max_skill_instruction_characters > settings.max_skill_context_characters:
+            raise ConfigurationError(
+                "CYWL_AGENT_MAX_SKILL_INSTRUCTION_CHARACTERS must not exceed "
+                "CYWL_AGENT_MAX_SKILL_CONTEXT_CHARACTERS"
+            )
+        if settings.max_skill_resource_characters > settings.max_skill_context_characters:
+            raise ConfigurationError(
+                "CYWL_AGENT_MAX_SKILL_RESOURCE_CHARACTERS must not exceed "
+                "CYWL_AGENT_MAX_SKILL_CONTEXT_CHARACTERS"
             )
         return settings
 

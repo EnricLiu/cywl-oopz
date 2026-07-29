@@ -45,6 +45,7 @@ from .features.agent.service import AgentConversationService
 from .features.agent.skills.availability import SkillAvailabilityService
 from .features.agent.skills.catalog import ReloadableAgentSkillCatalog
 from .features.agent.skills.repository import SqlAlchemyAgentSkillRepository
+from .features.agent.skills.tools import LoadAgentSkillTool, ReadAgentSkillResourceTool
 from .features.agent.summarization import (
     PydanticAiThreadSummarizer,
     ThreadSummaryService,
@@ -116,6 +117,7 @@ from .integrations.web.agent_browser_mcp import AgentBrowserMcpGateway
 from .integrations.web.duckduckgo import DuckDuckGoSearchGateway
 from .settings import (
     MUSIC_AGENT_TOOLS,
+    SKILL_AGENT_TOOLS,
     WEB_BROWSER_INTERACTION_TOOLS,
     WEB_BROWSER_READ_TOOLS,
     WEB_SEARCH_AGENT_TOOLS,
@@ -183,6 +185,17 @@ class BotApplication:
         self.music: MusicRequestService | None = None
         self.music_playlists: MusicPlaylistService | None = None
         enabled_agent_tools = settings.agent.enabled_tools
+        if settings.agent.skills_enabled:
+            agent_tools.extend(
+                (
+                    LoadAgentSkillTool(),
+                    ReadAgentSkillResourceTool(),
+                )
+            )
+        else:
+            enabled_agent_tools = tuple(
+                name for name in enabled_agent_tools if name not in SKILL_AGENT_TOOLS
+            )
         if settings.music.enabled:
             self.music = MusicRequestService(
                 settings.music,

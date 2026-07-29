@@ -67,6 +67,8 @@ def test_app_settings_use_the_injected_oopz_credentials(monkeypatch) -> None:
         "add_music_playlist_track",
         "remove_music_playlist_track",
         "load_music_playlist",
+        "load_agent_skill",
+        "read_agent_skill_resource",
     )
     assert settings.agent.summary_enabled is True
     assert settings.agent.memory_enabled_by_default is True
@@ -75,6 +77,11 @@ def test_app_settings_use_the_injected_oopz_credentials(monkeypatch) -> None:
     assert settings.agent.skills_enabled is True
     assert settings.agent.skill_catalog_refresh_seconds == 30
     assert settings.agent.max_available_skills == 32
+    assert settings.agent.max_skill_activations == 3
+    assert settings.agent.max_skill_resources == 4
+    assert settings.agent.max_skill_instruction_characters == 12000
+    assert settings.agent.max_skill_resource_characters == 12000
+    assert settings.agent.max_skill_context_characters == 24000
     assert settings.music.enabled is False
     assert settings.web.search_enabled is True
     assert settings.web.search_safesearch is WebSearchSafeSearch.MODERATE
@@ -142,12 +149,22 @@ def test_agent_skill_catalog_settings_are_validated() -> None:
             "CYWL_AGENT_SKILLS_ENABLED": "false",
             "CYWL_AGENT_SKILL_CATALOG_REFRESH_SECONDS": "12.5",
             "CYWL_AGENT_MAX_AVAILABLE_SKILLS": "8",
+            "CYWL_AGENT_MAX_SKILL_ACTIVATIONS": "2",
+            "CYWL_AGENT_MAX_SKILL_RESOURCES": "3",
+            "CYWL_AGENT_MAX_SKILL_INSTRUCTION_CHARACTERS": "4000",
+            "CYWL_AGENT_MAX_SKILL_RESOURCE_CHARACTERS": "5000",
+            "CYWL_AGENT_MAX_SKILL_CONTEXT_CHARACTERS": "9000",
         }
     )
 
     assert settings.agent.skills_enabled is False
     assert settings.agent.skill_catalog_refresh_seconds == 12.5
     assert settings.agent.max_available_skills == 8
+    assert settings.agent.max_skill_activations == 2
+    assert settings.agent.max_skill_resources == 3
+    assert settings.agent.max_skill_instruction_characters == 4000
+    assert settings.agent.max_skill_resource_characters == 5000
+    assert settings.agent.max_skill_context_characters == 9000
 
     with pytest.raises(ConfigurationError, match="SKILL_CATALOG_REFRESH_SECONDS"):
         AppSettings.from_mapping(
@@ -173,6 +190,14 @@ def test_agent_summary_and_memory_limits_are_consistent() -> None:
             | {
                 "CYWL_AGENT_MEMORY_MAX_ITEMS": "2",
                 "CYWL_AGENT_MEMORY_CONTEXT_ITEMS": "3",
+            }
+        )
+    with pytest.raises(ConfigurationError, match="SKILL_INSTRUCTION_CHARACTERS"):
+        AppSettings.from_mapping(
+            valid_environment()
+            | {
+                "CYWL_AGENT_MAX_SKILL_INSTRUCTION_CHARACTERS": "100",
+                "CYWL_AGENT_MAX_SKILL_CONTEXT_CHARACTERS": "99",
             }
         )
 

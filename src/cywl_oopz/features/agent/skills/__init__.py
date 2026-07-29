@@ -8,6 +8,7 @@ from .catalog import (
 )
 from .models import AgentSkill, AgentSkillResource, SkillResourceKind
 from .ports import AgentSkillRepository
+from .scope import AgentSkillRunScope
 
 __all__ = (
     "AgentSkill",
@@ -15,6 +16,7 @@ __all__ = (
     "AgentSkillCatalogSnapshot",
     "AgentSkillRepository",
     "AgentSkillResource",
+    "AgentSkillRunScope",
     "ReloadableAgentSkillCatalog",
     "SkillAvailabilityService",
     "SkillResourceKind",

@@ -58,6 +58,10 @@ async def test_composition_root_routes_chat_and_provider_command_by_agent_flag(
     assert "tool" in {command.name for command in agent_application.commands.commands}
     assert "memory" in {command.name for command in agent_application.commands.commands}
     assert "skills" in {command.name for command in agent_application.commands.commands}
+    assert {
+        "load_agent_skill",
+        "read_agent_skill_resource",
+    }.issubset(agent_application.agent_tool_registry.names)
     assert legacy_application.chat is legacy_application.legacy_chat
     assert "provider" not in {command.name for command in legacy_application.commands.commands}
     assert "tools" not in {command.name for command in legacy_application.commands.commands}
@@ -113,6 +117,26 @@ async def test_composition_root_registers_music_tools_only_when_music_is_enabled
         await application.agent_engine.aclose()
         await application._provider.aclose()
         await application.database.close()
+
+
+@pytest.mark.asyncio
+async def test_composition_root_removes_skill_tools_when_skills_are_disabled(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(application_module, "OopzBot", FakeOopzBot)
+    application = BotApplication(settings("agent", CYWL_AGENT_SKILLS_ENABLED="false"))
+
+    assert {
+        "load_agent_skill",
+        "read_agent_skill_resource",
+    }.isdisjoint(application.agent_tool_registry.names)
+    assert "skills" not in {command.name for command in application.commands.commands}
+    skills_health = {check.name: check for check in application.health.snapshot()}["skills"]
+    assert skills_health.state.value == "disabled"
+
+    await application.agent_engine.aclose()
+    await application._provider.aclose()
+    await application.database.close()
 
 
 @pytest.mark.asyncio

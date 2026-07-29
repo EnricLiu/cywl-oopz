@@ -170,3 +170,55 @@ def test_web_page_request_uses_host_and_result_exposes_bounded_preview() -> None
     assert request.subject == "www.baidu.com"
     assert result.summary == "百度一下，你就知道"
     assert result.preview_lines == ("第一行", "第二行", "第三行")
+
+
+def test_skill_progress_shows_identity_and_size_without_loaded_content() -> None:
+    catalog = ToolProgressCatalog()
+
+    request = catalog.request("load_agent_skill", {"name": "web-research"})
+    loaded = catalog.result(
+        "load_agent_skill",
+        {
+            "ok": True,
+            "data": {
+                "skill": {
+                    "name": "web-research",
+                    "display_name": "网页研究",
+                    "version": "2",
+                },
+                "instructions": "must-not-be-shown",
+                "character_count": 3210,
+                "already_loaded": False,
+            },
+        },
+        succeeded=True,
+    )
+    resource = catalog.result(
+        "read_agent_skill_resource",
+        {
+            "ok": True,
+            "data": {
+                "resource": {
+                    "key": "source-guide",
+                    "display_name": "来源指南",
+                },
+                "content": "must-not-be-shown",
+                "character_count": 840,
+                "already_loaded": False,
+            },
+        },
+        succeeded=True,
+    )
+    failed = catalog.result(
+        "load_agent_skill",
+        {"ok": False, "error": "skill_context_limit"},
+        succeeded=False,
+    )
+
+    assert request.subject == "web-research"
+    assert loaded.subject == "网页研究"
+    assert loaded.summary == "v2 · 3.2k 字"
+    assert resource.subject == "来源指南"
+    assert resource.summary == "840 字"
+    assert failed.summary == "本轮技能内容已达上限"
+    assert "must-not-be-shown" not in repr((loaded, resource, failed))

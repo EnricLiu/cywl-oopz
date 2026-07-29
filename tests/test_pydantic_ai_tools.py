@@ -26,11 +26,23 @@ from cywl_oopz.features.agent.models import (
     ProviderProtocol,
 )
 from cywl_oopz.features.agent.pydantic_ai_engine import PydanticAiAgentEngine
+from cywl_oopz.features.agent.skills.catalog import AgentSkillCatalogSnapshot
+from cywl_oopz.features.agent.skills.models import (
+    AgentSkill,
+    AgentSkillResource,
+    SkillResourceKind,
+)
+from cywl_oopz.features.agent.skills.scope import AgentSkillRunScope
+from cywl_oopz.features.agent.skills.tools import (
+    LoadAgentSkillTool,
+    ReadAgentSkillResourceTool,
+)
 from cywl_oopz.features.agent.tools.models import (
     ToolCall,
     ToolDescriptor,
     ToolEffect,
     ToolExecutionContext,
+    ToolExecutionError,
     ToolExecutionResult,
     ToolExecutionStatus,
 )
@@ -328,6 +340,40 @@ class BrowserInteractionRuntime:
         )
 
 
+class SkillRuntime:
+    def __init__(self) -> None:
+        tools = (LoadAgentSkillTool(), ReadAgentSkillResourceTool())
+        self._tools = {tool.descriptor.name: tool for tool in tools}
+        self.calls: list[ToolCall] = []
+
+    def descriptors(self, names: tuple[str, ...]) -> tuple[ToolDescriptor, ...]:
+        return tuple(self._tools[name].descriptor for name in sorted(names))
+
+    async def execute(
+        self,
+        call: ToolCall,
+        context: ToolExecutionContext,
+    ) -> ToolExecutionResult:
+        self.calls.append(call)
+        tool = self._tools[call.name]
+        arguments = tool.descriptor.input_model.model_validate(dict(call.arguments))
+        try:
+            output = await tool.execute(context, arguments)
+        except ToolExecutionError as exc:
+            return ToolExecutionResult(
+                call.call_id,
+                call.name,
+                ToolExecutionStatus.FAILED,
+                error_code=exc.error_code,
+            )
+        return ToolExecutionResult(
+            call.call_id,
+            call.name,
+            ToolExecutionStatus.SUCCEEDED,
+            output.model_dump(mode="json"),
+        )
+
+
 class RecordingProgress:
     def __init__(self) -> None:
         self.events: list[ConversationProgressEvent] = []
@@ -358,6 +404,7 @@ def request(
     *,
     enabled_tools: tuple[str, ...],
     limits: AgentRunLimits | None = None,
+    skill_scope: AgentSkillRunScope | None = None,
 ) -> AgentRunRequest:
     key = ConversationKey("channel", "area", "channel", "person")
     return AgentRunRequest(
@@ -383,6 +430,7 @@ def request(
         context=(),
         enabled_tools=enabled_tools,
         limits=limits or AgentRunLimits(),
+        skill_scope=skill_scope,
     )
 
 
@@ -427,6 +475,111 @@ async def test_engine_runs_tool_loop_and_maps_provider_neutral_pairs() -> None:
         ProgressKind.TEXT_DELTA,
     ]
     assert progress.events[1].tool_display_name == "double"
+
+
+@pytest.mark.asyncio
+async def test_engine_loads_skill_and_resource_inside_one_agent_loop() -> None:
+    resource = AgentSkillResource(
+        id=uuid4(),
+        key="source-guide",
+        display_name="来源指南",
+        description="需要核对来源时读取。",
+        kind=SkillResourceKind.REFERENCE,
+        media_type="text/markdown",
+        content="Prefer primary sources.",
+        position=1,
+    )
+    skill = AgentSkill(
+        id=uuid4(),
+        name="web-research",
+        display_name="网页研究",
+        description="Research current facts.",
+        instructions="Search, read, and cite.",
+        version="1",
+        revision=1,
+        required_tools=frozenset(),
+        resources=(resource,),
+        metadata={},
+    )
+    snapshot = AgentSkillCatalogSnapshot.build(
+        (skill,),
+        generation=1,
+        registered_tools=frozenset(),
+        max_available_skills=8,
+    )
+    scope = AgentSkillRunScope(
+        snapshot,
+        (skill,),
+        max_activations=3,
+        max_resources=4,
+        max_instruction_characters=12_000,
+        max_resource_characters=12_000,
+        max_context_characters=24_000,
+    )
+    observed: list[object] = []
+
+    async def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        del info
+        returns = [
+            part
+            for message in messages
+            if isinstance(message, ModelRequest)
+            for part in message.parts
+            if isinstance(part, ToolReturnPart)
+        ]
+        observed.extend(part.content for part in returns[len(observed) :])
+        if not returns:
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        "load_agent_skill",
+                        {"name": skill.name},
+                        "call-load-skill",
+                    )
+                ]
+            )
+        if len(returns) == 1:
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        "read_agent_skill_resource",
+                        {
+                            "skill_name": skill.name,
+                            "resource_id": str(resource.id),
+                        },
+                        "call-read-resource",
+                    )
+                ]
+            )
+        return ModelResponse(parts=[TextPart("已按技能说明完成研究。")])
+
+    runtime = SkillRuntime()
+    progress = RecordingProgress()
+    engine = PydanticAiAgentEngine(
+        StaticRegistry(streaming_model(respond)),
+        runtime,
+    )
+    result = await engine.run(
+        request(
+            enabled_tools=(
+                "load_agent_skill",
+                "read_agent_skill_resource",
+            ),
+            skill_scope=scope,
+        ),
+        progress,
+    )
+
+    assert result.output == "已按技能说明完成研究。"
+    assert [call.name for call in runtime.calls] == [
+        "load_agent_skill",
+        "read_agent_skill_resource",
+    ]
+    assert observed[0]["data"]["instructions"] == skill.instructions
+    assert observed[1]["data"]["content"] == resource.content
+    assert scope.activation_count == 1
+    assert scope.resource_count == 1
+    assert [event.kind for event in progress.events].count(ProgressKind.TOOL_UPDATED) == 2
 
 
 @pytest.mark.asyncio

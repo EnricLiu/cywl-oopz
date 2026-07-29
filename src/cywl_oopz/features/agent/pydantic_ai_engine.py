@@ -272,6 +272,7 @@ class PydanticAiAgentEngine:
             identity=request.identity,
             limits=request.limits,
             enabled_tools=request.enabled_tools,
+            skill_scope=request.skill_scope,
         )
         dependencies = _ToolRunDependencies(
             runtime=self._tools,

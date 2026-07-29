@@ -1,0 +1,280 @@
+from __future__ import annotations
+
+import asyncio
+from dataclasses import replace
+from datetime import UTC, datetime
+from uuid import UUID, uuid4
+
+import pytest
+
+from cywl_oopz.features.agent.models import (
+    AgentIdentity,
+    AgentRunLimits,
+)
+from cywl_oopz.features.agent.skills.catalog import AgentSkillCatalogSnapshot
+from cywl_oopz.features.agent.skills.models import (
+    AgentSkill,
+    AgentSkillResource,
+    SkillResourceKind,
+)
+from cywl_oopz.features.agent.skills.scope import (
+    AgentSkillRunScope,
+    AgentSkillScopeError,
+)
+from cywl_oopz.features.agent.skills.tools import (
+    LoadAgentSkillTool,
+    ReadAgentSkillResourceTool,
+)
+from cywl_oopz.features.agent.tools.executor import ToolExecutor
+from cywl_oopz.features.agent.tools.models import (
+    ToolCall,
+    ToolExecution,
+    ToolExecutionClaim,
+    ToolExecutionContext,
+    ToolExecutionStatus,
+)
+from cywl_oopz.features.agent.tools.policy import ToolPolicy
+from cywl_oopz.features.agent.tools.registry import ToolRegistry
+from cywl_oopz.features.chat.models import ConversationKey
+
+
+class InMemoryExecutionRepository:
+    def __init__(self) -> None:
+        self.records: dict[tuple[UUID, str], ToolExecution] = {}
+
+    async def claim(self, execution: ToolExecution) -> ToolExecutionClaim:
+        key = (execution.run_id, execution.call_id)
+        existing = self.records.get(key)
+        if existing is not None:
+            return ToolExecutionClaim(existing, False)
+        self.records[key] = execution
+        return ToolExecutionClaim(execution, True)
+
+    async def finish(
+        self,
+        run_id: UUID,
+        call_id: str,
+        status: ToolExecutionStatus,
+        *,
+        output: dict[str, object] | None,
+        error_code: str,
+    ) -> ToolExecution:
+        key = (run_id, call_id)
+        execution = replace(
+            self.records[key],
+            status=status,
+            output_payload=output,
+            error_code=error_code,
+            finished_at=datetime.now(UTC),
+        )
+        self.records[key] = execution
+        return execution
+
+
+def make_skill(
+    name: str = "web-research",
+    *,
+    instructions: str = "Search, read, and cite.",
+    resource_content: str = "Prefer primary sources.",
+) -> AgentSkill:
+    resource = AgentSkillResource(
+        id=uuid4(),
+        key="source-guide",
+        display_name="来源指南",
+        description="需要判断来源质量时读取。",
+        kind=SkillResourceKind.REFERENCE,
+        media_type="text/markdown",
+        content=resource_content,
+        position=1,
+    )
+    return AgentSkill(
+        id=uuid4(),
+        name=name,
+        display_name="网页研究" if name == "web-research" else "音乐策划",
+        description="Complete one domain workflow.",
+        instructions=instructions,
+        version="1",
+        revision=1,
+        required_tools=frozenset(),
+        resources=(resource,),
+        metadata={},
+    )
+
+
+def make_scope(
+    skills: tuple[AgentSkill, ...],
+    *,
+    available: tuple[AgentSkill, ...] | None = None,
+    max_activations: int = 3,
+    max_resources: int = 4,
+    max_instruction_characters: int = 12_000,
+    max_resource_characters: int = 12_000,
+    max_context_characters: int = 24_000,
+) -> AgentSkillRunScope:
+    snapshot = AgentSkillCatalogSnapshot.build(
+        skills,
+        generation=1,
+        registered_tools=frozenset(),
+        max_available_skills=8,
+    )
+    return AgentSkillRunScope(
+        snapshot,
+        skills if available is None else available,
+        max_activations=max_activations,
+        max_resources=max_resources,
+        max_instruction_characters=max_instruction_characters,
+        max_resource_characters=max_resource_characters,
+        max_context_characters=max_context_characters,
+    )
+
+
+def execution_context(
+    scope: AgentSkillRunScope | None,
+) -> ToolExecutionContext:
+    return ToolExecutionContext(
+        run_id=uuid4(),
+        identity=AgentIdentity(
+            "person",
+            ConversationKey("channel", "area", "channel", "person"),
+        ),
+        limits=AgentRunLimits(),
+        enabled_tools=("load_agent_skill", "read_agent_skill_resource"),
+        skill_scope=scope,
+    )
+
+
+@pytest.mark.asyncio
+async def test_skill_scope_charges_parallel_duplicate_activation_once() -> None:
+    skill = make_skill()
+    scope = make_scope((skill,))
+
+    results = await asyncio.gather(*(scope.load(skill.name) for _ in range(20)))
+
+    assert sum(not result.already_loaded for result in results) == 1
+    assert sum(result.returned_characters for result in results) == len(skill.instructions)
+    assert scope.activation_count == 1
+    assert scope.returned_characters == len(skill.instructions)
+
+
+@pytest.mark.asyncio
+async def test_skill_scope_enforces_visibility_activation_resource_and_context_limits() -> None:
+    web = make_skill(instructions="12345", resource_content="abcdef")
+    music = make_skill("music-curator")
+    scope = make_scope(
+        (web, music),
+        available=(web,),
+        max_activations=1,
+        max_resources=1,
+        max_instruction_characters=5,
+        max_resource_characters=6,
+        max_context_characters=11,
+    )
+
+    with pytest.raises(AgentSkillScopeError, match="skill_not_found"):
+        await scope.load("missing")
+    with pytest.raises(AgentSkillScopeError, match="skill_not_available"):
+        await scope.load("music-curator")
+    with pytest.raises(AgentSkillScopeError, match="skill_not_activated"):
+        await scope.read_resource(web.name, web.resources[0].id)
+
+    activated = await scope.load(web.name)
+    loaded = await scope.read_resource(web.name, web.resources[0].id)
+    repeated = await scope.read_resource(web.name, web.resources[0].id)
+
+    assert activated.returned_characters == 5
+    assert loaded.returned_characters == 6
+    assert repeated.already_loaded is True
+    assert repeated.returned_characters == 0
+    assert scope.returned_characters == 11
+
+
+@pytest.mark.asyncio
+async def test_skill_scope_rejects_single_item_and_total_character_overflow() -> None:
+    oversized = make_skill(instructions="123456")
+    single_limit = make_scope(
+        (oversized,),
+        max_instruction_characters=5,
+    )
+    with pytest.raises(AgentSkillScopeError, match="skill_context_limit"):
+        await single_limit.load(oversized.name)
+
+    total = make_skill(instructions="12345", resource_content="abcdef")
+    total_limit = make_scope(
+        (total,),
+        max_instruction_characters=5,
+        max_resource_characters=6,
+        max_context_characters=10,
+    )
+    await total_limit.load(total.name)
+    with pytest.raises(AgentSkillScopeError, match="skill_context_limit"):
+        await total_limit.read_resource(total.name, total.resources[0].id)
+
+
+@pytest.mark.asyncio
+async def test_skill_scope_enforces_distinct_activation_and_resource_counts() -> None:
+    web = make_skill()
+    music = make_skill("music-curator")
+    activation_scope = make_scope(
+        (web, music),
+        max_activations=1,
+    )
+    await activation_scope.load(web.name)
+    with pytest.raises(AgentSkillScopeError, match="skill_activation_limit"):
+        await activation_scope.load(music.name)
+
+    second_resource = replace(
+        web.resources[0],
+        id=uuid4(),
+        key="second-guide",
+        position=2,
+    )
+    two_resources = replace(web, resources=(web.resources[0], second_resource))
+    resource_scope = make_scope(
+        (two_resources,),
+        max_resources=1,
+    )
+    await resource_scope.load(two_resources.name)
+    await resource_scope.read_resource(two_resources.name, two_resources.resources[0].id)
+    with pytest.raises(AgentSkillScopeError, match="skill_resource_limit"):
+        await resource_scope.read_resource(
+            two_resources.name,
+            two_resources.resources[1].id,
+        )
+
+
+@pytest.mark.asyncio
+async def test_skill_tools_execute_through_registry_policy_and_persist_stable_errors() -> None:
+    skill = make_skill()
+    scope = make_scope((skill,))
+    repository = InMemoryExecutionRepository()
+    executor = ToolExecutor(
+        ToolRegistry((LoadAgentSkillTool(), ReadAgentSkillResourceTool())),
+        ToolPolicy(),
+        repository,
+    )
+    context = execution_context(scope)
+
+    loaded = await executor.execute(
+        ToolCall("load", "load_agent_skill", {"name": skill.name}),
+        context,
+    )
+    resource = await executor.execute(
+        ToolCall(
+            "resource",
+            "read_agent_skill_resource",
+            {
+                "skill_name": skill.name,
+                "resource_id": str(skill.resources[0].id),
+            },
+        ),
+        context,
+    )
+    unavailable = await executor.execute(
+        ToolCall("unavailable", "load_agent_skill", {"name": skill.name}),
+        execution_context(None),
+    )
+
+    assert loaded.model_payload()["data"]["instructions"] == skill.instructions
+    assert resource.model_payload()["data"]["content"] == skill.resources[0].content
+    assert unavailable.error_code == "skill_catalog_unavailable"
+    assert repository.records[(context.run_id, "load")].status is ToolExecutionStatus.SUCCEEDED

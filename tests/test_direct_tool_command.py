@@ -20,6 +20,7 @@ from cywl_oopz.features.agent.models import (
     ModelSelection,
     ProviderProtocol,
 )
+from cywl_oopz.features.agent.skills.tools import LoadAgentSkillTool
 from cywl_oopz.features.agent.tools.models import (
     ToolDescriptor,
     ToolExecutionContext,
@@ -217,6 +218,31 @@ async def test_tool_command_honors_tool_availability() -> None:
         "error": "tool_not_enabled",
     }
     assert tool.received == ""
+
+
+@pytest.mark.asyncio
+async def test_direct_skill_loader_is_explicitly_unavailable_without_run_scope() -> None:
+    tool = LoadAgentSkillTool()
+    availability = FakeAvailabilityService(("load_agent_skill",))
+    service = DirectToolService(
+        AgentSettings.from_mapping({"CYWL_AGENT_MODE": "agent"}),
+        ToolRegistry((tool,)),
+        availability,  # type: ignore[arg-type]
+        FakeSelectionService(),  # type: ignore[arg-type]
+    )
+    router = CommandRouter("/")
+    router.register(ToolCommand(service, "/"))
+    context = FakeContext()
+
+    await router.dispatch(
+        FakeMessage('/tool load_agent_skill {"name":"web-research"}'),  # type: ignore[arg-type]
+        context,  # type: ignore[arg-type]
+    )
+
+    assert json.loads(context.replies[-1]) == {
+        "ok": False,
+        "error": "skill_catalog_unavailable",
+    }
 
 
 def test_tool_command_always_renders_valid_bounded_json() -> None:

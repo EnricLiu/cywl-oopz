@@ -7,13 +7,16 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from types import MappingProxyType
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 from uuid import UUID
 
 from pydantic import BaseModel
 
 from cywl_oopz.core.lifecycle import ToolEffect, ToolExecutionStatus
 from cywl_oopz.features.agent.models import AgentIdentity, AgentRunLimits
+
+if TYPE_CHECKING:
+    from cywl_oopz.features.agent.skills.scope import AgentSkillRunScope
 
 _TOOL_NAME = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
 _WHITESPACE = re.compile(r"\s+")
@@ -125,6 +128,11 @@ class ToolExecutionContext:
     enabled_tools: tuple[str, ...]
     model_requests_used: int = 0
     tool_calls_used: int = 0
+    skill_scope: AgentSkillRunScope | None = field(
+        default=None,
+        compare=False,
+        repr=False,
+    )
     progress: ToolProgressReporter | None = field(
         default=None,
         compare=False,

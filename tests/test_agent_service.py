@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -24,6 +24,9 @@ from cywl_oopz.features.agent.models import (
 )
 from cywl_oopz.features.agent.selection import ProviderSelectionService
 from cywl_oopz.features.agent.service import AgentConversationService
+from cywl_oopz.features.agent.skills.availability import SkillAvailabilityService
+from cywl_oopz.features.agent.skills.catalog import ReloadableAgentSkillCatalog
+from cywl_oopz.features.agent.skills.models import AgentSkill
 from cywl_oopz.features.chat.models import ConversationKey
 from cywl_oopz.features.chat.progress import ConversationProgressEvent, ProgressKind
 from cywl_oopz.settings import AgentMode, AgentSettings
@@ -230,6 +233,23 @@ class FailingEngine(RecordingEngine):
         raise ProviderError("provider unavailable")
 
 
+class InMemorySkillRepository:
+    def __init__(self, skills: tuple[AgentSkill, ...]) -> None:
+        self.skills = skills
+
+    async def generation(self) -> int:
+        return 1
+
+    async def load_enabled(self) -> tuple[AgentSkill, ...]:
+        return self.skills
+
+
+class StaticToolAvailability:
+    async def names(self, identity, model) -> tuple[str, ...]:
+        del identity, model
+        return ("load_agent_skill", "read_agent_skill_resource")
+
+
 def agent_settings() -> AgentSettings:
     return AgentSettings(
         mode=AgentMode.AGENT,
@@ -261,7 +281,14 @@ def agent_settings() -> AgentSettings:
     )
 
 
-async def build_service(chat_settings, engine=None):
+async def build_service(
+    chat_settings,
+    engine=None,
+    *,
+    tool_availability=None,
+    skill_catalog=None,
+    skill_availability=None,
+):
     catalog = ReloadableProviderCatalog(InMemoryCatalogRepository())
     await catalog.reload()
     threads = InMemoryThreads()
@@ -278,6 +305,9 @@ async def build_service(chat_settings, engine=None):
         threads,
         runs,
         messages,
+        tool_availability,
+        skill_catalog,
+        skill_availability,
     )
     return service, threads, selections, runs, messages
 
@@ -317,6 +347,73 @@ async def test_agent_service_persists_turns_and_reuses_provider_neutral_history(
         "second answer",
     ]
     assert all(state.status is AgentRunStatus.SUCCEEDED for state in runs.states.values())
+
+
+@pytest.mark.asyncio
+async def test_agent_service_pins_skill_scope_and_hides_loaders_for_empty_catalog(
+    chat_settings,
+) -> None:
+    skill = AgentSkill(
+        id=uuid4(),
+        name="web-research",
+        display_name="网页研究",
+        description="Research current facts.",
+        instructions="Search and read sources.",
+        version="1",
+        revision=1,
+        required_tools=frozenset(),
+        resources=(),
+        metadata={},
+    )
+    catalog = ReloadableAgentSkillCatalog(
+        InMemorySkillRepository((skill,)),
+        registered_tools=("load_agent_skill", "read_agent_skill_resource"),
+        refresh_seconds=30,
+        max_available_skills=8,
+    )
+    await catalog.reload()
+    engine = RecordingEngine()
+    service = (
+        await build_service(
+            chat_settings,
+            engine,
+            tool_availability=StaticToolAvailability(),
+            skill_catalog=catalog,
+            skill_availability=SkillAvailabilityService(),
+        )
+    )[0]
+    await service.ask(key(), "research this")
+
+    assert engine.requests[0].enabled_tools == (
+        "load_agent_skill",
+        "read_agent_skill_resource",
+    )
+    assert engine.requests[0].skill_scope is not None
+    assert [item.name for item in engine.requests[0].skill_scope.available_skills] == [
+        "web-research"
+    ]
+
+    empty_catalog = ReloadableAgentSkillCatalog(
+        InMemorySkillRepository(()),
+        registered_tools=("load_agent_skill", "read_agent_skill_resource"),
+        refresh_seconds=30,
+        max_available_skills=8,
+    )
+    await empty_catalog.reload()
+    empty_engine = RecordingEngine()
+    empty_service = (
+        await build_service(
+            chat_settings,
+            empty_engine,
+            tool_availability=StaticToolAvailability(),
+            skill_catalog=empty_catalog,
+            skill_availability=SkillAvailabilityService(),
+        )
+    )[0]
+    await empty_service.ask(key("other"), "ordinary chat")
+
+    assert empty_engine.requests[0].enabled_tools == ()
+    assert empty_engine.requests[0].skill_scope is None
 
 
 @pytest.mark.asyncio

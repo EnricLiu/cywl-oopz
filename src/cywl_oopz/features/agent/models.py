@@ -7,7 +7,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 from uuid import UUID
 
@@ -17,6 +17,9 @@ from cywl_oopz.core.lifecycle import (
     ModelSelectionSource,
 )
 from cywl_oopz.features.chat.models import ConversationKey
+
+if TYPE_CHECKING:
+    from cywl_oopz.features.agent.skills.scope import AgentSkillRunScope
 
 
 class ProviderProtocol(StrEnum):
@@ -203,6 +206,11 @@ class AgentRunRequest:
     context: tuple[AgentMessage, ...]
     enabled_tools: tuple[str, ...]
     limits: AgentRunLimits
+    skill_scope: AgentSkillRunScope | None = field(
+        default=None,
+        compare=False,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         if not self.prompt.strip():

@@ -307,6 +307,51 @@ class MusicProgressProjector(_ProjectionSupport):
         return ToolProgressPresentation(summary="调用完成")
 
 
+class SkillProgressProjector(_ProjectionSupport):
+    """Present Skill metadata and character counts without exposing loaded text."""
+
+    def request(
+        self,
+        tool_name: str,
+        arguments: Mapping[str, Any],
+    ) -> ToolProgressPresentation:
+        name = arguments.get("name") if tool_name == "load_agent_skill" else None
+        name = name or arguments.get("skill_name")
+        return ToolProgressPresentation(subject=self.scalar(name))
+
+    def result(
+        self,
+        tool_name: str,
+        values: Mapping[str, Any],
+    ) -> ToolProgressPresentation:
+        skill = values.get("skill")
+        skill_values = skill if isinstance(skill, Mapping) else {}
+        repeated = values.get("already_loaded") is True
+        characters = values.get("character_count")
+        character_count = characters if isinstance(characters, int) else 0
+        if tool_name == "load_agent_skill":
+            subject = self.scalar(skill_values.get("display_name") or skill_values.get("name"))
+            version = self.scalar(skill_values.get("version"), limit=32)
+            summary = (
+                f"v{version} · 已加载"
+                if repeated
+                else f"v{version} · {self._characters(character_count)}"
+            )
+            return ToolProgressPresentation(subject=subject, summary=summary)
+
+        resource = values.get("resource")
+        resource_values = resource if isinstance(resource, Mapping) else {}
+        subject = self.scalar(resource_values.get("display_name") or resource_values.get("key"))
+        summary = "已读取" if repeated else self._characters(character_count)
+        return ToolProgressPresentation(subject=subject, summary=summary)
+
+    @staticmethod
+    def _characters(value: int) -> str:
+        if value >= 1000:
+            return f"{value / 1000:.1f}k 字"
+        return f"{value} 字"
+
+
 class GenericToolProgressProjector(_ProjectionSupport):
     """Conservative fallback that never exposes arbitrary result payloads."""
 
@@ -375,6 +420,15 @@ class ToolProgressCatalog:
         "music_playback_failed": "音乐播放操作失败",
         "music_queue_full": "播放队列已满",
         "music_voice_channel_required": "请先加入语音频道",
+        "skill_activation_limit": "本轮加载的技能已达上限",
+        "skill_catalog_unavailable": "技能目录暂不可用",
+        "skill_context_limit": "本轮技能内容已达上限",
+        "skill_load_failed": "技能加载失败",
+        "skill_not_activated": "请先加载对应技能",
+        "skill_not_available": "当前对话不能使用这个技能",
+        "skill_not_found": "没有找到这个技能",
+        "skill_resource_limit": "本轮读取的技能资料已达上限",
+        "skill_resource_not_found": "没有找到这份技能资料",
         "browser_failed": "浏览器操作失败",
         "tool_failed": "工具执行失败",
         "tool_not_enabled": "当前频道未启用此工具",
@@ -391,6 +445,7 @@ class ToolProgressCatalog:
         self._web_search = WebSearchProgressProjector()
         self._browser = BrowserProgressProjector()
         self._music = MusicProgressProjector()
+        self._skills = SkillProgressProjector()
         self._generic = GenericToolProgressProjector()
 
     def request(self, tool_name: str, arguments: object) -> ToolProgressPresentation:
@@ -423,6 +478,8 @@ class ToolProgressCatalog:
             return self._browser
         if tool_name.endswith("_music") or "music_" in tool_name:
             return self._music
+        if tool_name in {"load_agent_skill", "read_agent_skill_resource"}:
+            return self._skills
         return self._generic
 
     @staticmethod

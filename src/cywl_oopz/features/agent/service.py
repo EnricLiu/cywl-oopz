@@ -60,6 +60,8 @@ from .selection import ProviderSelectionService
 from .skills.availability import SkillAvailabilityService
 from .skills.catalog import ReloadableAgentSkillCatalog
 from .skills.models import AgentSkill
+from .skills.scope import AgentSkillRunScope
+from .skills.tools import SKILL_TOOL_NAMES
 from .summarization import ThreadSummaryService
 from .tools.policy import AvailableTool, ToolAvailabilityService
 
@@ -167,12 +169,29 @@ class AgentConversationService:
                     else ()
                 )
                 available_skills: tuple[AgentSkill, ...] = ()
+                skill_scope: AgentSkillRunScope | None = None
                 if self._skill_catalog is not None and self._skill_availability is not None:
                     await self._skill_catalog.refresh_if_stale()
                     available_skills = self._skill_availability.resolve(
                         self._skill_catalog.snapshot,
                         enabled_tools,
                     )
+                    if available_skills:
+                        skill_scope = AgentSkillRunScope(
+                            self._skill_catalog.snapshot,
+                            available_skills,
+                            max_activations=self._settings.max_skill_activations,
+                            max_resources=self._settings.max_skill_resources,
+                            max_instruction_characters=(
+                                self._settings.max_skill_instruction_characters
+                            ),
+                            max_resource_characters=(self._settings.max_skill_resource_characters),
+                            max_context_characters=self._settings.max_skill_context_characters,
+                        )
+                    else:
+                        enabled_tools = tuple(
+                            name for name in enabled_tools if name not in SKILL_TOOL_NAMES
+                        )
                 context = await self._context_builder.build(thread, identity)
                 run_id = uuid4()
                 state = AgentRunState(run_id).start(now)
@@ -203,6 +222,7 @@ class AgentConversationService:
                     context=context,
                     enabled_tools=enabled_tools,
                     limits=limits,
+                    skill_scope=skill_scope,
                 )
                 logger.info(
                     "Agent run started: run=%s conversation=%s model=%s/%s "
