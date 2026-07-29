@@ -452,6 +452,8 @@ class ToolProgressCatalog:
         "skill_not_activated": "请先加载对应技能",
         "skill_not_available": "当前对话不能使用这个技能",
         "skill_not_found": "没有找到这个技能",
+        "skill_revision_changed": "技能已被修改，请在下一轮重新加载",
+        "skill_selector_ambiguous": "存在同名技能，请使用目录中的技能 ID",
         "skill_resource_limit": "本轮读取的技能资料已达上限",
         "skill_resource_not_found": "没有找到这份技能资料",
         "browser_failed": "浏览器操作失败",

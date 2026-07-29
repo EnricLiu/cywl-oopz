@@ -26,10 +26,13 @@ from cywl_oopz.features.agent.models import (
     ProviderProtocol,
 )
 from cywl_oopz.features.agent.pydantic_ai_engine import PydanticAiAgentEngine
-from cywl_oopz.features.agent.skills.catalog import AgentSkillCatalogSnapshot
 from cywl_oopz.features.agent.skills.models import (
     AgentSkill,
+    AgentSkillBundle,
+    AgentSkillDiscovery,
     AgentSkillResource,
+    AgentSkillResourceManifest,
+    SkillAccessKind,
     SkillResourceKind,
 )
 from cywl_oopz.features.agent.skills.scope import AgentSkillRunScope
@@ -539,15 +542,61 @@ async def test_engine_loads_skill_and_resource_inside_one_agent_loop() -> None:
         resources=(resource,),
         metadata={},
     )
-    snapshot = AgentSkillCatalogSnapshot.build(
-        (skill,),
-        generation=1,
-        registered_tools=frozenset(),
-        max_available_skills=8,
+    discovery = AgentSkillDiscovery(
+        id=skill.id,
+        name=skill.name,
+        display_name=skill.display_name,
+        description=skill.description,
+        version=skill.version,
+        revision=skill.revision,
+        required_tools=skill.required_tools,
+        access=SkillAccessKind.BUILTIN,
     )
+    bundle = AgentSkillBundle(
+        discovery=discovery,
+        instructions=skill.instructions,
+        resources=(
+            AgentSkillResourceManifest(
+                id=resource.id,
+                key=resource.key,
+                display_name=resource.display_name,
+                description=resource.description,
+                kind=resource.kind,
+                media_type=resource.media_type,
+                position=resource.position,
+            ),
+        ),
+    )
+
+    class SkillRepository:
+        async def load_accessible_bundle(
+            self,
+            person_id,
+            skill_id,
+            revision,
+        ):
+            assert (person_id, skill_id, revision) == ("person", skill.id, 1)
+            return bundle
+
+        async def read_accessible_resource(
+            self,
+            person_id,
+            skill_id,
+            resource_id,
+            revision,
+        ):
+            assert (person_id, skill_id, resource_id, revision) == (
+                "person",
+                skill.id,
+                resource.id,
+                1,
+            )
+            return resource
+
     scope = AgentSkillRunScope(
-        snapshot,
-        (skill,),
+        SkillRepository(),
+        "person",
+        (discovery,),
         max_activations=3,
         max_resources=4,
         max_instruction_characters=12_000,
@@ -571,7 +620,7 @@ async def test_engine_loads_skill_and_resource_inside_one_agent_loop() -> None:
                 parts=[
                     ToolCallPart(
                         "load_agent_skill",
-                        {"name": skill.name},
+                        {"skill_id": str(skill.id)},
                         "call-load-skill",
                     )
                 ]
@@ -582,7 +631,7 @@ async def test_engine_loads_skill_and_resource_inside_one_agent_loop() -> None:
                     ToolCallPart(
                         "read_agent_skill_resource",
                         {
-                            "skill_name": skill.name,
+                            "skill_id": str(skill.id),
                             "resource_id": str(resource.id),
                         },
                         "call-read-resource",

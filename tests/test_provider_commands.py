@@ -21,7 +21,10 @@ from cywl_oopz.features.agent.models import (
     ProviderProtocol,
     SelectableModel,
 )
-from cywl_oopz.features.agent.skills.models import AgentSkill
+from cywl_oopz.features.agent.skills.models import (
+    AgentSkillDiscovery,
+    SkillAccessKind,
+)
 from cywl_oopz.features.agent.tools.models import ToolEffect
 from cywl_oopz.features.agent.tools.policy import AvailableTool
 from cywl_oopz.features.chat.tasks import ChatTaskSupervisor
@@ -93,20 +96,18 @@ class FakeProviderService:
             ),
         )
 
-    async def available_skills(self, key) -> tuple[AgentSkill, ...]:
+    async def available_skills(self, key) -> tuple[AgentSkillDiscovery, ...]:
         del key
         return (
-            AgentSkill(
+            AgentSkillDiscovery(
                 id=uuid4(),
                 name="web-research",
                 display_name="网页研究",
                 description="搜索并阅读关键来源。",
-                instructions="先搜索，再阅读。",
                 version="1",
                 revision=2,
                 required_tools=frozenset({"search_web"}),
-                resources=(),
-                metadata={},
+                access=SkillAccessKind.OWNED,
             ),
         )
 
@@ -238,6 +239,6 @@ async def test_skills_command_lists_safe_discovery_metadata_only() -> None:
         context,
     )
 
-    assert "**网页研究** web-research · v1" in context.replies[0]
+    assert "**网页研究** web-research · 我的 · v1" in context.replies[0]
     assert "搜索并阅读关键来源" in context.replies[0]
     assert "先搜索，再阅读" not in context.replies[0]

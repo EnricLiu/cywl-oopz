@@ -43,9 +43,11 @@ from cywl_oopz.features.agent.skills.catalog import ReloadableAgentSkillCatalog
 from cywl_oopz.features.agent.skills.errors import (
     AgentSkillConflictError,
     AgentSkillNotFoundError,
+    AgentSkillRevisionConflictError,
 )
 from cywl_oopz.features.agent.skills.models import (
     AgentSkill,
+    SkillAccessKind,
     SkillOwnershipKind,
     SkillResourceKind,
     SkillShareStatus,
@@ -378,6 +380,47 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
         assert first_personal.id in {
             skill.id for skill in await skill_repository.load_accessible("recipient")
         }
+        recipient_discovery = await skill_repository.list_accessible("recipient")
+        discovery_by_id = {item.id: item for item in recipient_discovery}
+        assert discovery_by_id[first_personal.id].access is SkillAccessKind.SHARED
+        assert discovery_by_id[loaded_skill.id].access is SkillAccessKind.BUILTIN
+        shared_bundle = await skill_repository.load_accessible_bundle(
+            "recipient",
+            first_personal.id,
+            first_personal.revision,
+        )
+        assert shared_bundle is not None
+        assert shared_bundle.discovery.access is SkillAccessKind.SHARED
+        assert shared_bundle.instructions == first_personal.instructions
+        assert shared_bundle.resources == ()
+        builtin_bundle = await skill_repository.load_accessible_bundle(
+            "recipient",
+            loaded_skill.id,
+            loaded_skill.revision,
+        )
+        assert builtin_bundle is not None
+        assert builtin_bundle.resources[0].id == loaded_skill.resources[0].id
+        builtin_resource = await skill_repository.read_accessible_resource(
+            "recipient",
+            loaded_skill.id,
+            loaded_skill.resources[0].id,
+            loaded_skill.revision,
+        )
+        assert builtin_resource == loaded_skill.resources[0]
+        with pytest.raises(AgentSkillRevisionConflictError):
+            await skill_repository.load_accessible_bundle(
+                "recipient",
+                first_personal.id,
+                first_personal.revision + 1,
+            )
+        assert (
+            await skill_repository.load_accessible_bundle(
+                "unrelated",
+                first_personal.id,
+                first_personal.revision,
+            )
+            is None
+        )
         assert await skill_repository.revoke("owner-two", invitation.id) is False
         assert await skill_repository.revoke("owner-one", invitation.id) is True
         assert first_personal.id not in {

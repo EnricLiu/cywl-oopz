@@ -54,6 +54,19 @@ def skill(*, resources: tuple[AgentSkillResource, ...] = ()) -> AgentSkill:
     )
 
 
+def discovery_of(value: AgentSkill) -> AgentSkillDiscovery:
+    return AgentSkillDiscovery(
+        id=value.id,
+        name=value.name,
+        display_name=value.display_name,
+        description=value.description,
+        version=value.version,
+        revision=value.revision,
+        required_tools=value.required_tools,
+        access=SkillAccessKind.BUILTIN,
+    )
+
+
 class FakeSkillRepository:
     def __init__(self, skills: tuple[AgentSkill, ...], generation: int = 1) -> None:
         self.skills = skills
@@ -304,20 +317,15 @@ async def test_reloadable_skill_catalog_retains_last_snapshot_on_refresh_failure
 
 
 def test_skill_availability_requires_loader_and_every_declared_tool() -> None:
-    snapshot = AgentSkillCatalogSnapshot.build(
-        (skill(),),
-        generation=1,
-        registered_tools=frozenset({"search_web", "read_web_page"}),
-        max_available_skills=8,
-    )
+    discoveries = (discovery_of(skill()),)
     availability = SkillAvailabilityService()
 
-    assert availability.resolve(snapshot, ("search_web", "read_web_page")) == ()
-    assert availability.resolve(snapshot, ("load_agent_skill", "search_web")) == ()
+    assert availability.resolve(discoveries, ("search_web", "read_web_page")) == ()
+    assert availability.resolve(discoveries, ("load_agent_skill", "search_web")) == ()
     assert [
         item.name
         for item in availability.resolve(
-            snapshot,
+            discoveries,
             ("load_agent_skill", "search_web", "read_web_page"),
         )
     ] == ["web-research"]
@@ -330,21 +338,30 @@ def test_known_tool_dependency_is_valid_but_does_not_grant_runtime_availability(
         display_name="音乐策划",
         required_tools=frozenset({"list_music_playlists"}),
     )
-    snapshot = AgentSkillCatalogSnapshot.build(
-        (music,),
-        generation=1,
-        registered_tools=frozenset({"list_music_playlists"}),
-        max_available_skills=8,
-    )
-
-    assert snapshot.diagnostics == ()
+    discoveries = (discovery_of(music),)
     assert (
         SkillAvailabilityService().resolve(
-            snapshot,
+            discoveries,
             ("load_agent_skill",),
         )
         == ()
     )
+
+
+def test_skill_availability_rejects_an_oversized_user_library() -> None:
+    first = discovery_of(skill())
+    second = replace(
+        first,
+        id=uuid4(),
+        name="music-curator",
+        display_name="音乐策划",
+    )
+
+    with pytest.raises(AgentSkillCatalogCapacityError):
+        SkillAvailabilityService(max_available_skills=1).resolve(
+            (first, second),
+            ("load_agent_skill", "search_web", "read_web_page"),
+        )
 
 
 @pytest.mark.parametrize(

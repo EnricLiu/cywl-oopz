@@ -11,10 +11,14 @@ from cywl_oopz.features.agent.models import (
     AgentIdentity,
     AgentRunLimits,
 )
-from cywl_oopz.features.agent.skills.catalog import AgentSkillCatalogSnapshot
+from cywl_oopz.features.agent.skills.errors import AgentSkillRevisionConflictError
 from cywl_oopz.features.agent.skills.models import (
     AgentSkill,
+    AgentSkillBundle,
+    AgentSkillDiscovery,
     AgentSkillResource,
+    AgentSkillResourceManifest,
+    SkillAccessKind,
     SkillResourceKind,
 )
 from cywl_oopz.features.agent.skills.scope import (
@@ -71,6 +75,66 @@ class InMemoryExecutionRepository:
         return execution
 
 
+class InMemorySkillReadRepository:
+    def __init__(self, skills: tuple[AgentSkill, ...]) -> None:
+        self.skills = {skill.id: skill for skill in skills}
+        self.bundle_reads = 0
+        self.resource_reads = 0
+
+    async def list_accessible(self, person_id: str) -> tuple[AgentSkillDiscovery, ...]:
+        del person_id
+        return tuple(_discovery(skill) for skill in self.skills.values())
+
+    async def load_accessible_bundle(
+        self,
+        person_id: str,
+        skill_id: UUID,
+        revision: int,
+    ) -> AgentSkillBundle | None:
+        del person_id
+        self.bundle_reads += 1
+        skill = self.skills.get(skill_id)
+        if skill is None:
+            return None
+        if skill.revision != revision:
+            raise AgentSkillRevisionConflictError("changed")
+        return AgentSkillBundle(
+            discovery=_discovery(skill),
+            instructions=skill.instructions,
+            resources=tuple(
+                AgentSkillResourceManifest(
+                    id=resource.id,
+                    key=resource.key,
+                    display_name=resource.display_name,
+                    description=resource.description,
+                    kind=resource.kind,
+                    media_type=resource.media_type,
+                    position=resource.position,
+                )
+                for resource in skill.resources
+            ),
+        )
+
+    async def read_accessible_resource(
+        self,
+        person_id: str,
+        skill_id: UUID,
+        resource_id: UUID,
+        revision: int,
+    ) -> AgentSkillResource | None:
+        del person_id
+        self.resource_reads += 1
+        skill = self.skills.get(skill_id)
+        if skill is None:
+            return None
+        if skill.revision != revision:
+            raise AgentSkillRevisionConflictError("changed")
+        return next(
+            (resource for resource in skill.resources if resource.id == resource_id),
+            None,
+        )
+
+
 def make_skill(
     name: str = "web-research",
     *,
@@ -105,21 +169,18 @@ def make_scope(
     skills: tuple[AgentSkill, ...],
     *,
     available: tuple[AgentSkill, ...] | None = None,
+    repository: InMemorySkillReadRepository | None = None,
     max_activations: int = 3,
     max_resources: int = 4,
     max_instruction_characters: int = 12_000,
     max_resource_characters: int = 12_000,
     max_context_characters: int = 24_000,
 ) -> AgentSkillRunScope:
-    snapshot = AgentSkillCatalogSnapshot.build(
-        skills,
-        generation=1,
-        registered_tools=frozenset(),
-        max_available_skills=8,
-    )
+    repository = repository or InMemorySkillReadRepository(skills)
     return AgentSkillRunScope(
-        snapshot,
-        skills if available is None else available,
+        repository,
+        "person",
+        tuple(_discovery(skill) for skill in (skills if available is None else available)),
         max_activations=max_activations,
         max_resources=max_resources,
         max_instruction_characters=max_instruction_characters,
@@ -148,7 +209,7 @@ async def test_skill_scope_charges_parallel_duplicate_activation_once() -> None:
     skill = make_skill()
     scope = make_scope((skill,))
 
-    results = await asyncio.gather(*(scope.load(skill.name) for _ in range(20)))
+    results = await asyncio.gather(*(scope.load(skill.id) for _ in range(20)))
 
     assert sum(not result.already_loaded for result in results) == 1
     assert sum(result.returned_characters for result in results) == len(skill.instructions)
@@ -170,18 +231,18 @@ async def test_skill_scope_enforces_visibility_activation_resource_and_context_l
         max_context_characters=11,
     )
 
-    with pytest.raises(AgentSkillScopeError, match="skill_not_found"):
-        await scope.load("missing")
     with pytest.raises(AgentSkillScopeError, match="skill_not_available"):
-        await scope.load("music-curator")
+        await scope.load(uuid4())
+    with pytest.raises(AgentSkillScopeError, match="skill_not_available"):
+        await scope.load(music.id)
     with pytest.raises(AgentSkillScopeError, match="skill_not_activated"):
-        await scope.read_resource(web.name, web.resources[0].id)
+        await scope.read_resource(web.id, web.resources[0].id)
 
-    activated = await scope.load(web.name)
+    activated = await scope.load(web.id)
     with pytest.raises(AgentSkillScopeError, match="skill_resource_not_found"):
-        await scope.read_resource(web.name, music.resources[0].id)
-    loaded = await scope.read_resource(web.name, web.resources[0].id)
-    repeated = await scope.read_resource(web.name, web.resources[0].id)
+        await scope.read_resource(web.id, music.resources[0].id)
+    loaded = await scope.read_resource(web.id, web.resources[0].id)
+    repeated = await scope.read_resource(web.id, web.resources[0].id)
 
     assert activated.returned_characters == 5
     assert loaded.returned_characters == 6
@@ -198,7 +259,7 @@ async def test_skill_scope_rejects_single_item_and_total_character_overflow() ->
         max_instruction_characters=5,
     )
     with pytest.raises(AgentSkillScopeError, match="skill_context_limit"):
-        await single_limit.load(oversized.name)
+        await single_limit.load(oversized.id)
 
     total = make_skill(instructions="12345", resource_content="abcdef")
     total_limit = make_scope(
@@ -207,9 +268,9 @@ async def test_skill_scope_rejects_single_item_and_total_character_overflow() ->
         max_resource_characters=6,
         max_context_characters=10,
     )
-    await total_limit.load(total.name)
+    await total_limit.load(total.id)
     with pytest.raises(AgentSkillScopeError, match="skill_context_limit"):
-        await total_limit.read_resource(total.name, total.resources[0].id)
+        await total_limit.read_resource(total.id, total.resources[0].id)
 
 
 @pytest.mark.asyncio
@@ -220,9 +281,9 @@ async def test_skill_scope_enforces_distinct_activation_and_resource_counts() ->
         (web, music),
         max_activations=1,
     )
-    await activation_scope.load(web.name)
+    await activation_scope.load(web.id)
     with pytest.raises(AgentSkillScopeError, match="skill_activation_limit"):
-        await activation_scope.load(music.name)
+        await activation_scope.load(music.id)
 
     second_resource = replace(
         web.resources[0],
@@ -235,13 +296,29 @@ async def test_skill_scope_enforces_distinct_activation_and_resource_counts() ->
         (two_resources,),
         max_resources=1,
     )
-    await resource_scope.load(two_resources.name)
-    await resource_scope.read_resource(two_resources.name, two_resources.resources[0].id)
+    await resource_scope.load(two_resources.id)
+    await resource_scope.read_resource(two_resources.id, two_resources.resources[0].id)
     with pytest.raises(AgentSkillScopeError, match="skill_resource_limit"):
         await resource_scope.read_resource(
-            two_resources.name,
+            two_resources.id,
             two_resources.resources[1].id,
         )
+
+
+@pytest.mark.asyncio
+async def test_skill_scope_pins_revision_and_legacy_name_requires_unique_match() -> None:
+    first = make_skill()
+    duplicate = replace(first, id=uuid4())
+    repository = InMemorySkillReadRepository((first, duplicate))
+    scope = make_scope((first, duplicate), repository=repository)
+
+    with pytest.raises(AgentSkillScopeError, match="skill_selector_ambiguous"):
+        scope.resolve_selector(skill_id=None, deprecated_name=first.name)
+    assert scope.resolve_selector(skill_id=first.id, deprecated_name=None) == first.id
+
+    repository.skills[first.id] = replace(first, revision=2)
+    with pytest.raises(AgentSkillScopeError, match="skill_revision_changed"):
+        await scope.load(first.id)
 
 
 @pytest.mark.asyncio
@@ -257,7 +334,7 @@ async def test_skill_tools_execute_through_registry_policy_and_persist_stable_er
     context = execution_context(scope)
 
     loaded = await executor.execute(
-        ToolCall("load", "load_agent_skill", {"name": skill.name}),
+        ToolCall("load", "load_agent_skill", {"skill_id": str(skill.id)}),
         context,
     )
     resource = await executor.execute(
@@ -265,20 +342,36 @@ async def test_skill_tools_execute_through_registry_policy_and_persist_stable_er
             "resource",
             "read_agent_skill_resource",
             {
-                "skill_name": skill.name,
+                "skill_id": str(skill.id),
                 "resource_id": str(skill.resources[0].id),
             },
         ),
         context,
     )
     unavailable = await executor.execute(
-        ToolCall("unavailable", "load_agent_skill", {"name": skill.name}),
+        ToolCall("unavailable", "load_agent_skill", {"skill_id": str(skill.id)}),
         execution_context(None),
     )
 
     assert loaded.model_payload()["data"]["instructions"] == skill.instructions
+    assert loaded.model_payload()["data"]["skill"]["skill_id"] == str(skill.id)
+    assert loaded.model_payload()["data"]["skill"]["access"] == "builtin"
+    assert "content" not in loaded.model_payload()["data"]["resources"][0]
     assert resource.model_payload()["data"]["content"] == skill.resources[0].content
     assert unavailable.error_code == "skill_catalog_unavailable"
     assert repository.records[(context.run_id, "load")].status is ToolExecutionStatus.SUCCEEDED
     assert LoadAgentSkillTool().descriptor.replay_in_history is False
     assert ReadAgentSkillResourceTool().descriptor.replay_in_history is False
+
+
+def _discovery(skill: AgentSkill) -> AgentSkillDiscovery:
+    return AgentSkillDiscovery(
+        id=skill.id,
+        name=skill.name,
+        display_name=skill.display_name,
+        description=skill.description,
+        version=skill.version,
+        revision=skill.revision,
+        required_tools=skill.required_tools,
+        access=SkillAccessKind.BUILTIN,
+    )

@@ -196,6 +196,59 @@ class AgentSkillDiscovery:
 
 
 @dataclass(frozen=True, slots=True)
+class AgentSkillResourceManifest:
+    """Content-free resource metadata returned with loaded instructions."""
+
+    id: UUID
+    key: str
+    display_name: str
+    description: str
+    kind: SkillResourceKind
+    media_type: str
+    position: int
+
+    def __post_init__(self) -> None:
+        key = self.key.strip()
+        display_name = self.display_name.strip()
+        description = self.description.strip()
+        media_type = self.media_type.strip().casefold()
+        if not _RESOURCE_KEY.fullmatch(key):
+            raise ValueError("Skill resource key must be a stable lowercase kebab-case name")
+        _validate_line(display_name, "Skill resource display name", 120)
+        _validate_text(description, "Skill resource description", 500)
+        if media_type not in _TEXT_MEDIA_TYPES:
+            raise ValueError("Skill resource media type must be supported text")
+        if self.position <= 0:
+            raise ValueError("Skill resource position must be positive")
+        object.__setattr__(self, "key", key)
+        object.__setattr__(self, "display_name", display_name)
+        object.__setattr__(self, "description", description)
+        object.__setattr__(self, "media_type", media_type)
+
+
+@dataclass(frozen=True, slots=True)
+class AgentSkillBundle:
+    """Instructions plus content-free resource manifests loaded on demand."""
+
+    discovery: AgentSkillDiscovery
+    instructions: str
+    resources: tuple[AgentSkillResourceManifest, ...]
+
+    def __post_init__(self) -> None:
+        instructions = self.instructions.strip()
+        _validate_text(instructions, "Skill instructions", 20_000)
+        resources = tuple(sorted(self.resources, key=lambda item: item.position))
+        if len({item.id for item in resources}) != len(resources):
+            raise ValueError("Skill resource manifests contain duplicate IDs")
+        if len({item.key for item in resources}) != len(resources):
+            raise ValueError("Skill resource manifests contain duplicate keys")
+        if len({item.position for item in resources}) != len(resources):
+            raise ValueError("Skill resource manifests contain duplicate positions")
+        object.__setattr__(self, "instructions", instructions)
+        object.__setattr__(self, "resources", resources)
+
+
+@dataclass(frozen=True, slots=True)
 class AgentSkillShare:
     """One invitation or accepted read grant for a personal Skill."""
 

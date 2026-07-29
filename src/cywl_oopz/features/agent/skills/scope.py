@@ -1,14 +1,20 @@
-"""Run-local Agent skill snapshot and atomic progressive-disclosure budgets."""
+"""Run-local user-scoped Agent Skill discovery and disclosure budgets."""
 
 from __future__ import annotations
 
 import asyncio
+from collections import defaultdict
 from dataclasses import dataclass
 from types import MappingProxyType
 from uuid import UUID
 
-from .catalog import AgentSkillCatalogSnapshot
-from .models import AgentSkill, AgentSkillResource
+from .errors import AgentSkillRevisionConflictError
+from .models import (
+    AgentSkillBundle,
+    AgentSkillDiscovery,
+    AgentSkillResource,
+)
+from .ports import AgentSkillReadRepository
 
 
 class AgentSkillScopeError(Exception):
@@ -23,7 +29,7 @@ class AgentSkillScopeError(Exception):
 class AgentSkillActivation:
     """Result of loading one Skill instructions document."""
 
-    skill: AgentSkill
+    bundle: AgentSkillBundle
     already_loaded: bool
     returned_characters: int
 
@@ -32,19 +38,20 @@ class AgentSkillActivation:
 class AgentSkillResourceRead:
     """Result of loading one additional Skill text resource."""
 
-    skill: AgentSkill
+    discovery: AgentSkillDiscovery
     resource: AgentSkillResource
     already_loaded: bool
     returned_characters: int
 
 
 class AgentSkillRunScope:
-    """Pin visible skills and enforce all per-run disclosure limits atomically."""
+    """Pin caller-visible discovery and enforce progressive-disclosure limits."""
 
     def __init__(
         self,
-        snapshot: AgentSkillCatalogSnapshot,
-        available_skills: tuple[AgentSkill, ...],
+        repository: AgentSkillReadRepository,
+        person_id: str,
+        available_skills: tuple[AgentSkillDiscovery, ...],
         *,
         max_activations: int,
         max_resources: int,
@@ -60,30 +67,36 @@ class AgentSkillRunScope:
             max_context_characters,
         )
         if any(value <= 0 for value in limits):
-            raise ValueError("Agent skill run limits must be positive")
-        if not snapshot.loaded:
-            raise ValueError("Agent skill run scope requires a loaded catalog snapshot")
-        available = {skill.name: skill for skill in available_skills}
+            raise ValueError("Agent Skill run limits must be positive")
+        caller = person_id.strip()
+        if not caller:
+            raise ValueError("Agent Skill run person ID must not be empty")
+        available = {skill.id: skill for skill in available_skills}
         if len(available) != len(available_skills):
-            raise ValueError("Agent skill run scope contains duplicate names")
-        if any(snapshot.skills.get(name) is not skill for name, skill in available.items()):
-            raise ValueError("Available skills must belong to the pinned catalog snapshot")
+            raise ValueError("Agent Skill run scope contains duplicate IDs")
+        names: dict[str, list[UUID]] = defaultdict(list)
+        for skill in available_skills:
+            names[skill.name].append(skill.id)
 
-        self._catalog = snapshot.skills
+        self._repository = repository
+        self._person_id = caller
         self._available = MappingProxyType(available)
+        self._names = MappingProxyType(
+            {name: tuple(skill_ids) for name, skill_ids in names.items()}
+        )
         self._max_activations = max_activations
         self._max_resources = max_resources
         self._max_instruction_characters = max_instruction_characters
         self._max_resource_characters = max_resource_characters
         self._max_context_characters = max_context_characters
-        self._activated: set[str] = set()
-        self._read_resources: set[tuple[str, UUID]] = set()
+        self._activated: set[UUID] = set()
+        self._read_resources: set[tuple[UUID, UUID]] = set()
         self._returned_characters = 0
         self._lock = asyncio.Lock()
 
     @property
-    def available_skills(self) -> tuple[AgentSkill, ...]:
-        """Return the run-pinned visible Skills in stable catalog order."""
+    def available_skills(self) -> tuple[AgentSkillDiscovery, ...]:
+        """Return run-pinned discovery in repository order."""
         return tuple(self._available.values())
 
     @property
@@ -98,42 +111,85 @@ class AgentSkillRunScope:
     def returned_characters(self) -> int:
         return self._returned_characters
 
-    async def load(self, name: str) -> AgentSkillActivation:
-        """Load instructions once, charging distinct activations under one lock."""
+    def resolve_selector(
+        self,
+        *,
+        skill_id: UUID | None,
+        deprecated_name: str | None,
+    ) -> UUID:
+        """Resolve UUID or one temporarily supported unambiguous legacy name."""
+        if skill_id is not None:
+            if skill_id not in self._available:
+                raise AgentSkillScopeError("skill_not_available")
+            return skill_id
+        name = deprecated_name.strip() if deprecated_name is not None else ""
+        matches = self._names.get(name, ())
+        if not matches:
+            raise AgentSkillScopeError("skill_not_available")
+        if len(matches) > 1:
+            raise AgentSkillScopeError("skill_selector_ambiguous")
+        return matches[0]
+
+    async def load(self, skill_id: UUID) -> AgentSkillActivation:
+        """Load instructions at the run-pinned revision and charge them once."""
+        discovery = self._resolve(skill_id)
+        try:
+            bundle = await self._repository.load_accessible_bundle(
+                self._person_id,
+                skill_id,
+                discovery.revision,
+            )
+        except AgentSkillRevisionConflictError as exc:
+            raise AgentSkillScopeError("skill_revision_changed") from exc
+        if bundle is None:
+            raise AgentSkillScopeError("skill_not_available")
+        if bundle.discovery.id != discovery.id or bundle.discovery.revision != discovery.revision:
+            raise AgentSkillScopeError("skill_revision_changed")
+
         async with self._lock:
-            skill = self._resolve(name)
-            if skill.name in self._activated:
-                return AgentSkillActivation(skill, True, 0)
-            characters = len(skill.instructions)
+            self._resolve(skill_id)
+            if skill_id in self._activated:
+                return AgentSkillActivation(bundle, True, 0)
+            characters = len(bundle.instructions)
             if len(self._activated) >= self._max_activations:
                 raise AgentSkillScopeError("skill_activation_limit")
             self._check_characters(
                 characters,
                 item_limit=self._max_instruction_characters,
             )
-            self._activated.add(skill.name)
+            self._activated.add(skill_id)
             self._returned_characters += characters
-            return AgentSkillActivation(skill, False, characters)
+            return AgentSkillActivation(bundle, False, characters)
 
     async def read_resource(
         self,
-        skill_name: str,
+        skill_id: UUID,
         resource_id: UUID,
     ) -> AgentSkillResourceRead:
-        """Read an activated Skill resource once under the shared context budget."""
+        """Read one activated Skill resource at the run-pinned revision."""
+        discovery = self._resolve(skill_id)
         async with self._lock:
-            skill = self._resolve(skill_name)
-            if skill.name not in self._activated:
+            if skill_id not in self._activated:
                 raise AgentSkillScopeError("skill_not_activated")
-            resource = next(
-                (item for item in skill.resources if item.id == resource_id),
-                None,
+        try:
+            resource = await self._repository.read_accessible_resource(
+                self._person_id,
+                skill_id,
+                resource_id,
+                discovery.revision,
             )
-            if resource is None:
-                raise AgentSkillScopeError("skill_resource_not_found")
-            key = (skill.name, resource.id)
+        except AgentSkillRevisionConflictError as exc:
+            raise AgentSkillScopeError("skill_revision_changed") from exc
+        if resource is None:
+            raise AgentSkillScopeError("skill_resource_not_found")
+
+        async with self._lock:
+            self._resolve(skill_id)
+            if skill_id not in self._activated:
+                raise AgentSkillScopeError("skill_not_activated")
+            key = (skill_id, resource.id)
             if key in self._read_resources:
-                return AgentSkillResourceRead(skill, resource, True, 0)
+                return AgentSkillResourceRead(discovery, resource, True, 0)
             if len(self._read_resources) >= self._max_resources:
                 raise AgentSkillScopeError("skill_resource_limit")
             characters = len(resource.content)
@@ -143,16 +199,13 @@ class AgentSkillRunScope:
             )
             self._read_resources.add(key)
             self._returned_characters += characters
-            return AgentSkillResourceRead(skill, resource, False, characters)
+            return AgentSkillResourceRead(discovery, resource, False, characters)
 
-    def _resolve(self, name: str) -> AgentSkill:
-        skill = self._catalog.get(name)
+    def _resolve(self, skill_id: UUID) -> AgentSkillDiscovery:
+        skill = self._available.get(skill_id)
         if skill is None:
-            raise AgentSkillScopeError("skill_not_found")
-        available = self._available.get(name)
-        if available is None:
             raise AgentSkillScopeError("skill_not_available")
-        return available
+        return skill
 
     def _check_characters(self, characters: int, *, item_limit: int) -> None:
         if (

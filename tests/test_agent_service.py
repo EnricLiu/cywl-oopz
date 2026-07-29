@@ -25,8 +25,11 @@ from cywl_oopz.features.agent.models import (
 from cywl_oopz.features.agent.selection import ProviderSelectionService
 from cywl_oopz.features.agent.service import AgentConversationService
 from cywl_oopz.features.agent.skills.availability import SkillAvailabilityService
-from cywl_oopz.features.agent.skills.catalog import ReloadableAgentSkillCatalog
-from cywl_oopz.features.agent.skills.models import AgentSkill
+from cywl_oopz.features.agent.skills.models import (
+    AgentSkill,
+    AgentSkillDiscovery,
+    SkillAccessKind,
+)
 from cywl_oopz.features.chat.models import ConversationKey
 from cywl_oopz.features.chat.progress import ConversationProgressEvent, ProgressKind
 from cywl_oopz.settings import AgentMode, AgentSettings
@@ -278,11 +281,24 @@ class InMemorySkillRepository:
     def __init__(self, skills: tuple[AgentSkill, ...]) -> None:
         self.skills = skills
 
-    async def generation(self) -> int:
-        return 1
-
-    async def load_enabled(self) -> tuple[AgentSkill, ...]:
-        return self.skills
+    async def list_accessible(
+        self,
+        person_id: str,
+    ) -> tuple[AgentSkillDiscovery, ...]:
+        del person_id
+        return tuple(
+            AgentSkillDiscovery(
+                id=skill.id,
+                name=skill.name,
+                display_name=skill.display_name,
+                description=skill.description,
+                version=skill.version,
+                revision=skill.revision,
+                required_tools=skill.required_tools,
+                access=SkillAccessKind.BUILTIN,
+            )
+            for skill in self.skills
+        )
 
 
 class StaticToolAvailability:
@@ -328,7 +344,7 @@ async def build_service(
     *,
     catalog_repository=None,
     tool_availability=None,
-    skill_catalog=None,
+    skill_repository=None,
     skill_availability=None,
 ):
     catalog = ReloadableProviderCatalog(catalog_repository or InMemoryCatalogRepository())
@@ -348,7 +364,7 @@ async def build_service(
         runs,
         messages,
         tool_availability,
-        skill_catalog,
+        skill_repository,
         skill_availability,
     )
     return service, threads, selections, runs, messages
@@ -407,20 +423,14 @@ async def test_agent_service_pins_skill_scope_and_hides_loaders_for_empty_catalo
         resources=(),
         metadata={},
     )
-    catalog = ReloadableAgentSkillCatalog(
-        InMemorySkillRepository((skill,)),
-        registered_tools=("load_agent_skill", "read_agent_skill_resource"),
-        refresh_seconds=30,
-        max_available_skills=8,
-    )
-    await catalog.reload()
+    skill_repository = InMemorySkillRepository((skill,))
     engine = RecordingEngine()
     service = (
         await build_service(
             chat_settings,
             engine,
             tool_availability=StaticToolAvailability(),
-            skill_catalog=catalog,
+            skill_repository=skill_repository,
             skill_availability=SkillAvailabilityService(),
         )
     )[0]
@@ -438,22 +448,17 @@ async def test_agent_service_pins_skill_scope_and_hides_loaders_for_empty_catalo
         item for item in engine.requests[0].context if item.kind == "skill_catalog"
     )
     assert "web-research" in skill_context.content["text"]
+    assert str(skill.id) in skill_context.content["text"]
     assert skill.instructions not in skill_context.content["text"]
 
-    empty_catalog = ReloadableAgentSkillCatalog(
-        InMemorySkillRepository(()),
-        registered_tools=("load_agent_skill", "read_agent_skill_resource"),
-        refresh_seconds=30,
-        max_available_skills=8,
-    )
-    await empty_catalog.reload()
+    empty_repository = InMemorySkillRepository(())
     empty_engine = RecordingEngine()
     empty_service = (
         await build_service(
             chat_settings,
             empty_engine,
             tool_availability=StaticToolAvailability(),
-            skill_catalog=empty_catalog,
+            skill_repository=empty_repository,
             skill_availability=SkillAvailabilityService(),
         )
     )[0]

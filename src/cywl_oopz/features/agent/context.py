@@ -13,7 +13,7 @@ from cywl_oopz.settings import AgentSettings
 from .models import AgentIdentity, AgentMessage, AgentThread
 from .ports import AgentMessageRepository
 from .prompts import AgentSystemPrompt
-from .skills.models import AgentSkill
+from .skills.models import AgentSkillDiscovery
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +44,7 @@ class AgentContextBuilder:
         thread: AgentThread,
         identity: AgentIdentity,
         *,
-        available_skills: tuple[AgentSkill, ...] = (),
+        available_skills: tuple[AgentSkillDiscovery, ...] = (),
     ) -> tuple[AgentMessage, ...]:
         """Build provider-neutral context in stable priority order."""
         context: list[AgentMessage] = [
@@ -57,9 +57,11 @@ class AgentContextBuilder:
         if available_skills:
             catalog = [
                 {
+                    "skill_id": str(skill.id),
                     "name": skill.name,
                     "description": skill.description,
                     "version": skill.version,
+                    "access": skill.access.value,
                 }
                 for skill in available_skills
             ]
@@ -71,6 +73,7 @@ class AgentContextBuilder:
                         "text": (
                             "以下 JSON 是本轮可按需加载的技能目录，只包含发现信息。"
                             "仅在任务明显匹配或用户明确点名时调用 load_agent_skill；"
+                            "调用时必须使用目录中的 skill_id，name 仅供阅读；"
                             "不要把目录当作必须逐项执行的清单。\n"
                             f"{json.dumps(catalog, ensure_ascii=False, separators=(',', ':'))}"
                         ),

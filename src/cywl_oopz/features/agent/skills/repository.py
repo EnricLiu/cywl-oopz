@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import and_, delete, exists, or_, select
+from sqlalchemy import and_, case, delete, exists, or_, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.sql.elements import ColumnElement
@@ -21,11 +21,19 @@ from cywl_oopz.storage.models import (
     AgentSkillShareRecord,
 )
 
-from .errors import AgentSkillConflictError, AgentSkillNotFoundError
+from .errors import (
+    AgentSkillConflictError,
+    AgentSkillNotFoundError,
+    AgentSkillRevisionConflictError,
+)
 from .models import (
     AgentSkill,
+    AgentSkillBundle,
+    AgentSkillDiscovery,
     AgentSkillResource,
+    AgentSkillResourceManifest,
     AgentSkillShare,
+    SkillAccessKind,
     SkillOwnershipKind,
     SkillShareStatus,
 )
@@ -51,24 +59,162 @@ class SqlAlchemyAgentSkillRepository:
         recipient = person_id.strip()
         if not recipient:
             raise ValueError("Skill library person ID must not be empty")
-        accepted_share = exists(
-            select(AgentSkillShareRecord.id).where(
-                AgentSkillShareRecord.skill_id == AgentSkillRecord.id,
-                AgentSkillShareRecord.recipient_person_id == recipient,
-                AgentSkillShareRecord.status == SkillShareStatus.ACCEPTED,
-            )
-        )
         return await self._load_bundles(
-            AgentSkillRecord.enabled.is_(True),
-            AgentSkillRecord.archived_at.is_(None),
-            or_(
-                AgentSkillRecord.ownership_kind == SkillOwnershipKind.BUILTIN,
-                AgentSkillRecord.owner_person_id == recipient,
-                and_(
-                    AgentSkillRecord.ownership_kind == SkillOwnershipKind.PERSONAL,
-                    accepted_share,
-                ),
+            *self._accessible_predicates(recipient),
+        )
+
+    async def list_accessible(
+        self,
+        person_id: str,
+    ) -> tuple[AgentSkillDiscovery, ...]:
+        """Query only metadata needed for one caller's run discovery."""
+        recipient = _person_id(person_id, "Skill library person")
+        try:
+            async with self._sessions() as session:
+                rows = (
+                    await session.execute(
+                        select(*self._discovery_columns())
+                        .where(*self._accessible_predicates(recipient))
+                        .order_by(
+                            case(
+                                (
+                                    AgentSkillRecord.owner_person_id == recipient,
+                                    0,
+                                ),
+                                (
+                                    AgentSkillRecord.ownership_kind == SkillOwnershipKind.BUILTIN,
+                                    1,
+                                ),
+                                else_=2,
+                            ),
+                            AgentSkillRecord.name,
+                            AgentSkillRecord.id,
+                        )
+                    )
+                ).all()
+        except SQLAlchemyError as exc:
+            raise _database_error("list accessible Agent skills", exc) from exc
+        return tuple(self._to_discovery(row, recipient) for row in rows)
+
+    async def load_accessible_bundle(
+        self,
+        person_id: str,
+        skill_id: UUID,
+        revision: int,
+    ) -> AgentSkillBundle | None:
+        """Load instructions and resource manifests without resource bodies."""
+        recipient = _person_id(person_id, "Skill library person")
+        try:
+            async with self._sessions() as session:
+                row = (
+                    await session.execute(
+                        select(
+                            *self._discovery_columns(),
+                            AgentSkillRecord.instructions,
+                        ).where(
+                            AgentSkillRecord.id == skill_id,
+                            *self._accessible_predicates(recipient),
+                        )
+                    )
+                ).one_or_none()
+                if row is None:
+                    return None
+                discovery = self._to_discovery(row, recipient)
+                if discovery.revision != revision:
+                    raise AgentSkillRevisionConflictError(
+                        "Agent Skill changed after this run started"
+                    )
+                resources = (
+                    await session.execute(
+                        select(
+                            AgentSkillResourceRecord.id,
+                            AgentSkillResourceRecord.key,
+                            AgentSkillResourceRecord.display_name,
+                            AgentSkillResourceRecord.description,
+                            AgentSkillResourceRecord.kind,
+                            AgentSkillResourceRecord.media_type,
+                            AgentSkillResourceRecord.position,
+                        )
+                        .where(AgentSkillResourceRecord.skill_id == skill_id)
+                        .order_by(AgentSkillResourceRecord.position)
+                    )
+                ).all()
+        except AgentSkillRevisionConflictError:
+            raise
+        except SQLAlchemyError as exc:
+            raise _database_error("load accessible Agent skill bundle", exc) from exc
+        return AgentSkillBundle(
+            discovery=discovery,
+            instructions=row[9],
+            resources=tuple(
+                AgentSkillResourceManifest(
+                    id=resource.id,
+                    key=resource.key,
+                    display_name=resource.display_name,
+                    description=resource.description,
+                    kind=resource.kind,
+                    media_type=resource.media_type,
+                    position=resource.position,
+                )
+                for resource in resources
             ),
+        )
+
+    async def read_accessible_resource(
+        self,
+        person_id: str,
+        skill_id: UUID,
+        resource_id: UUID,
+        revision: int,
+    ) -> AgentSkillResource | None:
+        """Load one resource body only after rechecking caller access and revision."""
+        recipient = _person_id(person_id, "Skill library person")
+        try:
+            async with self._sessions() as session:
+                current_revision = await session.scalar(
+                    select(AgentSkillRecord.revision).where(
+                        AgentSkillRecord.id == skill_id,
+                        *self._accessible_predicates(recipient),
+                    )
+                )
+                if current_revision is None:
+                    return None
+                if current_revision != revision:
+                    raise AgentSkillRevisionConflictError(
+                        "Agent Skill changed after this run started"
+                    )
+                resource = (
+                    await session.execute(
+                        select(
+                            AgentSkillResourceRecord.id,
+                            AgentSkillResourceRecord.key,
+                            AgentSkillResourceRecord.display_name,
+                            AgentSkillResourceRecord.description,
+                            AgentSkillResourceRecord.kind,
+                            AgentSkillResourceRecord.media_type,
+                            AgentSkillResourceRecord.content,
+                            AgentSkillResourceRecord.position,
+                        ).where(
+                            AgentSkillResourceRecord.skill_id == skill_id,
+                            AgentSkillResourceRecord.id == resource_id,
+                        )
+                    )
+                ).one_or_none()
+        except AgentSkillRevisionConflictError:
+            raise
+        except SQLAlchemyError as exc:
+            raise _database_error("read accessible Agent skill resource", exc) from exc
+        if resource is None:
+            return None
+        return AgentSkillResource(
+            id=resource.id,
+            key=resource.key,
+            display_name=resource.display_name,
+            description=resource.description,
+            kind=resource.kind,
+            media_type=resource.media_type,
+            content=resource.content,
+            position=resource.position,
         )
 
     async def add_personal(self, skill: AgentSkill) -> None:
@@ -305,6 +451,66 @@ class SqlAlchemyAgentSkillRepository:
                 archived_at=record.archived_at,
             )
             for record in skill_records
+        )
+
+    @staticmethod
+    def _discovery_columns() -> tuple[object, ...]:
+        return (
+            AgentSkillRecord.id,
+            AgentSkillRecord.name,
+            AgentSkillRecord.display_name,
+            AgentSkillRecord.description,
+            AgentSkillRecord.version,
+            AgentSkillRecord.revision,
+            AgentSkillRecord.required_tools,
+            AgentSkillRecord.ownership_kind,
+            AgentSkillRecord.owner_person_id,
+        )
+
+    @staticmethod
+    def _accessible_predicates(recipient: str) -> tuple[ColumnElement[bool], ...]:
+        accepted_share = exists(
+            select(AgentSkillShareRecord.id).where(
+                AgentSkillShareRecord.skill_id == AgentSkillRecord.id,
+                AgentSkillShareRecord.recipient_person_id == recipient,
+                AgentSkillShareRecord.status == SkillShareStatus.ACCEPTED,
+            )
+        )
+        return (
+            AgentSkillRecord.enabled.is_(True),
+            AgentSkillRecord.archived_at.is_(None),
+            or_(
+                AgentSkillRecord.ownership_kind == SkillOwnershipKind.BUILTIN,
+                AgentSkillRecord.owner_person_id == recipient,
+                and_(
+                    AgentSkillRecord.ownership_kind == SkillOwnershipKind.PERSONAL,
+                    accepted_share,
+                ),
+            ),
+        )
+
+    @staticmethod
+    def _to_discovery(
+        row: Sequence[object],
+        recipient: str,
+    ) -> AgentSkillDiscovery:
+        values = tuple(row)
+        ownership = values[7]
+        owner_person_id = values[8]
+        access = (
+            SkillAccessKind.BUILTIN
+            if ownership is SkillOwnershipKind.BUILTIN
+            else (SkillAccessKind.OWNED if owner_person_id == recipient else SkillAccessKind.SHARED)
+        )
+        return AgentSkillDiscovery(
+            id=values[0],
+            name=values[1],
+            display_name=values[2],
+            description=values[3],
+            version=values[4],
+            revision=values[5],
+            required_tools=frozenset(values[6]),
+            access=access,
         )
 
     async def generation(self) -> int:

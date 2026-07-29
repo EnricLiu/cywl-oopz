@@ -60,8 +60,8 @@ from .ports import (
 )
 from .selection import ProviderSelectionService
 from .skills.availability import SkillAvailabilityService
-from .skills.catalog import ReloadableAgentSkillCatalog
-from .skills.models import AgentSkill
+from .skills.models import AgentSkillDiscovery
+from .skills.ports import AgentSkillReadRepository
 from .skills.scope import AgentSkillRunScope
 from .skills.tools import SKILL_TOOL_NAMES
 from .summarization import ThreadSummaryService
@@ -85,7 +85,7 @@ class AgentConversationService:
         runs: AgentRunRepository,
         messages: AgentMessageRepository,
         tool_availability: ToolAvailabilityService | None = None,
-        skill_catalog: ReloadableAgentSkillCatalog | None = None,
+        skill_repository: AgentSkillReadRepository | None = None,
         skill_availability: SkillAvailabilityService | None = None,
         context_builder: AgentContextBuilder | None = None,
         summary_service: ThreadSummaryService | None = None,
@@ -104,7 +104,7 @@ class AgentConversationService:
         self._runs = runs
         self._messages = messages
         self._tool_availability = tool_availability
-        self._skill_catalog = skill_catalog
+        self._skill_repository = skill_repository
         self._skill_availability = skill_availability
         self._context_builder = context_builder or AgentContextBuilder(settings, messages)
         self._summary_service = summary_service
@@ -170,17 +170,18 @@ class AgentConversationService:
                     if self._tool_availability is not None
                     else ()
                 )
-                available_skills: tuple[AgentSkill, ...] = ()
+                available_skills: tuple[AgentSkillDiscovery, ...] = ()
                 skill_scope: AgentSkillRunScope | None = None
-                if self._skill_catalog is not None and self._skill_availability is not None:
-                    await self._skill_catalog.refresh_if_stale()
+                if self._skill_repository is not None and self._skill_availability is not None:
+                    discoveries = await self._discover_skills(identity.person_id)
                     available_skills = self._skill_availability.resolve(
-                        self._skill_catalog.snapshot,
+                        discoveries,
                         enabled_tools,
                     )
                     if available_skills:
                         skill_scope = AgentSkillRunScope(
-                            self._skill_catalog.snapshot,
+                            self._skill_repository,
+                            identity.person_id,
                             available_skills,
                             max_activations=self._settings.max_skill_activations,
                             max_resources=self._settings.max_skill_resources,
@@ -485,22 +486,41 @@ class AgentConversationService:
             selection.model,
         )
 
-    async def available_skills(self, key: ConversationKey) -> tuple[AgentSkill, ...]:
+    async def available_skills(
+        self,
+        key: ConversationKey,
+    ) -> tuple[AgentSkillDiscovery, ...]:
         """Return Skills visible after applying this conversation's actual tool set."""
         if (
             self._tool_availability is None
-            or self._skill_catalog is None
+            or self._skill_repository is None
             or self._skill_availability is None
         ):
             return ()
         selection = await self.current_selection(key)
         identity = AgentIdentity(key.person_id, key)
         enabled_tools = await self._tool_availability.names(identity, selection.model)
-        await self._skill_catalog.refresh_if_stale()
+        discoveries = await self._discover_skills(identity.person_id)
         return self._skill_availability.resolve(
-            self._skill_catalog.snapshot,
+            discoveries,
             enabled_tools,
         )
+
+    async def _discover_skills(
+        self,
+        person_id: str,
+    ) -> tuple[AgentSkillDiscovery, ...]:
+        if self._skill_repository is None:
+            return ()
+        try:
+            discoveries = await self._skill_repository.list_accessible(person_id)
+        except Exception:
+            if self._health is not None:
+                self._health.mark("skills", HealthState.DEGRADED, "library query failed")
+            raise
+        if self._health is not None:
+            self._health.mark("skills", HealthState.HEALTHY, "library queried")
+        return discoveries
 
     async def status(self, key: ConversationKey) -> ChatStatus:
         """Return safe thread metadata compatible with existing chat controllers."""

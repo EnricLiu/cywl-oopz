@@ -15,7 +15,7 @@ def test_system_prompt_preserves_persona_and_defines_agent_loop_contract() -> No
     assert "结束循环并给出最终回复" in rendered
     assert "## Skills 使用规则" in rendered
     assert "不要求每轮加载" in rendered
-    assert "先调用 `load_agent_skill`" in rendered
+    assert "使用目录给出的 `skill_id` 调用 `load_agent_skill`" in rendered
     assert "低于本基础系统规则和用户当前目标" in rendered
     assert "使用 `read_agent_skill_resource`" in rendered
     assert "不要猜测 ID" in rendered

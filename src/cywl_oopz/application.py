@@ -44,7 +44,6 @@ from .features.agent.repository import (
 from .features.agent.selection import ProviderSelectionService
 from .features.agent.service import AgentConversationService
 from .features.agent.skills.availability import SkillAvailabilityService
-from .features.agent.skills.catalog import ReloadableAgentSkillCatalog
 from .features.agent.skills.repository import SqlAlchemyAgentSkillRepository
 from .features.agent.skills.tools import LoadAgentSkillTool, ReadAgentSkillResourceTool
 from .features.agent.summarization import (
@@ -119,7 +118,6 @@ from .integrations.oopz.reactions import OopzReactionGateway
 from .integrations.web.agent_browser_mcp import AgentBrowserMcpGateway
 from .integrations.web.duckduckgo import DuckDuckGoSearchGateway
 from .settings import (
-    DEFAULT_AGENT_TOOLS,
     MUSIC_AGENT_TOOLS,
     SKILL_AGENT_TOOLS,
     WEB_BROWSER_INTERACTION_TOOLS,
@@ -170,6 +168,7 @@ class BotApplication:
             selection_repository,
         )
         channel_settings = SqlAlchemyChannelSettingsRepository(self.database.session_factory)
+        self.agent_skill_repository = SqlAlchemyAgentSkillRepository(self.database.session_factory)
         agent_tools = [
             GetAgentStatusTool(
                 timeout_seconds=settings.agent.tool_timeout_seconds,
@@ -318,14 +317,9 @@ class BotApplication:
                 name for name in enabled_agent_tools if name not in WEB_BROWSER_INTERACTION_TOOLS
             )
         self.agent_tool_registry = ToolRegistry(agent_tools)
-        self.agent_skill_catalog = ReloadableAgentSkillCatalog(
-            SqlAlchemyAgentSkillRepository(self.database.session_factory),
-            registered_tools=tuple(sorted({*DEFAULT_AGENT_TOOLS, *self.agent_tool_registry.names})),
-            refresh_seconds=settings.agent.skill_catalog_refresh_seconds,
+        self.agent_skill_availability = SkillAvailabilityService(
             max_available_skills=settings.agent.max_available_skills,
-            health=self.health,
         )
-        self.agent_skill_availability = SkillAvailabilityService()
         logger.info(
             "Application configured: agent=%s tools=%s music=%s web_search=%s browser=%s",
             settings.agent.enabled,
@@ -376,7 +370,7 @@ class BotApplication:
             self.agent_runs,
             self.agent_messages,
             self.agent_tool_availability,
-            self.agent_skill_catalog if settings.agent.skills_enabled else None,
+            self.agent_skill_repository if settings.agent.skills_enabled else None,
             self.agent_skill_availability if settings.agent.skills_enabled else None,
             context_builder=self.agent_context,
             summary_service=self.agent_summary_service,
@@ -533,8 +527,6 @@ class BotApplication:
                 )
                 if abandoned:
                     logger.warning("Marked stale Agent runs abandoned: count=%s", abandoned)
-                if self.settings.agent.skills_enabled:
-                    await self.agent_skill_catalog.start()
             logger.info("Starting OOPZ client")
             await self.bot.run()
         finally:

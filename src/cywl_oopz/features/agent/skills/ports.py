@@ -6,7 +6,14 @@ from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
-from .models import AgentSkill, AgentSkillShare, SkillShareStatus
+from .models import (
+    AgentSkill,
+    AgentSkillBundle,
+    AgentSkillDiscovery,
+    AgentSkillResource,
+    AgentSkillShare,
+    SkillShareStatus,
+)
 
 
 class AgentSkillRepository(Protocol):
@@ -55,3 +62,27 @@ class AgentSkillLibraryRepository(Protocol):
         share_id: UUID,
     ) -> bool:
         """Delete one share belonging to an owned Skill."""
+
+
+class AgentSkillReadRepository(Protocol):
+    """Three-level, caller-scoped progressive disclosure reads."""
+
+    async def list_accessible(self, person_id: str) -> tuple[AgentSkillDiscovery, ...]:
+        """Return only discovery metadata visible to one caller."""
+
+    async def load_accessible_bundle(
+        self,
+        person_id: str,
+        skill_id: UUID,
+        revision: int,
+    ) -> AgentSkillBundle | None:
+        """Load instructions and resource manifests at one pinned revision."""
+
+    async def read_accessible_resource(
+        self,
+        person_id: str,
+        skill_id: UUID,
+        resource_id: UUID,
+        revision: int,
+    ) -> AgentSkillResource | None:
+        """Load one resource body at one pinned revision."""

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from cywl_oopz.core.lifecycle import ToolEffect
 from cywl_oopz.core.observability import exception_kind
@@ -15,7 +15,13 @@ from cywl_oopz.features.agent.tools.models import (
     ToolExecutionError,
 )
 
-from .models import AgentSkill, AgentSkillResource, SkillResourceKind
+from .models import (
+    AgentSkillDiscovery,
+    AgentSkillResource,
+    AgentSkillResourceManifest,
+    SkillAccessKind,
+    SkillResourceKind,
+)
 from .scope import AgentSkillScopeError
 
 logger = logging.getLogger(__name__)
@@ -29,23 +35,42 @@ SKILL_TOOL_NAMES = frozenset(
 
 
 class LoadAgentSkillInput(BaseModel):
-    """Select one visible Skill by its stable catalog name."""
+    """Select one visible Skill by UUID, with temporary legacy name support."""
 
-    name: str = Field(pattern=r"^[a-z][a-z0-9-]{0,63}$")
+    skill_id: UUID | None = None
+    name: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9-]{0,63}$")
+
+    @model_validator(mode="after")
+    def validate_selector(self) -> LoadAgentSkillInput:
+        if (self.skill_id is None) == (self.name is None):
+            raise ValueError("Provide exactly one of skill_id or deprecated name")
+        return self
 
 
 class ReadAgentSkillResourceInput(BaseModel):
     """Select one resource from a Skill already activated in this run."""
 
-    skill_name: str = Field(pattern=r"^[a-z][a-z0-9-]{0,63}$")
+    skill_id: UUID | None = None
+    skill_name: str | None = Field(
+        default=None,
+        pattern=r"^[a-z][a-z0-9-]{0,63}$",
+    )
     resource_id: UUID
+
+    @model_validator(mode="after")
+    def validate_selector(self) -> ReadAgentSkillResourceInput:
+        if (self.skill_id is None) == (self.skill_name is None):
+            raise ValueError("Provide exactly one of skill_id or deprecated skill_name")
+        return self
 
 
 class AgentSkillIdentityOutput(BaseModel):
+    skill_id: UUID
     name: str
     display_name: str
     version: str
     revision: int
+    access: SkillAccessKind
 
 
 class AgentSkillResourceManifestOutput(BaseModel):
@@ -81,7 +106,7 @@ class LoadAgentSkillTool:
             name="load_agent_skill",
             display_name="加载技能",
             description=(
-                "按稳定名称加载一个当前可用技能的完整工作说明。"
+                "按技能目录给出的 skill_id 加载一个当前可用技能的完整工作说明。"
                 "仅当用户任务与技能目录明显匹配或用户明确点名时调用。"
             ),
             input_model=LoadAgentSkillInput,
@@ -109,18 +134,23 @@ class LoadAgentSkillTool:
         if scope is None:
             raise ToolExecutionError("skill_catalog_unavailable")
         try:
-            activation = await scope.load(arguments.name)
+            skill_id = scope.resolve_selector(
+                skill_id=arguments.skill_id,
+                deprecated_name=arguments.name,
+            )
+            activation = await scope.load(skill_id)
         except AgentSkillScopeError as exc:
             raise ToolExecutionError(exc.error_code) from exc
         except Exception as exc:
             logger.error(
                 "Agent skill activation failed unexpectedly: run=%s skill=%s error=%s",
                 context.run_id,
-                arguments.name,
+                arguments.skill_id or arguments.name,
                 exception_kind(exc),
             )
             raise ToolExecutionError("skill_load_failed") from exc
-        skill = activation.skill
+        bundle = activation.bundle
+        skill = bundle.discovery
         await context.report_progress(
             subject=skill.display_name,
             summary=f"正在载入 v{skill.version}",
@@ -138,11 +168,11 @@ class LoadAgentSkillTool:
         return LoadAgentSkillOutput(
             skill=_skill_identity(skill),
             already_loaded=activation.already_loaded,
-            instructions="" if activation.already_loaded else skill.instructions,
+            instructions="" if activation.already_loaded else bundle.instructions,
             resources=(
                 ()
                 if activation.already_loaded
-                else tuple(_resource_manifest(resource) for resource in skill.resources)
+                else tuple(_resource_manifest(resource) for resource in bundle.resources)
             ),
             character_count=activation.returned_characters,
         )
@@ -184,8 +214,12 @@ class ReadAgentSkillResourceTool:
         if scope is None:
             raise ToolExecutionError("skill_catalog_unavailable")
         try:
+            skill_id = scope.resolve_selector(
+                skill_id=arguments.skill_id,
+                deprecated_name=arguments.skill_name,
+            )
             loaded = await scope.read_resource(
-                arguments.skill_name,
+                skill_id,
                 arguments.resource_id,
             )
         except AgentSkillScopeError as exc:
@@ -194,7 +228,7 @@ class ReadAgentSkillResourceTool:
             logger.error(
                 "Agent skill resource read failed unexpectedly: run=%s skill=%s error=%s",
                 context.run_id,
-                arguments.skill_name,
+                arguments.skill_id or arguments.skill_name,
                 exception_kind(exc),
             )
             raise ToolExecutionError("skill_load_failed") from exc
@@ -205,13 +239,13 @@ class ReadAgentSkillResourceTool:
         logger.info(
             "Agent skill resource read: run=%s skill=%s resource=%s characters=%s repeated=%s",
             context.run_id,
-            loaded.skill.name,
+            loaded.discovery.name,
             loaded.resource.key,
             loaded.returned_characters,
             loaded.already_loaded,
         )
         return ReadAgentSkillResourceOutput(
-            skill=_skill_identity(loaded.skill),
+            skill=_skill_identity(loaded.discovery),
             resource=_resource_manifest(loaded.resource),
             already_loaded=loaded.already_loaded,
             media_type=loaded.resource.media_type,
@@ -220,16 +254,20 @@ class ReadAgentSkillResourceTool:
         )
 
 
-def _skill_identity(skill: AgentSkill) -> AgentSkillIdentityOutput:
+def _skill_identity(skill: AgentSkillDiscovery) -> AgentSkillIdentityOutput:
     return AgentSkillIdentityOutput(
+        skill_id=skill.id,
         name=skill.name,
         display_name=skill.display_name,
         version=skill.version,
         revision=skill.revision,
+        access=skill.access,
     )
 
 
-def _resource_manifest(resource: AgentSkillResource) -> AgentSkillResourceManifestOutput:
+def _resource_manifest(
+    resource: AgentSkillResource | AgentSkillResourceManifest,
+) -> AgentSkillResourceManifestOutput:
     return AgentSkillResourceManifestOutput(
         id=resource.id,
         key=resource.key,

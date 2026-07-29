@@ -347,6 +347,11 @@ class SkillsCommand(ChatCommandController):
             await context.reply("当前对话没有可用的 Agent 技能。")
             return
 
+        access_labels = {
+            "builtin": "内置",
+            "owned": "我的",
+            "shared": "共享",
+        }
         lines = ["当前可用 Agent 技能（需要时由模型按需加载）："]
         for index, skill in enumerate(skills):
             description = (
@@ -354,7 +359,11 @@ class SkillsCommand(ChatCommandController):
                 if len(skill.description) <= 240
                 else f"{skill.description[:237]}..."
             )
-            line = f"- **{skill.display_name}** {skill.name} · v{skill.version}：{description}"
+            access = access_labels[skill.access.value]
+            line = (
+                f"- **{skill.display_name}** {skill.name} · {access} · "
+                f"v{skill.version}：{description}"
+            )
             omitted = len(skills) - index
             suffix = f"\n…另有 {omitted} 个技能未显示。" if omitted else ""
             if len("\n".join((*lines, line))) + len(suffix) > self.max_reply_characters:
