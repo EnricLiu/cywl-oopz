@@ -72,6 +72,9 @@ def test_app_settings_use_the_injected_oopz_credentials(monkeypatch) -> None:
     assert settings.agent.memory_enabled_by_default is True
     assert settings.agent.live_display is False
     assert settings.agent.display_edit_interval_seconds == 0.8
+    assert settings.agent.skills_enabled is True
+    assert settings.agent.skill_catalog_refresh_seconds == 30
+    assert settings.agent.max_available_skills == 32
     assert settings.music.enabled is False
     assert settings.web.search_enabled is True
     assert settings.web.search_safesearch is WebSearchSafeSearch.MODERATE
@@ -130,6 +133,29 @@ def test_agent_tools_can_be_disabled_independently() -> None:
     )
 
     assert settings.agent.enabled_tools == ()
+
+
+def test_agent_skill_catalog_settings_are_validated() -> None:
+    settings = AppSettings.from_mapping(
+        valid_environment()
+        | {
+            "CYWL_AGENT_SKILLS_ENABLED": "false",
+            "CYWL_AGENT_SKILL_CATALOG_REFRESH_SECONDS": "12.5",
+            "CYWL_AGENT_MAX_AVAILABLE_SKILLS": "8",
+        }
+    )
+
+    assert settings.agent.skills_enabled is False
+    assert settings.agent.skill_catalog_refresh_seconds == 12.5
+    assert settings.agent.max_available_skills == 8
+
+    with pytest.raises(ConfigurationError, match="SKILL_CATALOG_REFRESH_SECONDS"):
+        AppSettings.from_mapping(
+            valid_environment()
+            | {
+                "CYWL_AGENT_SKILL_CATALOG_REFRESH_SECONDS": "0",
+            }
+        )
 
 
 def test_agent_summary_and_memory_limits_are_consistent() -> None:

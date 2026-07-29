@@ -7,13 +7,14 @@ from uuid import uuid4
 import pytest
 
 from cywl_oopz.commands.router import ParsedCommand
-from cywl_oopz.features.agent.commands import ProviderCommand, ToolsCommand
+from cywl_oopz.features.agent.commands import ProviderCommand, SkillsCommand, ToolsCommand
 from cywl_oopz.features.agent.models import (
     AgentModelRef,
     ModelSelection,
     ModelSelectionSource,
     ProviderProtocol,
 )
+from cywl_oopz.features.agent.skills.models import AgentSkill
 from cywl_oopz.features.agent.tools.models import ToolEffect
 from cywl_oopz.features.agent.tools.policy import AvailableTool
 from cywl_oopz.features.chat.tasks import ChatTaskSupervisor
@@ -69,6 +70,23 @@ class FakeProviderService:
             ),
         )
 
+    async def available_skills(self, key) -> tuple[AgentSkill, ...]:
+        del key
+        return (
+            AgentSkill(
+                id=uuid4(),
+                name="web-research",
+                display_name="网页研究",
+                description="搜索并阅读关键来源。",
+                instructions="先搜索，再阅读。",
+                version="1",
+                revision=2,
+                required_tools=frozenset({"search_web"}),
+                resources=(),
+                metadata={},
+            ),
+        )
+
 
 @dataclass
 class FakeContext:
@@ -113,3 +131,17 @@ async def test_tools_command_lists_effects_without_internal_configuration() -> N
 
     assert "get_agent_status（只读）" in context.replies[0]
     assert "react_to_message（写操作）" in context.replies[0]
+
+
+@pytest.mark.asyncio
+async def test_skills_command_lists_safe_discovery_metadata_only() -> None:
+    context = FakeContext()
+
+    await SkillsCommand(FakeProviderService()).execute(
+        ParsedCommand("skills", ()),
+        context,
+    )
+
+    assert "**网页研究** web-research · v1" in context.replies[0]
+    assert "搜索并阅读关键来源" in context.replies[0]
+    assert "先搜索，再阅读" not in context.replies[0]

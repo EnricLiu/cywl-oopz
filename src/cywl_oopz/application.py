@@ -18,7 +18,13 @@ from .core.health import HealthRegistry, HealthState
 from .core.observability import exception_kind, opaque_ref
 from .core.tasks import TaskSupervisor
 from .features.agent.catalog import ProviderCatalogAdminService, ReloadableProviderCatalog
-from .features.agent.commands import MemoryCommand, ProviderCommand, ToolCommand, ToolsCommand
+from .features.agent.commands import (
+    MemoryCommand,
+    ProviderCommand,
+    SkillsCommand,
+    ToolCommand,
+    ToolsCommand,
+)
 from .features.agent.context import AgentContextBuilder
 from .features.agent.direct_tools import DirectToolService
 from .features.agent.memory import MemoryService
@@ -36,6 +42,9 @@ from .features.agent.repository import (
 )
 from .features.agent.selection import ProviderSelectionService
 from .features.agent.service import AgentConversationService
+from .features.agent.skills.availability import SkillAvailabilityService
+from .features.agent.skills.catalog import ReloadableAgentSkillCatalog
+from .features.agent.skills.repository import SqlAlchemyAgentSkillRepository
 from .features.agent.summarization import (
     PydanticAiThreadSummarizer,
     ThreadSummaryService,
@@ -274,6 +283,14 @@ class BotApplication:
                 name for name in enabled_agent_tools if name not in WEB_BROWSER_INTERACTION_TOOLS
             )
         self.agent_tool_registry = ToolRegistry(agent_tools)
+        self.agent_skill_catalog = ReloadableAgentSkillCatalog(
+            SqlAlchemyAgentSkillRepository(self.database.session_factory),
+            registered_tools=self.agent_tool_registry.names,
+            refresh_seconds=settings.agent.skill_catalog_refresh_seconds,
+            max_available_skills=settings.agent.max_available_skills,
+            health=self.health,
+        )
+        self.agent_skill_availability = SkillAvailabilityService()
         logger.info(
             "Application configured: agent=%s tools=%s music=%s web_search=%s browser=%s",
             settings.agent.enabled,
@@ -321,6 +338,8 @@ class BotApplication:
             self.agent_runs,
             self.agent_messages,
             self.agent_tool_availability,
+            self.agent_skill_catalog if settings.agent.skills_enabled else None,
+            self.agent_skill_availability if settings.agent.skills_enabled else None,
             context_builder=self.agent_context,
             summary_service=self.agent_summary_service,
             summary_tasks=self.agent_summary_tasks,
@@ -360,6 +379,12 @@ class BotApplication:
             "browser",
             HealthState.PENDING if settings.web.browser_enabled else HealthState.DISABLED,
         )
+        self.health.mark(
+            "skills",
+            HealthState.PENDING
+            if settings.agent.enabled and settings.agent.skills_enabled
+            else HealthState.DISABLED,
+        )
 
     def _create_chat_provider(self) -> ChatProvider:
         if not self.settings.chat.enabled:
@@ -388,6 +413,8 @@ class BotApplication:
             self.commands.register(ToolsCommand(self.agent_chat))
             self.commands.register(ToolCommand(self.direct_tools, self.settings.command_prefix))
             self.commands.register(MemoryCommand(self.agent_chat, self.agent_memory))
+            if self.settings.agent.skills_enabled:
+                self.commands.register(SkillsCommand(self.agent_chat))
 
     async def run(self) -> None:
         """Start the database check before entering the long-running OOPZ client."""
@@ -453,6 +480,8 @@ class BotApplication:
                 )
                 if abandoned:
                     logger.warning("Marked stale Agent runs abandoned: count=%s", abandoned)
+                if self.settings.agent.skills_enabled:
+                    await self.agent_skill_catalog.start()
             logger.info("Starting OOPZ client")
             await self.bot.run()
         finally:

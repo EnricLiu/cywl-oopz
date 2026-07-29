@@ -39,6 +39,7 @@ from cywl_oopz.features.agent.repository import (
     SqlAlchemyToolExecutionRepository,
 )
 from cywl_oopz.features.agent.selection import ProviderSelectionService
+from cywl_oopz.features.agent.skills.catalog import ReloadableAgentSkillCatalog
 from cywl_oopz.features.agent.skills.models import SkillResourceKind
 from cywl_oopz.features.agent.skills.repository import (
     SqlAlchemyAgentSkillRepository,
@@ -258,6 +259,13 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
         assert loaded_skill.required_tools == frozenset({"search_web", "read_web_page"})
         assert loaded_skill.resources[0].id == resource_row["id"]
         assert loaded_skill.resources[0].kind is SkillResourceKind.REFERENCE
+        skill_catalog = ReloadableAgentSkillCatalog(
+            skill_repository,
+            registered_tools=("search_web", "read_web_page"),
+            refresh_seconds=30,
+            max_available_skills=8,
+        )
+        before_resource_update = await skill_catalog.reload()
 
         async with test_engine.begin() as connection:
             await connection.execute(
@@ -271,6 +279,11 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
                 {"resource_id": resource_row["id"]},
             )
         assert await skill_repository.generation() > generation_after_insert
+        after_resource_update = await skill_catalog.reload()
+        assert after_resource_update is skill_catalog.snapshot
+        assert after_resource_update is not before_resource_update
+        assert "官方" not in before_resource_update.skills["web-research"].resources[0].content
+        assert "官方" in after_resource_update.skills["web-research"].resources[0].content
         reloaded_skill = (await skill_repository.load_enabled())[0]
         assert reloaded_skill.revision == loaded_skill.revision + 1
         assert "官方" in reloaded_skill.resources[0].content

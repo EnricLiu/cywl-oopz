@@ -119,6 +119,47 @@ class ToolsCommand(ChatCommandController):
         await context.reply("\n".join(lines))
 
 
+class SkillsCommand(ChatCommandController):
+    """List only the Agent skills available in the current conversation."""
+
+    name = "skills"
+    description = "查看当前 Agent 可按需加载的技能。"
+    max_reply_characters = 1900
+
+    def __init__(self, service: AgentConversationService) -> None:
+        super().__init__(service)
+        self._agent = service
+
+    async def execute(self, command: ParsedCommand, context: EventContext) -> None:
+        if command.arguments:
+            await context.reply("用法：!skills")
+            return
+        try:
+            skills = await self._agent.available_skills(self._key(context))
+        except Exception as exc:
+            await self._reply_error(context, exc)
+            return
+        if not skills:
+            await context.reply("当前对话没有可用的 Agent 技能。")
+            return
+
+        lines = ["当前可用 Agent 技能（需要时由模型按需加载）："]
+        for index, skill in enumerate(skills):
+            description = (
+                skill.description
+                if len(skill.description) <= 240
+                else f"{skill.description[:237]}..."
+            )
+            line = f"- **{skill.display_name}** {skill.name} · v{skill.version}：{description}"
+            omitted = len(skills) - index
+            suffix = f"\n…另有 {omitted} 个技能未显示。" if omitted else ""
+            if len("\n".join((*lines, line))) + len(suffix) > self.max_reply_characters:
+                lines.append(f"…另有 {omitted} 个技能未显示。")
+                break
+            lines.append(line)
+        await context.reply("\n".join(lines))
+
+
 class ToolCommand:
     """Describe or directly execute one Agent tool for development debugging."""
 

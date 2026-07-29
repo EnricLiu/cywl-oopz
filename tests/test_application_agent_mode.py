@@ -57,11 +57,13 @@ async def test_composition_root_routes_chat_and_provider_command_by_agent_flag(
     assert "tools" in {command.name for command in agent_application.commands.commands}
     assert "tool" in {command.name for command in agent_application.commands.commands}
     assert "memory" in {command.name for command in agent_application.commands.commands}
+    assert "skills" in {command.name for command in agent_application.commands.commands}
     assert legacy_application.chat is legacy_application.legacy_chat
     assert "provider" not in {command.name for command in legacy_application.commands.commands}
     assert "tools" not in {command.name for command in legacy_application.commands.commands}
     assert "tool" not in {command.name for command in legacy_application.commands.commands}
     assert "memory" not in {command.name for command in legacy_application.commands.commands}
+    assert "skills" not in {command.name for command in legacy_application.commands.commands}
 
     for application in (agent_application, legacy_application):
         if application.music is not None:

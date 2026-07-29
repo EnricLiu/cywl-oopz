@@ -57,6 +57,9 @@ from .ports import (
     ModelSelectionRepository,
 )
 from .selection import ProviderSelectionService
+from .skills.availability import SkillAvailabilityService
+from .skills.catalog import ReloadableAgentSkillCatalog
+from .skills.models import AgentSkill
 from .summarization import ThreadSummaryService
 from .tools.policy import AvailableTool, ToolAvailabilityService
 
@@ -78,6 +81,8 @@ class AgentConversationService:
         runs: AgentRunRepository,
         messages: AgentMessageRepository,
         tool_availability: ToolAvailabilityService | None = None,
+        skill_catalog: ReloadableAgentSkillCatalog | None = None,
+        skill_availability: SkillAvailabilityService | None = None,
         context_builder: AgentContextBuilder | None = None,
         summary_service: ThreadSummaryService | None = None,
         summary_tasks: TaskSupervisor[UUID] | None = None,
@@ -95,6 +100,8 @@ class AgentConversationService:
         self._runs = runs
         self._messages = messages
         self._tool_availability = tool_availability
+        self._skill_catalog = skill_catalog
+        self._skill_availability = skill_availability
         self._context_builder = context_builder or AgentContextBuilder(settings, messages)
         self._summary_service = summary_service
         self._summary_tasks = summary_tasks
@@ -159,6 +166,13 @@ class AgentConversationService:
                     if self._tool_availability is not None
                     else ()
                 )
+                available_skills: tuple[AgentSkill, ...] = ()
+                if self._skill_catalog is not None and self._skill_availability is not None:
+                    await self._skill_catalog.refresh_if_stale()
+                    available_skills = self._skill_availability.resolve(
+                        self._skill_catalog.snapshot,
+                        enabled_tools,
+                    )
                 context = await self._context_builder.build(thread, identity)
                 run_id = uuid4()
                 state = AgentRunState(run_id).start(now)
@@ -192,13 +206,14 @@ class AgentConversationService:
                 )
                 logger.info(
                     "Agent run started: run=%s conversation=%s model=%s/%s "
-                    "context_messages=%s tools=%s",
+                    "context_messages=%s tools=%s skills=%s",
                     run_id,
                     conversation,
                     selection.model.provider_alias,
                     selection.model.model_alias,
                     len(context),
                     len(enabled_tools),
+                    len(available_skills),
                 )
                 try:
                     result = await self._engine.run(request, progress)
@@ -400,6 +415,23 @@ class AgentConversationService:
         return await self._tool_availability.resolve(
             AgentIdentity(key.person_id, key),
             selection.model,
+        )
+
+    async def available_skills(self, key: ConversationKey) -> tuple[AgentSkill, ...]:
+        """Return Skills visible after applying this conversation's actual tool set."""
+        if (
+            self._tool_availability is None
+            or self._skill_catalog is None
+            or self._skill_availability is None
+        ):
+            return ()
+        selection = await self.current_selection(key)
+        identity = AgentIdentity(key.person_id, key)
+        enabled_tools = await self._tool_availability.names(identity, selection.model)
+        await self._skill_catalog.refresh_if_stale()
+        return self._skill_availability.resolve(
+            self._skill_catalog.snapshot,
+            enabled_tools,
         )
 
     async def status(self, key: ConversationKey) -> ChatStatus:

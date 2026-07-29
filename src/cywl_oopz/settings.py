@@ -336,6 +336,9 @@ class AgentSettings:
     memory_context_items: int
     memory_max_item_characters: int
     stale_run_after_seconds: int
+    skills_enabled: bool = True
+    skill_catalog_refresh_seconds: float = 30.0
+    max_available_skills: int = 32
 
     @property
     def enabled(self) -> bool:
@@ -465,6 +468,21 @@ class AgentSettings:
                 values,
                 "CYWL_AGENT_STALE_RUN_AFTER_SECONDS",
                 90,
+            ),
+            skills_enabled=_boolean(
+                values,
+                "CYWL_AGENT_SKILLS_ENABLED",
+                True,
+            ),
+            skill_catalog_refresh_seconds=_positive_float(
+                values,
+                "CYWL_AGENT_SKILL_CATALOG_REFRESH_SECONDS",
+                30.0,
+            ),
+            max_available_skills=_positive_integer(
+                values,
+                "CYWL_AGENT_MAX_AVAILABLE_SKILLS",
+                32,
             ),
         )
         if settings.summary_retain_messages >= settings.summary_trigger_messages:
