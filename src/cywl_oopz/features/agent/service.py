@@ -285,6 +285,7 @@ class AgentConversationService:
                         run_id,
                         conversation,
                         exception_kind(exc),
+                        exc_info=True,
                     )
                     await self._finish_after_interrupt(
                         state,
