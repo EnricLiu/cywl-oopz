@@ -69,8 +69,10 @@ from .features.agent.tools.playlists import (
     AddMusicPlaylistTrackTool,
     CreateMusicPlaylistTool,
     GetMusicPlaylistTool,
+    ImportNeteasePlaylistTool,
     ListMusicPlaylistsTool,
     LoadMusicPlaylistTool,
+    PreviewNeteasePlaylistTool,
     RemoveMusicPlaylistTrackTool,
 )
 from .features.agent.tools.policy import ToolAvailabilityService, ToolPolicy
@@ -184,6 +186,7 @@ class BotApplication:
             ),
         ]
         self.music: MusicRequestService | None = None
+        self.music_catalog: NeteaseMusicCatalog | None = None
         self.music_playlists: MusicPlaylistService | None = None
         enabled_agent_tools = settings.agent.enabled_tools
         if settings.agent.skills_enabled:
@@ -198,19 +201,28 @@ class BotApplication:
                 name for name in enabled_agent_tools if name not in SKILL_AGENT_TOOLS
             )
         if settings.music.enabled:
+            self.music_catalog = NeteaseMusicCatalog(settings.music)
             self.music = MusicRequestService(
                 settings.music,
-                NeteaseMusicCatalog(settings.music),
+                self.music_catalog,
                 OopzMusicVoiceGateway(self.bot),
             )
             self.music_playlists = MusicPlaylistService(
                 settings.music,
                 SqlAlchemyMusicPlaylistRepository(self.database.session_factory),
                 self.music,
+                self.music_catalog,
             )
             music_tool_options = {
                 "timeout_seconds": settings.agent.tool_timeout_seconds,
                 "max_output_characters": settings.agent.max_tool_result_characters,
+            }
+            music_import_tool_options = {
+                **music_tool_options,
+                "timeout_seconds": max(
+                    settings.agent.tool_timeout_seconds,
+                    settings.music.request_timeout_seconds * 2 + 2,
+                ),
             }
             agent_tools.extend(
                 (
@@ -230,6 +242,14 @@ class BotApplication:
                         **music_tool_options,
                     ),
                     LoadMusicPlaylistTool(self.music_playlists, **music_tool_options),
+                    PreviewNeteasePlaylistTool(
+                        self.music_playlists,
+                        **music_import_tool_options,
+                    ),
+                    ImportNeteasePlaylistTool(
+                        self.music_playlists,
+                        **music_import_tool_options,
+                    ),
                 )
             )
         else:

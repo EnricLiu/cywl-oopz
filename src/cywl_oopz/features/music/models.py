@@ -176,3 +176,51 @@ class PlaylistQueueLoad:
     playlist_id: UUID
     playlist_name: str
     queue: QueueRebuildResult
+
+
+@dataclass(frozen=True, slots=True)
+class NeteasePlaylistSnapshot:
+    """Bounded Netease playlist metadata and the tracks visible to the bot."""
+
+    source_id: str
+    name: str
+    declared_track_count: int
+    tracks: tuple[MusicTrack, ...]
+
+    def __post_init__(self) -> None:
+        if not self.source_id.strip() or not self.name.strip():
+            raise ValueError("Netease playlist ID and name must not be empty")
+        if self.declared_track_count < 0:
+            raise ValueError("Netease playlist track count must not be negative")
+        if any(track.source != "netease" for track in self.tracks):
+            raise ValueError("Netease playlist tracks must use the Netease source")
+
+    @property
+    def loaded_track_count(self) -> int:
+        return len(self.tracks)
+
+    @property
+    def complete(self) -> bool:
+        return self.loaded_track_count >= self.declared_track_count
+
+
+@dataclass(frozen=True, slots=True)
+class NeteasePlaylistImport:
+    """Area playlist created from one bounded Netease snapshot."""
+
+    source_id: str
+    source_name: str
+    declared_track_count: int
+    playlist: MusicPlaylist
+
+    @property
+    def imported_track_count(self) -> int:
+        return self.playlist.track_count
+
+    @property
+    def skipped_track_count(self) -> int:
+        return max(0, self.declared_track_count - self.imported_track_count)
+
+    @property
+    def partial(self) -> bool:
+        return self.skipped_track_count > 0

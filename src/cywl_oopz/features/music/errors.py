@@ -55,3 +55,19 @@ class MusicPlaylistFullError(MusicError):
 
 class MusicPlaylistEmptyError(MusicError):
     """Raised when an empty playlist cannot rebuild a playback queue."""
+
+
+class NeteasePlaylistReferenceError(MusicError):
+    """Raised when a Netease playlist ID or URL cannot be parsed safely."""
+
+
+class NeteasePlaylistNotFoundError(MusicError):
+    """Raised when Netease does not expose the requested playlist."""
+
+
+class NeteasePlaylistIncompleteError(MusicError):
+    """Raised before an incomplete source playlist is imported without consent."""
+
+
+class NeteasePlaylistTooLargeError(MusicError):
+    """Raised when a complete source playlist exceeds area playlist capacity."""

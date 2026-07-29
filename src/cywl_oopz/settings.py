@@ -42,6 +42,8 @@ DEFAULT_AGENT_TOOLS = (
     "load_music_playlist",
     "load_agent_skill",
     "read_agent_skill_resource",
+    "preview_netease_playlist",
+    "import_netease_playlist",
 )
 
 MUSIC_AGENT_TOOLS = frozenset(
@@ -59,6 +61,8 @@ MUSIC_AGENT_TOOLS = frozenset(
         "add_music_playlist_track",
         "remove_music_playlist_track",
         "load_music_playlist",
+        "preview_netease_playlist",
+        "import_netease_playlist",
     }
 )
 
@@ -556,6 +560,7 @@ class MusicSettings:
     search_limit: int
     bitrate: int
     max_queue_length: int
+    max_playlist_tracks: int
     max_query_characters: int
     playback_poll_seconds: float
 
@@ -582,6 +587,11 @@ class MusicSettings:
             search_limit=_positive_integer(values, "CYWL_MUSIC_SEARCH_LIMIT", 5),
             bitrate=_positive_integer(values, "CYWL_MUSIC_BITRATE", 320_000),
             max_queue_length=_positive_integer(values, "CYWL_MUSIC_MAX_QUEUE_LENGTH", 50),
+            max_playlist_tracks=_positive_integer(
+                values,
+                "CYWL_MUSIC_MAX_PLAYLIST_TRACKS",
+                1_000,
+            ),
             max_query_characters=_positive_integer(
                 values,
                 "CYWL_MUSIC_MAX_QUERY_CHARACTERS",

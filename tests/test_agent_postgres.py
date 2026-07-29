@@ -130,6 +130,8 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
             "load_music_playlist",
             "load_agent_skill",
             "read_agent_skill_resource",
+            "preview_netease_playlist",
+            "import_netease_playlist",
         ]
 
         async with test_engine.begin() as connection:
@@ -176,6 +178,8 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
             "load_music_playlist",
             "load_agent_skill",
             "read_agent_skill_resource",
+            "preview_netease_playlist",
+            "import_netease_playlist",
         ]
         assert defaulted["created_at"] == defaulted["updated_at"]
 
@@ -256,10 +260,12 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
         skills_by_name = {skill.name: skill for skill in loaded_skills}
         assert set(skills_by_name) == {
             "music-curator",
+            "netease-playlist-importer",
             "test-research",
             "web-research",
         }
         music_skill = skills_by_name["music-curator"]
+        import_skill = skills_by_name["netease-playlist-importer"]
         web_skill = skills_by_name["web-research"]
         assert music_skill.version == "1.0.0"
         assert music_skill.metadata["builtin_seed"] == "20260729_12"
@@ -275,6 +281,16 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
             }
         )
         assert [resource.key for resource in music_skill.resources] == ["batch-curation-guide"]
+        assert import_skill.version == "1.0.0"
+        assert import_skill.metadata["builtin_seed"] == "20260729_13"
+        assert import_skill.required_tools == frozenset(
+            {
+                "list_music_playlists",
+                "preview_netease_playlist",
+                "import_netease_playlist",
+            }
+        )
+        assert [resource.key for resource in import_skill.resources] == ["netease-api-behavior"]
         assert web_skill.version == "1.0.0"
         assert web_skill.metadata["builtin_seed"] == "20260729_12"
         assert web_skill.required_tools == frozenset({"search_web", "read_web_page"})
@@ -366,6 +382,45 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
         assert [(entry.id, entry.position) for entry in compacted_playlist.entries] == [
             (second_playlist_track.id, 1)
         ]
+        imported_playlist = await playlist_repository.create_with_tracks(
+            "shared-area",
+            "网易云导入",
+            "网易云导入".casefold(),
+            (
+                MusicTrack("netease", "39", "39", ("初音未来",), 222000),
+                MusicTrack(
+                    "netease",
+                    "831",
+                    "Tell Your World",
+                    ("初音未来",),
+                    245000,
+                ),
+            ),
+            "person",
+            max_tracks=3,
+        )
+        imported_readback = await playlist_repository.get(
+            "shared-area",
+            imported_playlist.id,
+        )
+        assert imported_readback is not None
+        assert [entry.position for entry in imported_readback.entries] == [1, 2]
+        assert [entry.track.source_id for entry in imported_readback.entries] == [
+            "39",
+            "831",
+        ]
+        with pytest.raises(MusicPlaylistFullError):
+            await playlist_repository.create_with_tracks(
+                "shared-area",
+                "过大导入",
+                "过大导入".casefold(),
+                tuple(entry.track for entry in imported_readback.entries),
+                "person",
+                max_tracks=1,
+            )
+        assert "过大导入" not in {
+            summary.name for summary in await playlist_repository.list("shared-area")
+        }
 
         async with test_engine.begin() as connection:
             triggered_updated_at = await connection.scalar(

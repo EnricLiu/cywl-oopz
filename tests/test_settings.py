@@ -69,6 +69,8 @@ def test_app_settings_use_the_injected_oopz_credentials(monkeypatch) -> None:
         "load_music_playlist",
         "load_agent_skill",
         "read_agent_skill_resource",
+        "preview_netease_playlist",
+        "import_netease_playlist",
     )
     assert settings.agent.summary_enabled is True
     assert settings.agent.memory_enabled_by_default is True
@@ -235,6 +237,7 @@ def test_enabled_music_requires_http_catalog_and_loads_bounds() -> None:
     assert settings.catalog_base_url == "http://music.example"
     assert settings.search_limit == 7
     assert settings.max_queue_length == 12
+    assert settings.max_playlist_tracks == 1000
 
 
 def test_web_search_settings_validate_provider_bounds() -> None:

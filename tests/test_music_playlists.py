@@ -15,9 +15,13 @@ from cywl_oopz.features.agent.tools.playlists import (
     CreateMusicPlaylistInput,
     CreateMusicPlaylistTool,
     GetMusicPlaylistTool,
+    ImportNeteasePlaylistInput,
+    ImportNeteasePlaylistTool,
     ListMusicPlaylistsTool,
     LoadMusicPlaylistTool,
+    NeteasePlaylistReferenceInput,
     PlaylistIdInput,
+    PreviewNeteasePlaylistTool,
     RemoveMusicPlaylistTrackInput,
     RemoveMusicPlaylistTrackTool,
 )
@@ -28,12 +32,16 @@ from cywl_oopz.features.music.errors import (
     MusicPlaylistEmptyError,
     MusicPlaylistFullError,
     MusicPlaylistNotFoundError,
+    NeteasePlaylistIncompleteError,
+    NeteasePlaylistReferenceError,
+    NeteasePlaylistTooLargeError,
 )
 from cywl_oopz.features.music.models import (
     MusicPlaylist,
     MusicPlaylistEntry,
     MusicPlaylistSummary,
     MusicTrack,
+    NeteasePlaylistSnapshot,
     PlaylistTrackRemoval,
     QueueRebuildResult,
     VoiceChannelKey,
@@ -48,6 +56,7 @@ def settings() -> MusicSettings:
             "CYWL_MUSIC_ENABLED": "true",
             "CYWL_MUSIC_CATALOG_BASE_URL": "https://music.example",
             "CYWL_MUSIC_MAX_QUEUE_LENGTH": "3",
+            "CYWL_MUSIC_MAX_PLAYLIST_TRACKS": "3",
         }
     )
 
@@ -182,6 +191,36 @@ class InMemoryPlaylistRepository:
         )
         return PlaylistTrackRemoval(playlist_id, entry_id, True)
 
+    async def create_with_tracks(
+        self,
+        area_id: str,
+        name: str,
+        normalized_name: str,
+        tracks: tuple[MusicTrack, ...],
+        created_by_person_id: str,
+        *,
+        max_tracks: int,
+    ) -> MusicPlaylist:
+        if len(tracks) > max_tracks:
+            raise MusicPlaylistFullError
+        playlist = await self.create(
+            area_id,
+            name,
+            normalized_name,
+            created_by_person_id,
+        )
+        for track in tracks:
+            await self.append(
+                area_id,
+                playlist.id,
+                track,
+                created_by_person_id,
+                max_tracks=max_tracks,
+            )
+        imported = await self.get(area_id, playlist.id)
+        assert imported is not None
+        return imported
+
 
 @dataclass
 class FakeMusic:
@@ -203,6 +242,21 @@ class FakeMusic:
             True,
             False,
         )
+
+
+@dataclass
+class FakePlaylistSource:
+    snapshot: NeteasePlaylistSnapshot
+    references: list[tuple[str, int]]
+
+    async def playlist(
+        self,
+        reference: str,
+        *,
+        limit: int,
+    ) -> NeteasePlaylistSnapshot:
+        self.references.append((reference, limit))
+        return self.snapshot
 
 
 def service() -> tuple[MusicPlaylistService, InMemoryPlaylistRepository, FakeMusic]:
@@ -273,6 +327,8 @@ def tool_context() -> ToolExecutionContext:
             "add_music_playlist_track",
             "remove_music_playlist_track",
             "load_music_playlist",
+            "preview_netease_playlist",
+            "import_netease_playlist",
         ),
     )
 
@@ -334,3 +390,154 @@ async def test_playlist_tool_maps_missing_area_to_stable_error() -> None:
         await tool.execute(private_context, EmptyToolInput())
 
     assert error.value.error_code == "music_area_required"
+
+
+def import_service(
+    snapshot: NeteasePlaylistSnapshot,
+) -> tuple[MusicPlaylistService, InMemoryPlaylistRepository, FakePlaylistSource]:
+    repository = InMemoryPlaylistRepository()
+    music = FakeMusic()
+    source = FakePlaylistSource(snapshot, [])
+    return (
+        MusicPlaylistService(
+            settings(),
+            repository,
+            music,  # type: ignore[arg-type]
+            source,
+        ),
+        repository,
+        source,
+    )
+
+
+def source_snapshot(
+    *,
+    declared: int = 2,
+    tracks: tuple[MusicTrack, ...] | None = None,
+) -> NeteasePlaylistSnapshot:
+    values = tracks or (
+        MusicTrack("netease", "39", "39", ("初音未来",), 222000),
+        MusicTrack("netease", "831", "Tell Your World", ("初音未来",), 245000),
+    )
+    return NeteasePlaylistSnapshot("24381616", "Miku Favorites", declared, values)
+
+
+@pytest.mark.asyncio
+async def test_netease_playlist_import_is_ordered_area_scoped_and_atomic() -> None:
+    playlists, repository, source = import_service(source_snapshot())
+
+    preview = await playlists.preview_netease("24381616")
+    imported = await playlists.import_netease(
+        identity(),
+        "24381616",
+        name="未来歌单",
+        allow_partial=False,
+    )
+
+    assert preview.complete is True
+    assert source.references == [("24381616", 3), ("24381616", 3)]
+    assert imported.playlist.name == "未来歌单"
+    assert imported.imported_track_count == 2
+    assert imported.skipped_track_count == 0
+    assert [entry.track.source_id for entry in imported.playlist.entries] == ["39", "831"]
+    assert (await repository.list("area"))[0].id == imported.playlist.id
+    assert await repository.get("other-area", imported.playlist.id) is None
+
+
+@pytest.mark.asyncio
+async def test_netease_playlist_import_requires_explicit_partial_consent() -> None:
+    incomplete = source_snapshot(
+        declared=4,
+        tracks=(
+            MusicTrack("netease", "39", "39", ("初音未来",), 222000),
+            MusicTrack("netease", "831", "Tell Your World", ("初音未来",), 245000),
+            MusicTrack("netease", "123", "Hand in Hand", ("初音未来",), 250000),
+        ),
+    )
+    playlists, repository, _ = import_service(incomplete)
+
+    with pytest.raises(NeteasePlaylistTooLargeError):
+        await playlists.import_netease(
+            identity(),
+            "24381616",
+            name=None,
+            allow_partial=False,
+        )
+    assert await repository.list("area") == ()
+
+    imported = await playlists.import_netease(
+        identity(),
+        "24381616",
+        name=None,
+        allow_partial=True,
+    )
+    assert imported.partial is True
+    assert imported.imported_track_count == 3
+    assert imported.skipped_track_count == 1
+
+    missing_track = source_snapshot(declared=3)
+    incomplete_service, _, _ = import_service(missing_track)
+    with pytest.raises(NeteasePlaylistIncompleteError):
+        await incomplete_service.import_netease(
+            identity(),
+            "other",
+            name="Incomplete",
+            allow_partial=False,
+        )
+
+
+@pytest.mark.asyncio
+async def test_netease_playlist_tools_preview_then_import_without_exposing_all_tracks() -> None:
+    playlists, _, _ = import_service(source_snapshot())
+    options = {"timeout_seconds": 1, "max_output_characters": 4000}
+    preview_tool = PreviewNeteasePlaylistTool(playlists, **options)
+    import_tool = ImportNeteasePlaylistTool(playlists, **options)
+
+    preview = await preview_tool.execute(
+        tool_context(),
+        NeteasePlaylistReferenceInput(reference="24381616"),
+    )
+    imported = await import_tool.execute(
+        tool_context(),
+        ImportNeteasePlaylistInput(
+            reference="24381616",
+            name="Imported",
+        ),
+    )
+
+    assert preview.name == "Miku Favorites"
+    assert preview.visible_track_count == 2
+    assert preview.complete is True
+    assert [track.source_id for track in preview.preview_tracks] == ["39", "831"]
+    assert imported.playlist.name == "Imported"
+    assert imported.imported_track_count == 2
+    assert imported.partial is False
+
+
+@pytest.mark.asyncio
+async def test_netease_playlist_tool_maps_invalid_reference_to_stable_error() -> None:
+    class InvalidSource:
+        async def playlist(self, reference: str, *, limit: int) -> NeteasePlaylistSnapshot:
+            del reference, limit
+            raise NeteasePlaylistReferenceError
+
+    repository = InMemoryPlaylistRepository()
+    playlists = MusicPlaylistService(
+        settings(),
+        repository,
+        FakeMusic(),
+        InvalidSource(),
+    )
+    tool = PreviewNeteasePlaylistTool(
+        playlists,
+        timeout_seconds=1,
+        max_output_characters=4000,
+    )
+
+    with pytest.raises(ToolExecutionError) as error:
+        await tool.execute(
+            tool_context(),
+            NeteasePlaylistReferenceInput(reference="invalid"),
+        )
+
+    assert error.value.error_code == "invalid_netease_playlist_reference"

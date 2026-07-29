@@ -5,9 +5,16 @@ import json
 import httpx
 import pytest
 
-from cywl_oopz.features.music.errors import MusicCatalogError, MusicNotFoundError
-from cywl_oopz.features.music.models import MusicTrack
-from cywl_oopz.features.music.netease import NeteaseMusicCatalog
+from cywl_oopz.features.music.errors import (
+    MusicCatalogError,
+    MusicNotFoundError,
+    NeteasePlaylistReferenceError,
+)
+from cywl_oopz.features.music.models import MusicTrack, NeteasePlaylistSnapshot
+from cywl_oopz.features.music.netease import (
+    NeteaseMusicCatalog,
+    NeteasePlaylistReference,
+)
 from cywl_oopz.settings import MusicSettings
 
 
@@ -69,6 +76,106 @@ async def test_netease_catalog_searches_and_resolves_stream_at_playback_time() -
     assert playable.stream_url == "https://cdn.example/blue.mp3"
     assert requests[0].url.params["keywords"] == "Blue Train"
     assert requests[1].url.params["br"] == "320000"
+    await client.aclose()
+
+
+@pytest.mark.parametrize(
+    "reference",
+    (
+        "24381616",
+        "https://music.163.com/playlist?id=24381616",
+        "https://music.163.com/#/playlist?id=24381616",
+        "https://y.music.163.com/m/playlist?id=24381616",
+    ),
+)
+def test_netease_playlist_reference_accepts_ids_and_canonical_urls(reference: str) -> None:
+    assert NeteasePlaylistReference.parse(reference).playlist_id == "24381616"
+
+
+@pytest.mark.parametrize(
+    "reference",
+    (
+        "",
+        "not-a-playlist",
+        "https://example.com/playlist?id=24381616",
+        "ftp://music.163.com/playlist?id=24381616",
+        "https://music.163.com/playlist",
+        "1" * 21,
+    ),
+)
+def test_netease_playlist_reference_rejects_noncanonical_values(reference: str) -> None:
+    with pytest.raises(NeteasePlaylistReferenceError):
+        NeteasePlaylistReference.parse(reference)
+
+
+@pytest.mark.asyncio
+async def test_netease_catalog_reads_playlist_metadata_and_complete_track_endpoint() -> None:
+    requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/playlist/detail":
+            return httpx.Response(
+                200,
+                json={
+                    "playlist": {
+                        "name": "Miku Favorites",
+                        "trackCount": 2,
+                        "tracks": [{"id": 1, "name": "incomplete"}],
+                        "trackIds": [{"id": 39}, {"id": 831}],
+                    }
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "songs": [
+                    {
+                        "id": 39,
+                        "name": "39",
+                        "ar": [{"name": "初音未来"}],
+                        "dt": 222000,
+                    },
+                    {
+                        "id": 831,
+                        "name": "Tell Your World",
+                        "ar": [{"name": "初音未来"}],
+                        "dt": 245000,
+                    },
+                ]
+            },
+        )
+
+    client = httpx.AsyncClient(
+        base_url="https://music.example",
+        transport=httpx.MockTransport(respond),
+    )
+    catalog = NeteaseMusicCatalog(settings(), client)
+
+    playlist = await catalog.playlist(
+        "https://music.163.com/#/playlist?id=24381616",
+        limit=50,
+    )
+
+    assert playlist == NeteasePlaylistSnapshot(
+        "24381616",
+        "Miku Favorites",
+        2,
+        (
+            MusicTrack("netease", "39", "39", ("初音未来",), 222000),
+            MusicTrack(
+                "netease",
+                "831",
+                "Tell Your World",
+                ("初音未来",),
+                245000,
+            ),
+        ),
+    )
+    assert requests[0].url.path == "/playlist/detail"
+    assert requests[1].url.path == "/playlist/track/all"
+    assert requests[1].url.params["limit"] == "50"
+    assert requests[1].url.params["offset"] == "0"
     await client.aclose()
 
 

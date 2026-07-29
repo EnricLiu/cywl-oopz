@@ -262,6 +262,8 @@ class LiveAgentDisplayHarness:
                             "get_music_playlist",
                             "add_music_playlist_track",
                             "load_music_playlist",
+                            "preview_netease_playlist",
+                            "import_netease_playlist",
                         ],
                     )
                 )
@@ -284,6 +286,8 @@ class LiveAgentDisplayHarness:
                     "get_music_playlist",
                     "add_music_playlist_track",
                     "load_music_playlist",
+                    "preview_netease_playlist",
+                    "import_netease_playlist",
                 }
             )
 
@@ -340,6 +344,16 @@ class LiveAgentDisplayHarness:
             "请使用 music-curator 技能查看当前 area 的共享歌单。"
             "先加载技能，再调用 list_music_playlists；最后用一句中文总结。",
             ("load_agent_skill", "list_music_playlists"),
+        ),
+        (
+            "我打算把网易云歌单 24381616 导入当前 area，但现在只预览，不要实际导入。"
+            "请使用 netease-playlist-importer 技能，先查看现有共享歌单，再预览网易云歌单，"
+            "最后说明歌单名称、可见歌曲数和是否完整。",
+            (
+                "load_agent_skill",
+                "list_music_playlists",
+                "preview_netease_playlist",
+            ),
         ),
     ],
 )

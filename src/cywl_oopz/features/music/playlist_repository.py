@@ -185,6 +185,78 @@ class SqlAlchemyMusicPlaylistRepository:
             now,
         )
 
+    async def create_with_tracks(
+        self,
+        area_id: str,
+        name: str,
+        normalized_name: str,
+        tracks: tuple[MusicTrack, ...],
+        created_by_person_id: str,
+        *,
+        max_tracks: int,
+    ) -> MusicPlaylist:
+        """Create the playlist and every ordered entry in one transaction."""
+        if len(tracks) > max_tracks:
+            raise MusicPlaylistFullError("Music playlist is full")
+        now = datetime.now(UTC)
+        playlist_id = uuid4()
+        entries = tuple(
+            MusicPlaylistEntry(
+                uuid4(),
+                playlist_id,
+                position,
+                track,
+                created_by_person_id,
+                now,
+            )
+            for position, track in enumerate(tracks, start=1)
+        )
+        try:
+            async with self._sessions() as session:
+                async with session.begin():
+                    session.add(
+                        MusicPlaylistRecord(
+                            id=playlist_id,
+                            area_id=area_id,
+                            name=name,
+                            normalized_name=normalized_name,
+                            created_by_person_id=created_by_person_id,
+                            created_at=now,
+                            updated_at=now,
+                        )
+                    )
+                    session.add_all(
+                        MusicPlaylistTrackRecord(
+                            id=entry.id,
+                            playlist_id=playlist_id,
+                            position=entry.position,
+                            source=entry.track.source,
+                            source_id=entry.track.source_id,
+                            title=entry.track.title,
+                            artists=list(entry.track.artists),
+                            duration_ms=entry.track.duration_ms,
+                            added_by_person_id=created_by_person_id,
+                            created_at=now,
+                        )
+                        for entry in entries
+                    )
+        except IntegrityError as exc:
+            raise MusicPlaylistConflictError(
+                "This area already has a playlist with that name"
+            ) from exc
+        except SQLAlchemyError as exc:
+            raise _database_error("import music playlist", exc) from exc
+        return MusicPlaylist(
+            playlist_id,
+            area_id,
+            name,
+            normalized_name,
+            created_by_person_id,
+            entries,
+            now,
+            now,
+        )
+
     async def remove(
         self,
         area_id: str,

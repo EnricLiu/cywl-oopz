@@ -22,6 +22,10 @@ from cywl_oopz.features.music.errors import (
     MusicQueryError,
     MusicQueueFullError,
     MusicVoiceChannelRequiredError,
+    NeteasePlaylistIncompleteError,
+    NeteasePlaylistNotFoundError,
+    NeteasePlaylistReferenceError,
+    NeteasePlaylistTooLargeError,
 )
 from cywl_oopz.features.music.models import (
     MusicPlaylist,
@@ -56,6 +60,10 @@ class _PlaylistTool:
         MusicNotFoundError: "music_not_found",
         MusicCatalogError: "music_catalog_unavailable",
         MusicPlaybackError: "music_playback_failed",
+        NeteasePlaylistReferenceError: "invalid_netease_playlist_reference",
+        NeteasePlaylistNotFoundError: "netease_playlist_not_found",
+        NeteasePlaylistIncompleteError: "netease_playlist_incomplete",
+        NeteasePlaylistTooLargeError: "netease_playlist_too_large",
     }
 
     @classmethod
@@ -398,6 +406,172 @@ class RemoveMusicPlaylistTrackTool(_PlaylistTool):
             playlist_id=result.playlist_id,
             entry_id=result.entry_id,
             removed=result.removed,
+        )
+
+
+class NeteasePlaylistReferenceInput(BaseModel):
+    """A numeric Netease playlist ID or canonical music.163.com URL."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reference: str = Field(
+        min_length=1,
+        max_length=500,
+        description="网易云歌单数字 ID 或包含 id 参数的 music.163.com 歌单链接",
+    )
+
+
+class PreviewNeteasePlaylistOutput(BaseModel):
+    """Bounded source metadata shown before an area playlist mutation."""
+
+    source_id: str
+    name: str
+    declared_track_count: int
+    visible_track_count: int
+    complete: bool
+    requires_partial_confirmation: bool
+    preview_tracks: tuple[MusicTrackOutput, ...]
+    preview_truncated: bool
+
+
+class PreviewNeteasePlaylistTool(_PlaylistTool):
+    """Inspect a Netease playlist and expose incompleteness before import."""
+
+    preview_limit = 10
+
+    def __init__(
+        self,
+        playlists: MusicPlaylistService,
+        *,
+        timeout_seconds: float,
+        max_output_characters: int,
+    ) -> None:
+        self._playlists = playlists
+        self._descriptor = ToolDescriptor(
+            name="preview_netease_playlist",
+            display_name="预览网易云歌单",
+            description=(
+                "读取网易云歌单名称、歌曲总数和可导入数量。"
+                "导入前必须先调用，以识别私有、缺歌或超过容量的歌单。"
+            ),
+            input_model=NeteasePlaylistReferenceInput,
+            output_model=PreviewNeteasePlaylistOutput,
+            effect=ToolEffect.READ,
+            timeout_seconds=timeout_seconds,
+            max_output_characters=max_output_characters,
+            concurrency_safe=True,
+            idempotent=True,
+        )
+
+    @property
+    def descriptor(self) -> ToolDescriptor:
+        return self._descriptor
+
+    async def execute(
+        self,
+        context: ToolExecutionContext,
+        arguments: BaseModel,
+    ) -> BaseModel:
+        del context
+        values = NeteasePlaylistReferenceInput.model_validate(arguments)
+        try:
+            playlist = await self._playlists.preview_netease(values.reference)
+        except MusicError as exc:
+            self._raise_tool_error(exc)
+        preview = playlist.tracks[: self.preview_limit]
+        return PreviewNeteasePlaylistOutput(
+            source_id=playlist.source_id,
+            name=playlist.name,
+            declared_track_count=playlist.declared_track_count,
+            visible_track_count=playlist.loaded_track_count,
+            complete=playlist.complete,
+            requires_partial_confirmation=not playlist.complete,
+            preview_tracks=tuple(MusicTrackOutput.from_track(track) for track in preview),
+            preview_truncated=playlist.loaded_track_count > len(preview),
+        )
+
+
+class ImportNeteasePlaylistInput(NeteasePlaylistReferenceInput):
+    """Source, optional area name, and explicit partial-import consent."""
+
+    name: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=80,
+        description="可选的 area 歌单名称；省略时沿用网易云歌单名称",
+    )
+    allow_partial: bool = Field(
+        default=False,
+        description="仅当用户明确同意缺歌或容量截断后才能设为 true",
+    )
+
+
+class ImportNeteasePlaylistOutput(BaseModel):
+    """Atomic area playlist import result."""
+
+    source_id: str
+    source_name: str
+    declared_track_count: int
+    imported_track_count: int
+    skipped_track_count: int
+    partial: bool
+    playlist: PlaylistSummaryOutput
+
+
+class ImportNeteasePlaylistTool(_PlaylistTool):
+    """Atomically create an area playlist from the visible Netease tracks."""
+
+    def __init__(
+        self,
+        playlists: MusicPlaylistService,
+        *,
+        timeout_seconds: float,
+        max_output_characters: int,
+    ) -> None:
+        self._playlists = playlists
+        self._descriptor = ToolDescriptor(
+            name="import_netease_playlist",
+            display_name="导入网易云歌单",
+            description=(
+                "把网易云歌单按原顺序原子导入为当前 area 的新共享歌单。"
+                "默认拒绝缺歌或超过容量的部分导入。"
+            ),
+            input_model=ImportNeteasePlaylistInput,
+            output_model=ImportNeteasePlaylistOutput,
+            effect=ToolEffect.WRITE,
+            timeout_seconds=timeout_seconds,
+            max_output_characters=max_output_characters,
+            concurrency_safe=False,
+            idempotent=True,
+        )
+
+    @property
+    def descriptor(self) -> ToolDescriptor:
+        return self._descriptor
+
+    async def execute(
+        self,
+        context: ToolExecutionContext,
+        arguments: BaseModel,
+    ) -> BaseModel:
+        values = ImportNeteasePlaylistInput.model_validate(arguments)
+        try:
+            result = await self._playlists.import_netease(
+                context.identity,
+                values.reference,
+                name=values.name,
+                allow_partial=values.allow_partial,
+            )
+        except (MusicError, DatabaseError) as exc:
+            self._raise_tool_error(exc)
+        return ImportNeteasePlaylistOutput(
+            source_id=result.source_id,
+            source_name=result.source_name,
+            declared_track_count=result.declared_track_count,
+            imported_track_count=result.imported_track_count,
+            skipped_track_count=result.skipped_track_count,
+            partial=result.partial,
+            playlist=PlaylistSummaryOutput.from_playlist(result.playlist),
         )
 
 

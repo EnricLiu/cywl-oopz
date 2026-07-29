@@ -63,7 +63,9 @@ DEFAULT_AGENT_TOOLS = text(
     '"remove_music_playlist_track",'
     '"load_music_playlist",'
     '"load_agent_skill",'
-    '"read_agent_skill_resource"'
+    '"read_agent_skill_resource",'
+    '"preview_netease_playlist",'
+    '"import_netease_playlist"'
     "]'::jsonb"
 )
 TRUE = text("true")

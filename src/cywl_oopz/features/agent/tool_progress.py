@@ -211,7 +211,9 @@ class MusicProgressProjector(_ProjectionSupport):
         arguments: Mapping[str, Any],
     ) -> ToolProgressPresentation:
         del tool_name
-        subject = self.scalar(arguments.get("query") or arguments.get("name"))
+        subject = self.scalar(
+            arguments.get("query") or arguments.get("name") or arguments.get("reference")
+        )
         return ToolProgressPresentation(subject=subject)
 
     def result(
@@ -292,6 +294,25 @@ class MusicProgressProjector(_ProjectionSupport):
             count = values.get("loaded_count")
             count = count if isinstance(count, int) else 0
             return ToolProgressPresentation(summary=f"歌单「{name}」· 已载入 {count} 首")
+        if tool_name == "preview_netease_playlist":
+            name = self.scalar(values.get("name"))
+            declared = values.get("declared_track_count")
+            visible = values.get("visible_track_count")
+            declared = declared if isinstance(declared, int) else 0
+            visible = visible if isinstance(visible, int) else 0
+            suffix = " · 需要确认部分导入" if values.get("complete") is False else ""
+            return ToolProgressPresentation(
+                summary=f"歌单「{name}」· 可导入 {visible}/{declared} 首{suffix}"
+            )
+        if tool_name == "import_netease_playlist":
+            playlist = values.get("playlist")
+            name = self.scalar(playlist.get("name")) if isinstance(playlist, Mapping) else ""
+            imported = values.get("imported_track_count")
+            skipped = values.get("skipped_track_count")
+            imported = imported if isinstance(imported, int) else 0
+            skipped = skipped if isinstance(skipped, int) else 0
+            suffix = f" · 跳过 {skipped} 首" if skipped else ""
+            return ToolProgressPresentation(summary=f"歌单「{name}」· 已导入 {imported} 首{suffix}")
         if tool_name in {"skip_music", "pause_music", "resume_music"}:
             return ToolProgressPresentation(
                 summary=("操作已生效" if values.get("applied") else "当前无需操作")
@@ -417,6 +438,10 @@ class ToolProgressCatalog:
         "music_playlist_empty": "歌单还是空的",
         "music_playlist_unavailable": "共享歌单服务暂不可用",
         "music_playlist_failed": "歌单操作失败",
+        "invalid_netease_playlist_reference": "网易云歌单 ID 或链接不正确",
+        "netease_playlist_not_found": "没有找到这个网易云歌单",
+        "netease_playlist_incomplete": "歌单内容不完整，需要确认后再部分导入",
+        "netease_playlist_too_large": "歌单超过 area 歌单容量，需要确认后再部分导入",
         "music_playback_failed": "音乐播放操作失败",
         "music_queue_full": "播放队列已满",
         "music_voice_channel_required": "请先加入语音频道",
@@ -476,7 +501,11 @@ class ToolProgressCatalog:
             return self._web_search
         if tool_name == "read_web_page" or tool_name.startswith("browser_"):
             return self._browser
-        if tool_name.endswith("_music") or "music_" in tool_name:
+        if (
+            tool_name.endswith("_music")
+            or "music_" in tool_name
+            or tool_name in {"preview_netease_playlist", "import_netease_playlist"}
+        ):
             return self._music
         if tool_name in {"load_agent_skill", "read_agent_skill_resource"}:
             return self._skills

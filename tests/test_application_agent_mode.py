@@ -110,6 +110,8 @@ async def test_composition_root_registers_music_tools_only_when_music_is_enabled
         "add_music_playlist_track",
         "remove_music_playlist_track",
         "load_music_playlist",
+        "preview_netease_playlist",
+        "import_netease_playlist",
     }.issubset(enabled.agent_tool_registry.names)
 
     await enabled.music.aclose()

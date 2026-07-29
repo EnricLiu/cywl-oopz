@@ -12,19 +12,24 @@ from cywl_oopz.settings import MusicSettings
 
 from .errors import (
     MusicAreaRequiredError,
+    MusicCatalogError,
     MusicNotFoundError,
     MusicPlaylistEmptyError,
     MusicPlaylistNameError,
     MusicPlaylistNotFoundError,
+    NeteasePlaylistIncompleteError,
+    NeteasePlaylistTooLargeError,
 )
 from .models import (
     MusicPlaylist,
     MusicPlaylistEntry,
     MusicPlaylistSummary,
+    NeteasePlaylistImport,
+    NeteasePlaylistSnapshot,
     PlaylistQueueLoad,
     PlaylistTrackRemoval,
 )
-from .ports import MusicPlaylistRepository
+from .ports import MusicPlaylistRepository, MusicPlaylistSource
 from .service import MusicRequestService
 
 logger = logging.getLogger(__name__)
@@ -40,10 +45,12 @@ class MusicPlaylistService:
         settings: MusicSettings,
         repository: MusicPlaylistRepository,
         music: MusicRequestService,
+        playlist_source: MusicPlaylistSource | None = None,
     ) -> None:
         self._settings = settings
         self._repository = repository
         self._music = music
+        self._playlist_source = playlist_source
 
     async def create(self, identity: AgentIdentity, name: str) -> MusicPlaylist:
         area_id = self._area_id(identity)
@@ -93,7 +100,7 @@ class MusicPlaylistService:
             playlist_id,
             matches[0],
             identity.person_id,
-            max_tracks=self._settings.max_queue_length,
+            max_tracks=self._settings.max_playlist_tracks,
         )
         logger.info(
             "Music playlist track appended: area=%s playlist=%s entry=%s position=%s",
@@ -140,6 +147,70 @@ class MusicPlaylistService:
             queue.loaded_count,
         )
         return PlaylistQueueLoad(playlist.id, playlist.name, queue)
+
+    async def preview_netease(self, reference: str) -> NeteasePlaylistSnapshot:
+        """Read one bounded source snapshot without mutating the area playlist catalog."""
+        if self._playlist_source is None:
+            raise MusicCatalogError("Netease playlist import is not configured")
+        snapshot = await self._playlist_source.playlist(
+            reference,
+            limit=self._settings.max_playlist_tracks,
+        )
+        logger.info(
+            "Netease playlist previewed: source=%s declared_tracks=%s visible_tracks=%s "
+            "complete=%s",
+            snapshot.source_id,
+            snapshot.declared_track_count,
+            snapshot.loaded_track_count,
+            snapshot.complete,
+        )
+        return snapshot
+
+    async def import_netease(
+        self,
+        identity: AgentIdentity,
+        reference: str,
+        *,
+        name: str | None,
+        allow_partial: bool,
+    ) -> NeteasePlaylistImport:
+        """Fetch and atomically persist a Netease playlist in the caller's area."""
+        area_id = self._area_id(identity)
+        snapshot = await self.preview_netease(reference)
+        if snapshot.declared_track_count > self._settings.max_playlist_tracks and not allow_partial:
+            raise NeteasePlaylistTooLargeError(
+                "Netease playlist exceeds the configured area playlist capacity"
+            )
+        if not snapshot.complete and not allow_partial:
+            raise NeteasePlaylistIncompleteError(
+                "Netease playlist is incomplete; explicit confirmation is required"
+            )
+        if not snapshot.tracks:
+            raise MusicPlaylistEmptyError("Netease playlist has no importable tracks")
+        display_name, normalized_name = self._normalize_name(name or snapshot.name)
+        playlist = await self._repository.create_with_tracks(
+            area_id,
+            display_name,
+            normalized_name,
+            snapshot.tracks,
+            identity.person_id,
+            max_tracks=self._settings.max_playlist_tracks,
+        )
+        result = NeteasePlaylistImport(
+            snapshot.source_id,
+            snapshot.name,
+            snapshot.declared_track_count,
+            playlist,
+        )
+        logger.info(
+            "Netease playlist imported: area=%s source=%s playlist=%s imported=%s skipped=%s",
+            opaque_ref(area_id),
+            snapshot.source_id,
+            playlist.id,
+            result.imported_track_count,
+            result.skipped_track_count,
+        )
+        return result
 
     @classmethod
     def _normalize_name(cls, name: str) -> tuple[str, str]:

@@ -10,6 +10,7 @@ from .models import (
     MusicPlaylistEntry,
     MusicPlaylistSummary,
     MusicTrack,
+    NeteasePlaylistSnapshot,
     PlayableTrack,
     PlaylistTrackRemoval,
     VoiceChannelKey,
@@ -27,6 +28,18 @@ class MusicCatalog(Protocol):
 
     async def aclose(self) -> None:
         """Release owned HTTP resources."""
+
+
+class MusicPlaylistSource(Protocol):
+    """Read bounded external playlists without exposing provider responses."""
+
+    async def playlist(
+        self,
+        reference: str,
+        *,
+        limit: int,
+    ) -> NeteasePlaylistSnapshot:
+        """Return metadata and up to ``limit`` visible tracks."""
 
 
 class MusicVoiceGateway(Protocol):
@@ -85,6 +98,18 @@ class MusicPlaylistRepository(Protocol):
         max_tracks: int,
     ) -> MusicPlaylistEntry:
         """Append one track while locking the owning playlist."""
+
+    async def create_with_tracks(
+        self,
+        area_id: str,
+        name: str,
+        normalized_name: str,
+        tracks: tuple[MusicTrack, ...],
+        created_by_person_id: str,
+        *,
+        max_tracks: int,
+    ) -> MusicPlaylist:
+        """Atomically create one playlist and all ordered track snapshots."""
 
     async def remove(
         self,
