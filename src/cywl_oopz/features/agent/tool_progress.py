@@ -336,6 +336,19 @@ class SkillProgressProjector(_ProjectionSupport):
         tool_name: str,
         arguments: Mapping[str, Any],
     ) -> ToolProgressPresentation:
+        if tool_name == "list_agent_skill_library":
+            return ToolProgressPresentation(subject="我的技能")
+        if tool_name == "create_agent_skill":
+            return ToolProgressPresentation(
+                subject=self.scalar(arguments.get("display_name") or arguments.get("name"))
+            )
+        if tool_name == "manage_agent_skill_resource":
+            return ToolProgressPresentation(subject=self.scalar(arguments.get("key")))
+        if tool_name == "set_agent_skill_state":
+            action = self.scalar(arguments.get("action"))
+            return ToolProgressPresentation(
+                summary="准备归档" if action == "archive" else "准备恢复"
+            )
         name = arguments.get("name") if tool_name == "load_agent_skill" else None
         name = name or arguments.get("skill_name")
         return ToolProgressPresentation(subject=self.scalar(name))
@@ -347,6 +360,39 @@ class SkillProgressProjector(_ProjectionSupport):
     ) -> ToolProgressPresentation:
         skill = values.get("skill")
         skill_values = skill if isinstance(skill, Mapping) else {}
+        if tool_name == "list_agent_skill_library":
+            owned = values.get("owned")
+            shared = values.get("shared")
+            owned_count = len(owned) if isinstance(owned, list | tuple) else 0
+            shared_count = len(shared) if isinstance(shared, list | tuple) else 0
+            return ToolProgressPresentation(
+                summary=f"{owned_count} 个我的技能 · {shared_count} 个共享"
+            )
+        if tool_name == "inspect_agent_skill":
+            subject = self.scalar(skill_values.get("display_name") or skill_values.get("name"))
+            resources = values.get("resources")
+            count = len(resources) if isinstance(resources, list | tuple) else 0
+            return ToolProgressPresentation(
+                subject=subject,
+                summary=f"最新版本 · {count} 份资料",
+            )
+        if tool_name in {
+            "create_agent_skill",
+            "update_agent_skill",
+            "manage_agent_skill_resource",
+            "set_agent_skill_state",
+        }:
+            subject = self.scalar(skill_values.get("display_name") or skill_values.get("name"))
+            resource_count = values.get("resource_count")
+            suffix = (
+                f" · {resource_count} 份资料"
+                if isinstance(resource_count, int) and resource_count
+                else ""
+            )
+            return ToolProgressPresentation(
+                subject=subject,
+                summary=f"已保存 · 下轮生效{suffix}",
+            )
         repeated = values.get("already_loaded") is True
         characters = values.get("character_count")
         character_count = characters if isinstance(characters, int) else 0
@@ -456,6 +502,18 @@ class ToolProgressCatalog:
         "skill_selector_ambiguous": "存在同名技能，请使用目录中的技能 ID",
         "skill_resource_limit": "本轮读取的技能资料已达上限",
         "skill_resource_not_found": "没有找到这份技能资料",
+        "skill_conflict": "技能名称或资料位置发生冲突",
+        "skill_instructions_too_long": "技能说明超过长度限制",
+        "skill_library_limit": "个人技能库已满",
+        "skill_library_unavailable": "技能库暂不可用",
+        "skill_no_changes": "技能内容没有变化",
+        "skill_not_owned": "只能修改自己创建的技能",
+        "skill_resource_library_limit": "这项技能的资料数量已达上限",
+        "skill_resource_too_long": "技能资料超过长度限制",
+        "skill_revision_conflict": "内容已被修改，请重新查看后再编辑",
+        "skill_unknown_required_tools": "技能引用了不存在的工具",
+        "invalid_agent_skill": "技能内容格式不正确",
+        "invalid_agent_skill_resource": "技能资料格式不正确",
         "browser_failed": "浏览器操作失败",
         "tool_failed": "工具执行失败",
         "tool_not_enabled": "当前频道未启用此工具",
@@ -509,7 +567,16 @@ class ToolProgressCatalog:
             or tool_name in {"preview_netease_playlist", "import_netease_playlist"}
         ):
             return self._music
-        if tool_name in {"load_agent_skill", "read_agent_skill_resource"}:
+        if tool_name in {
+            "load_agent_skill",
+            "read_agent_skill_resource",
+            "list_agent_skill_library",
+            "inspect_agent_skill",
+            "create_agent_skill",
+            "update_agent_skill",
+            "manage_agent_skill_resource",
+            "set_agent_skill_state",
+        }:
             return self._skills
         return self._generic
 

@@ -30,6 +30,8 @@ from .models import (
     AgentSkill,
     AgentSkillBundle,
     AgentSkillDiscovery,
+    AgentSkillInspection,
+    AgentSkillOwnedSummary,
     AgentSkillResource,
     AgentSkillResourceManifest,
     AgentSkillShare,
@@ -253,6 +255,320 @@ class SqlAlchemyAgentSkillRepository:
             AgentSkillRecord.owner_person_id == owner,
         )
         return skills[0] if skills else None
+
+    async def list_owned(
+        self,
+        person_id: str,
+    ) -> tuple[AgentSkillOwnedSummary, ...]:
+        """List metadata for active and archived Skills owned by one user."""
+        owner = _person_id(person_id, "Skill owner")
+        try:
+            async with self._sessions() as session:
+                rows = (
+                    await session.execute(
+                        select(
+                            *self._discovery_columns(),
+                            AgentSkillRecord.enabled,
+                            AgentSkillRecord.archived_at,
+                        )
+                        .where(
+                            AgentSkillRecord.ownership_kind == SkillOwnershipKind.PERSONAL,
+                            AgentSkillRecord.owner_person_id == owner,
+                        )
+                        .order_by(AgentSkillRecord.name, AgentSkillRecord.id)
+                    )
+                ).all()
+        except SQLAlchemyError as exc:
+            raise _database_error("list owned Agent skills", exc) from exc
+        return tuple(
+            AgentSkillOwnedSummary(
+                self._to_discovery(row, owner),
+                active=bool(row[9]) and row[10] is None,
+            )
+            for row in rows
+        )
+
+    async def inspect_accessible(
+        self,
+        person_id: str,
+        skill_id: UUID,
+    ) -> AgentSkillInspection | None:
+        """Load fresh instructions/manifests, including archived owned content."""
+        caller = _person_id(person_id, "Skill library person")
+        owned = and_(
+            AgentSkillRecord.ownership_kind == SkillOwnershipKind.PERSONAL,
+            AgentSkillRecord.owner_person_id == caller,
+        )
+        active_access = and_(*self._accessible_predicates(caller))
+        try:
+            async with self._sessions() as session:
+                row = (
+                    await session.execute(
+                        select(
+                            *self._discovery_columns(),
+                            AgentSkillRecord.instructions,
+                            AgentSkillRecord.enabled,
+                            AgentSkillRecord.archived_at,
+                        ).where(
+                            AgentSkillRecord.id == skill_id,
+                            or_(owned, active_access),
+                        )
+                    )
+                ).one_or_none()
+                if row is None:
+                    return None
+                resources = (
+                    await session.execute(
+                        select(
+                            AgentSkillResourceRecord.id,
+                            AgentSkillResourceRecord.key,
+                            AgentSkillResourceRecord.display_name,
+                            AgentSkillResourceRecord.description,
+                            AgentSkillResourceRecord.kind,
+                            AgentSkillResourceRecord.media_type,
+                            AgentSkillResourceRecord.position,
+                        )
+                        .where(AgentSkillResourceRecord.skill_id == skill_id)
+                        .order_by(AgentSkillResourceRecord.position)
+                    )
+                ).all()
+        except SQLAlchemyError as exc:
+            raise _database_error("inspect accessible Agent skill", exc) from exc
+        return AgentSkillInspection(
+            AgentSkillBundle(
+                discovery=self._to_discovery(row, caller),
+                instructions=row[9],
+                resources=tuple(
+                    AgentSkillResourceManifest(
+                        id=resource.id,
+                        key=resource.key,
+                        display_name=resource.display_name,
+                        description=resource.description,
+                        kind=resource.kind,
+                        media_type=resource.media_type,
+                        position=resource.position,
+                    )
+                    for resource in resources
+                ),
+            ),
+            active=bool(row[10]) and row[11] is None,
+        )
+
+    async def read_inspectable_resource(
+        self,
+        person_id: str,
+        skill_id: UUID,
+        resource_key: str,
+    ) -> AgentSkillResource | None:
+        """Read one resource body visible to fresh management inspection."""
+        caller = _person_id(person_id, "Skill library person")
+        owned = and_(
+            AgentSkillRecord.ownership_kind == SkillOwnershipKind.PERSONAL,
+            AgentSkillRecord.owner_person_id == caller,
+        )
+        active_access = and_(*self._accessible_predicates(caller))
+        try:
+            async with self._sessions() as session:
+                row = (
+                    await session.execute(
+                        select(
+                            AgentSkillResourceRecord.id,
+                            AgentSkillResourceRecord.key,
+                            AgentSkillResourceRecord.display_name,
+                            AgentSkillResourceRecord.description,
+                            AgentSkillResourceRecord.kind,
+                            AgentSkillResourceRecord.media_type,
+                            AgentSkillResourceRecord.content,
+                            AgentSkillResourceRecord.position,
+                        )
+                        .join(
+                            AgentSkillRecord,
+                            AgentSkillRecord.id == AgentSkillResourceRecord.skill_id,
+                        )
+                        .where(
+                            AgentSkillRecord.id == skill_id,
+                            AgentSkillResourceRecord.key == resource_key,
+                            or_(owned, active_access),
+                        )
+                    )
+                ).one_or_none()
+        except SQLAlchemyError as exc:
+            raise _database_error("inspect Agent skill resource", exc) from exc
+        if row is None:
+            return None
+        return AgentSkillResource(
+            id=row.id,
+            key=row.key,
+            display_name=row.display_name,
+            description=row.description,
+            kind=row.kind,
+            media_type=row.media_type,
+            content=row.content,
+            position=row.position,
+        )
+
+    async def update_owned(
+        self,
+        skill: AgentSkill,
+        expected_revision: int,
+    ) -> AgentSkill:
+        """Replace core fields under an owner/revision row lock."""
+        if skill.ownership_kind is not SkillOwnershipKind.PERSONAL:
+            raise ValueError("Only personal Skills may be updated")
+        try:
+            async with self._sessions() as session:
+                async with session.begin():
+                    record = await self._locked_owned(
+                        session,
+                        skill.owner_person_id or "",
+                        skill.id,
+                        expected_revision,
+                    )
+                    record.name = skill.name
+                    record.display_name = skill.display_name
+                    record.description = skill.description
+                    record.instructions = skill.instructions
+                    record.version = skill.version
+                    record.required_tools = sorted(skill.required_tools)
+                    record.skill_metadata = _thaw_json_object(skill.metadata)
+                    await session.flush()
+                    await session.refresh(record)
+                    result = await self._owned_bundle(session, record)
+        except (AgentSkillNotFoundError, AgentSkillRevisionConflictError):
+            raise
+        except IntegrityError as exc:
+            raise AgentSkillConflictError("Personal Skill conflicts with existing data") from exc
+        except SQLAlchemyError as exc:
+            raise _database_error("update personal Agent skill", exc) from exc
+        return result
+
+    async def upsert_owned_resource(
+        self,
+        owner_person_id: str,
+        skill_id: UUID,
+        expected_revision: int,
+        resource: AgentSkillResource,
+    ) -> AgentSkill:
+        """Insert or replace one resource and return the trigger-bumped parent."""
+        owner = _person_id(owner_person_id, "Skill owner")
+        try:
+            async with self._sessions() as session:
+                async with session.begin():
+                    skill_record = await self._locked_owned(
+                        session,
+                        owner,
+                        skill_id,
+                        expected_revision,
+                    )
+                    record = await session.scalar(
+                        select(AgentSkillResourceRecord)
+                        .where(
+                            AgentSkillResourceRecord.skill_id == skill_id,
+                            AgentSkillResourceRecord.key == resource.key,
+                        )
+                        .with_for_update()
+                    )
+                    if record is None:
+                        record = AgentSkillResourceRecord(
+                            id=resource.id,
+                            skill_id=skill_id,
+                            key=resource.key,
+                            display_name=resource.display_name,
+                            description=resource.description,
+                            kind=resource.kind,
+                            media_type=resource.media_type,
+                            content=resource.content,
+                            position=resource.position,
+                        )
+                        session.add(record)
+                    else:
+                        record.display_name = resource.display_name
+                        record.description = resource.description
+                        record.kind = resource.kind
+                        record.media_type = resource.media_type
+                        record.content = resource.content
+                        record.position = resource.position
+                    await session.flush()
+                    await session.refresh(skill_record)
+                    result = await self._owned_bundle(session, skill_record)
+        except (AgentSkillNotFoundError, AgentSkillRevisionConflictError):
+            raise
+        except IntegrityError as exc:
+            raise AgentSkillConflictError("Skill resource conflicts with existing data") from exc
+        except SQLAlchemyError as exc:
+            raise _database_error("upsert personal Agent skill resource", exc) from exc
+        return result
+
+    async def remove_owned_resource(
+        self,
+        owner_person_id: str,
+        skill_id: UUID,
+        expected_revision: int,
+        resource_key: str,
+    ) -> AgentSkill:
+        """Remove one owned resource and return the trigger-bumped parent."""
+        owner = _person_id(owner_person_id, "Skill owner")
+        try:
+            async with self._sessions() as session:
+                async with session.begin():
+                    skill_record = await self._locked_owned(
+                        session,
+                        owner,
+                        skill_id,
+                        expected_revision,
+                    )
+                    record = await session.scalar(
+                        select(AgentSkillResourceRecord)
+                        .where(
+                            AgentSkillResourceRecord.skill_id == skill_id,
+                            AgentSkillResourceRecord.key == resource_key,
+                        )
+                        .with_for_update()
+                    )
+                    if record is None:
+                        raise AgentSkillNotFoundError("Owned Skill resource was not found")
+                    await session.delete(record)
+                    await session.flush()
+                    await session.refresh(skill_record)
+                    result = await self._owned_bundle(session, skill_record)
+        except (AgentSkillNotFoundError, AgentSkillRevisionConflictError):
+            raise
+        except SQLAlchemyError as exc:
+            raise _database_error("remove personal Agent skill resource", exc) from exc
+        return result
+
+    async def set_owned_state(
+        self,
+        owner_person_id: str,
+        skill_id: UUID,
+        expected_revision: int,
+        *,
+        enabled: bool,
+        archived_at: datetime | None,
+    ) -> AgentSkill:
+        """Archive or restore one Skill and return its new revision."""
+        owner = _person_id(owner_person_id, "Skill owner")
+        if enabled == (archived_at is not None):
+            raise ValueError("Archived Skill state is inconsistent")
+        try:
+            async with self._sessions() as session:
+                async with session.begin():
+                    record = await self._locked_owned(
+                        session,
+                        owner,
+                        skill_id,
+                        expected_revision,
+                    )
+                    record.enabled = enabled
+                    record.archived_at = archived_at
+                    await session.flush()
+                    await session.refresh(record)
+                    result = await self._owned_bundle(session, record)
+        except (AgentSkillNotFoundError, AgentSkillRevisionConflictError):
+            raise
+        except SQLAlchemyError as exc:
+            raise _database_error("set personal Agent skill state", exc) from exc
+        return result
 
     async def invite(
         self,
@@ -526,6 +842,42 @@ class SqlAlchemyAgentSkillRepository:
         if generation is None:
             raise DatabaseError("Agent skill catalog state is missing")
         return generation
+
+    @staticmethod
+    async def _locked_owned(
+        session: AsyncSession,
+        owner_person_id: str,
+        skill_id: UUID,
+        expected_revision: int,
+    ) -> AgentSkillRecord:
+        record = await session.scalar(
+            select(AgentSkillRecord)
+            .where(
+                AgentSkillRecord.id == skill_id,
+                AgentSkillRecord.ownership_kind == SkillOwnershipKind.PERSONAL,
+                AgentSkillRecord.owner_person_id == owner_person_id,
+            )
+            .with_for_update()
+        )
+        if record is None:
+            raise AgentSkillNotFoundError("Owned Skill was not found")
+        if record.revision != expected_revision:
+            raise AgentSkillRevisionConflictError("Owned Skill revision changed")
+        return record
+
+    async def _owned_bundle(
+        self,
+        session: AsyncSession,
+        record: AgentSkillRecord,
+    ) -> AgentSkill:
+        resources = (
+            await session.scalars(
+                select(AgentSkillResourceRecord)
+                .where(AgentSkillResourceRecord.skill_id == record.id)
+                .order_by(AgentSkillResourceRecord.position)
+            )
+        ).all()
+        return self._to_skills([record], list(resources))[0]
 
     @staticmethod
     def _skill_record(skill: AgentSkill) -> AgentSkillRecord:

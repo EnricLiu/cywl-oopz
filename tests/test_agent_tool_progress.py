@@ -249,3 +249,35 @@ def test_skill_progress_shows_identity_and_size_without_loaded_content() -> None
     assert resource.summary == "840 字"
     assert failed.summary == "本轮技能内容已达上限"
     assert "must-not-be-shown" not in repr((loaded, resource, failed))
+
+
+def test_skill_authoring_progress_is_compact_and_hides_written_content() -> None:
+    catalog = ToolProgressCatalog()
+
+    request = catalog.request(
+        "create_agent_skill",
+        {
+            "display_name": "旅行规划",
+            "instructions": "must-not-be-shown",
+        },
+    )
+    result = catalog.result(
+        "create_agent_skill",
+        {
+            "ok": True,
+            "data": {
+                "skill": {
+                    "display_name": "旅行规划",
+                    "name": "travel-planner",
+                },
+                "resource_count": 2,
+                "instruction_characters": 3200,
+            },
+        },
+        succeeded=True,
+    )
+
+    assert request.subject == "旅行规划"
+    assert result.subject == "旅行规划"
+    assert result.summary == "已保存 · 下轮生效 · 2 份资料"
+    assert "must-not-be-shown" not in repr((request, result))

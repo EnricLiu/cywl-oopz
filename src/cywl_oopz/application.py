@@ -44,6 +44,11 @@ from .features.agent.repository import (
 from .features.agent.selection import ProviderSelectionService
 from .features.agent.service import AgentConversationService
 from .features.agent.skills.availability import SkillAvailabilityService
+from .features.agent.skills.library import AgentSkillLibraryService
+from .features.agent.skills.library_tools import (
+    SKILL_LIBRARY_TOOL_NAMES,
+    skill_library_tools,
+)
 from .features.agent.skills.repository import SqlAlchemyAgentSkillRepository
 from .features.agent.skills.tools import LoadAgentSkillTool, ReadAgentSkillResourceTool
 from .features.agent.summarization import (
@@ -120,6 +125,7 @@ from .integrations.web.duckduckgo import DuckDuckGoSearchGateway
 from .settings import (
     MUSIC_AGENT_TOOLS,
     SKILL_AGENT_TOOLS,
+    SKILL_AUTHORING_AGENT_TOOLS,
     WEB_BROWSER_INTERACTION_TOOLS,
     WEB_BROWSER_READ_TOOLS,
     WEB_SEARCH_AGENT_TOOLS,
@@ -315,6 +321,25 @@ class BotApplication:
         if not settings.web.browser_interaction_enabled:
             enabled_agent_tools = tuple(
                 name for name in enabled_agent_tools if name not in WEB_BROWSER_INTERACTION_TOOLS
+            )
+        self.agent_skill_library: AgentSkillLibraryService | None = None
+        if settings.agent.skills_enabled and settings.agent.skill_authoring_enabled:
+            registered_skill_tools = (
+                frozenset(tool.descriptor.name for tool in agent_tools) | SKILL_LIBRARY_TOOL_NAMES
+            )
+            self.agent_skill_library = AgentSkillLibraryService(
+                self.agent_skill_repository,
+                registered_tools=registered_skill_tools,
+                max_personal_skills=settings.agent.max_personal_skills,
+                max_available_skills=settings.agent.max_available_skills,
+                max_resources_per_skill=settings.agent.max_resources_per_skill,
+                max_instruction_characters=(settings.agent.max_skill_instruction_characters),
+                max_resource_characters=settings.agent.max_skill_resource_characters,
+            )
+            agent_tools.extend(skill_library_tools(self.agent_skill_library))
+        else:
+            enabled_agent_tools = tuple(
+                name for name in enabled_agent_tools if name not in SKILL_AUTHORING_AGENT_TOOLS
             )
         self.agent_tool_registry = ToolRegistry(agent_tools)
         self.agent_skill_availability = SkillAvailabilityService(

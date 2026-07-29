@@ -12,13 +12,20 @@ from cywl_oopz.features.agent.models import (
     AgentRunLimits,
 )
 from cywl_oopz.features.agent.skills.errors import AgentSkillRevisionConflictError
+from cywl_oopz.features.agent.skills.library_tools import (
+    CreateAgentSkillTool,
+    InspectAgentSkillInput,
+    InspectAgentSkillTool,
+)
 from cywl_oopz.features.agent.skills.models import (
     AgentSkill,
     AgentSkillBundle,
     AgentSkillDiscovery,
+    AgentSkillInspection,
     AgentSkillResource,
     AgentSkillResourceManifest,
     SkillAccessKind,
+    SkillOwnershipKind,
     SkillResourceKind,
 )
 from cywl_oopz.features.agent.skills.scope import (
@@ -362,6 +369,100 @@ async def test_skill_tools_execute_through_registry_policy_and_persist_stable_er
     assert repository.records[(context.run_id, "load")].status is ToolExecutionStatus.SUCCEEDED
     assert LoadAgentSkillTool().descriptor.replay_in_history is False
     assert ReadAgentSkillResourceTool().descriptor.replay_in_history is False
+
+
+@pytest.mark.asyncio
+async def test_skill_authoring_tool_redacts_long_input_and_returns_compact_result() -> None:
+    instructions = "规划步骤。" * 500
+    created = replace(
+        make_skill(instructions=instructions),
+        ownership_kind=SkillOwnershipKind.PERSONAL,
+        owner_person_id="person",
+        resources=(),
+    )
+
+    class Library:
+        async def create(self, person_id, **values):
+            assert person_id == "person"
+            assert values["instructions"] == instructions
+            return created
+
+    tool = CreateAgentSkillTool(Library())
+    repository = InMemoryExecutionRepository()
+    executor = ToolExecutor(ToolRegistry((tool,)), ToolPolicy(), repository)
+    context = replace(
+        execution_context(None),
+        enabled_tools=("create_agent_skill",),
+    )
+
+    result = await executor.execute(
+        ToolCall(
+            "create",
+            "create_agent_skill",
+            {
+                "name": created.name,
+                "display_name": created.display_name,
+                "description": created.description,
+                "instructions": instructions,
+                "required_tools": [],
+            },
+        ),
+        context,
+    )
+
+    assert result.status is ToolExecutionStatus.SUCCEEDED
+    assert result.model_payload()["data"]["skill"]["skill_id"] == str(created.id)
+    assert "instructions" not in result.model_payload()["data"]
+    execution = repository.records[(context.run_id, "create")]
+    assert execution.input_payload["redacted"] is True
+    assert instructions not in repr(execution.input_payload)
+    assert tool.descriptor.persist_input_payload is False
+    assert tool.descriptor.replay_in_history is False
+
+
+@pytest.mark.asyncio
+async def test_skill_inspection_exposes_manifest_and_only_requested_resource_content() -> None:
+    skill = make_skill()
+    discovery = _discovery(skill)
+    manifest = AgentSkillResourceManifest(
+        id=skill.resources[0].id,
+        key=skill.resources[0].key,
+        display_name=skill.resources[0].display_name,
+        description=skill.resources[0].description,
+        kind=skill.resources[0].kind,
+        media_type=skill.resources[0].media_type,
+        position=skill.resources[0].position,
+    )
+    calls: list[str | None] = []
+
+    class Library:
+        async def inspect(self, person_id, skill_id, resource_key=None):
+            assert (person_id, skill_id) == ("person", skill.id)
+            calls.append(resource_key)
+            return AgentSkillInspection(
+                AgentSkillBundle(discovery, skill.instructions, (manifest,)),
+                active=True,
+                resource=skill.resources[0] if resource_key is not None else None,
+            )
+
+    tool = InspectAgentSkillTool(Library())
+    context = execution_context(None)
+    without_content = await tool.execute(
+        context,
+        InspectAgentSkillInput(skill_id=skill.id),
+    )
+    with_content = await tool.execute(
+        context,
+        InspectAgentSkillInput(
+            skill_id=skill.id,
+            resource_key=skill.resources[0].key,
+        ),
+    )
+
+    assert calls == [None, skill.resources[0].key]
+    assert without_content.model_dump()["resource"] is None
+    assert "content" not in without_content.model_dump()["resources"][0]
+    assert with_content.model_dump()["resource"]["content"] == skill.resources[0].content
 
 
 def _discovery(skill: AgentSkill) -> AgentSkillDiscovery:

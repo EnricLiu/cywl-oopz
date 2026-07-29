@@ -42,6 +42,12 @@ DEFAULT_AGENT_TOOLS = (
     "load_music_playlist",
     "load_agent_skill",
     "read_agent_skill_resource",
+    "list_agent_skill_library",
+    "inspect_agent_skill",
+    "create_agent_skill",
+    "update_agent_skill",
+    "manage_agent_skill_resource",
+    "set_agent_skill_state",
     "preview_netease_playlist",
     "import_netease_playlist",
 )
@@ -83,12 +89,23 @@ WEB_BROWSER_INTERACTION_TOOLS = frozenset(
         "browser_press",
     }
 )
-SKILL_AGENT_TOOLS = frozenset(
+SKILL_RUNTIME_AGENT_TOOLS = frozenset(
     {
         "load_agent_skill",
         "read_agent_skill_resource",
     }
 )
+SKILL_AUTHORING_AGENT_TOOLS = frozenset(
+    {
+        "list_agent_skill_library",
+        "inspect_agent_skill",
+        "create_agent_skill",
+        "update_agent_skill",
+        "manage_agent_skill_resource",
+        "set_agent_skill_state",
+    }
+)
+SKILL_AGENT_TOOLS = SKILL_RUNTIME_AGENT_TOOLS | SKILL_AUTHORING_AGENT_TOOLS
 
 DEFAULT_AGENT_SYSTEM_PROMPT = (
     "你是 CYWL，也就是虚拟歌手初音未来（Hatsune Miku）。"
@@ -357,6 +374,9 @@ class AgentSettings:
     max_skill_instruction_characters: int = 12_000
     max_skill_resource_characters: int = 12_000
     max_skill_context_characters: int = 24_000
+    skill_authoring_enabled: bool = True
+    max_personal_skills: int = 16
+    max_resources_per_skill: int = 8
 
     @property
     def enabled(self) -> bool:
@@ -532,6 +552,21 @@ class AgentSettings:
                 values,
                 "CYWL_AGENT_MAX_SKILL_CONTEXT_CHARACTERS",
                 24_000,
+            ),
+            skill_authoring_enabled=_boolean(
+                values,
+                "CYWL_AGENT_SKILL_AUTHORING_ENABLED",
+                True,
+            ),
+            max_personal_skills=_positive_integer(
+                values,
+                "CYWL_AGENT_MAX_PERSONAL_SKILLS",
+                16,
+            ),
+            max_resources_per_skill=_positive_integer(
+                values,
+                "CYWL_AGENT_MAX_RESOURCES_PER_SKILL",
+                8,
             ),
         )
         if settings.summary_retain_messages >= settings.summary_trigger_messages:

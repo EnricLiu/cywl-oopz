@@ -164,6 +164,8 @@ def test_personal_skill_requires_one_owner_and_archive_disables_it() -> None:
             archived_at=datetime.now(UTC),
             enabled=True,
         )
+    with pytest.raises(ValueError, match="must be enabled"):
+        replace(personal, enabled=False)
 
 
 def test_discovery_and_share_values_validate_user_visible_identity() -> None:

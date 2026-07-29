@@ -58,6 +58,7 @@ class RecordingTool:
         effect: ToolEffect = ToolEffect.READ,
         wait: asyncio.Event | None = None,
         timeout_seconds: float = 1,
+        persist_input_payload: bool = True,
     ) -> None:
         self._descriptor = ToolDescriptor(
             name=name,
@@ -70,6 +71,7 @@ class RecordingTool:
             max_output_characters=1000,
             concurrency_safe=effect is ToolEffect.READ,
             idempotent=True,
+            persist_input_payload=persist_input_payload,
         )
         self.wait = wait
         self.calls = 0
@@ -192,6 +194,37 @@ def test_write_tools_must_declare_idempotency_and_registry_rejects_duplicates() 
     bounded = ToolExecutor._bounded_output({"text": "\\" * 1000}, 128)
     assert bounded["truncated"] is True
     assert len(json.dumps(bounded, ensure_ascii=False, separators=(",", ":"))) <= 128
+
+
+@pytest.mark.asyncio
+async def test_executor_redacts_persisted_input_without_weakening_idempotency() -> None:
+    tool = RecordingTool(
+        "write_value",
+        effect=ToolEffect.WRITE,
+        persist_input_payload=False,
+    )
+    repository = InMemoryExecutionRepository()
+    executor = ToolExecutor(ToolRegistry((tool,)), ToolPolicy(), repository)
+    context = tool_context("write_value")
+
+    first = await executor.execute(
+        ToolCall("first", "write_value", {"value": 21}),
+        context,
+    )
+    duplicate = await executor.execute(
+        ToolCall("second", "write_value", {"value": 21}),
+        context,
+    )
+
+    assert first.status is ToolExecutionStatus.SUCCEEDED
+    assert duplicate.status is ToolExecutionStatus.SUCCEEDED
+    assert tool.calls == 1
+    execution = repository.records[(context.run_id, "first")]
+    assert execution.input_payload == {
+        "redacted": True,
+        "argument_characters": len('{"value":21}'),
+    }
+    assert "21" not in repr(execution.input_payload)
 
 
 @pytest.mark.asyncio

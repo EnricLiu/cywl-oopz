@@ -13,3 +13,11 @@ class AgentSkillNotFoundError(ValueError):
 
 class AgentSkillRevisionConflictError(ValueError):
     """The requested mutation was based on an obsolete Skill revision."""
+
+
+class AgentSkillLibraryError(Exception):
+    """Expected user-facing Skill library rejection with a stable code."""
+
+    def __init__(self, error_code: str) -> None:
+        self.error_code = error_code
+        super().__init__(error_code)

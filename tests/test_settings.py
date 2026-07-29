@@ -69,6 +69,12 @@ def test_app_settings_use_the_injected_oopz_credentials(monkeypatch) -> None:
         "load_music_playlist",
         "load_agent_skill",
         "read_agent_skill_resource",
+        "list_agent_skill_library",
+        "inspect_agent_skill",
+        "create_agent_skill",
+        "update_agent_skill",
+        "manage_agent_skill_resource",
+        "set_agent_skill_state",
         "preview_netease_playlist",
         "import_netease_playlist",
     )
@@ -80,6 +86,9 @@ def test_app_settings_use_the_injected_oopz_credentials(monkeypatch) -> None:
     assert settings.agent.skills_enabled is True
     assert settings.agent.skill_catalog_refresh_seconds == 30
     assert settings.agent.max_available_skills == 32
+    assert settings.agent.skill_authoring_enabled is True
+    assert settings.agent.max_personal_skills == 16
+    assert settings.agent.max_resources_per_skill == 8
     assert settings.agent.max_skill_activations == 3
     assert settings.agent.max_skill_resources == 4
     assert settings.agent.max_skill_instruction_characters == 12000
@@ -168,6 +177,9 @@ def test_agent_skill_catalog_settings_are_validated() -> None:
             "CYWL_AGENT_MAX_SKILL_INSTRUCTION_CHARACTERS": "4000",
             "CYWL_AGENT_MAX_SKILL_RESOURCE_CHARACTERS": "5000",
             "CYWL_AGENT_MAX_SKILL_CONTEXT_CHARACTERS": "9000",
+            "CYWL_AGENT_SKILL_AUTHORING_ENABLED": "false",
+            "CYWL_AGENT_MAX_PERSONAL_SKILLS": "7",
+            "CYWL_AGENT_MAX_RESOURCES_PER_SKILL": "5",
         }
     )
 
@@ -179,6 +191,9 @@ def test_agent_skill_catalog_settings_are_validated() -> None:
     assert settings.agent.max_skill_instruction_characters == 4000
     assert settings.agent.max_skill_resource_characters == 5000
     assert settings.agent.max_skill_context_characters == 9000
+    assert settings.agent.skill_authoring_enabled is False
+    assert settings.agent.max_personal_skills == 7
+    assert settings.agent.max_resources_per_skill == 5
 
     with pytest.raises(ConfigurationError, match="SKILL_CATALOG_REFRESH_SECONDS"):
         AppSettings.from_mapping(

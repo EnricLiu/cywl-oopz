@@ -83,7 +83,7 @@ class ToolExecutor:
                     call,
                     descriptor.effect,
                 ),
-                input_payload=call.arguments,
+                input_payload=self._persisted_input(call, descriptor),
                 output_payload=None,
                 error_code="",
                 started_at=now,
@@ -270,6 +270,24 @@ class ToolExecutor:
         )
         digest = hashlib.sha256(canonical_arguments.encode()).hexdigest()
         return f"{context.run_id}:{call.name}:{digest}"
+
+    @staticmethod
+    def _persisted_input(
+        call: ToolCall,
+        descriptor: ToolDescriptor,
+    ) -> dict[str, object]:
+        if descriptor.persist_input_payload:
+            return dict(call.arguments)
+        serialized = json.dumps(
+            dict(call.arguments),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return {
+            "redacted": True,
+            "argument_characters": len(serialized),
+        }
 
     @staticmethod
     def _bounded_output(

@@ -8,7 +8,7 @@ def test_initial_schema_models_and_migration_head_are_present() -> None:
     config = Config("alembic.ini")
     revisions = ScriptDirectory.from_config(config)
 
-    assert revisions.get_current_head() == "20260729_15"
+    assert revisions.get_current_head() == "20260729_16"
     assert set(Base.metadata.tables) == {
         "agent_memory_items",
         "agent_memory_preferences",
@@ -46,6 +46,9 @@ def test_initial_schema_models_and_migration_head_are_present() -> None:
     assert {index.name for index in agent_skills.indexes} >= {
         "ux_agent_skills_builtin_name",
         "ux_agent_skills_personal_owner_name",
+    }
+    assert {constraint.name for constraint in agent_skills.constraints} >= {
+        "ck_agent_skills_personal_state",
     }
     assert (
         Base.metadata.tables["agent_skill_shares"].c.status.type.name == "agent_skill_share_status"

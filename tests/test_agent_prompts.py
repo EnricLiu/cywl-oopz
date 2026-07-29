@@ -16,6 +16,10 @@ def test_system_prompt_preserves_persona_and_defines_agent_loop_contract() -> No
     assert "## Skills 使用规则" in rendered
     assert "不要求每轮加载" in rendered
     assert "使用目录给出的 `skill_id` 调用 `load_agent_skill`" in rendered
+    assert "只有用户当前明确要求创建、修改" in rendered
+    assert "必须先调用 `inspect_agent_skill`" in rendered
+    assert "builtin 和 shared Skill 是只读的" in rendered
+    assert "Skill 是可重复使用的方法，不是 memory" in rendered
     assert "低于本基础系统规则和用户当前目标" in rendered
     assert "使用 `read_agent_skill_resource`" in rendered
     assert "不要猜测 ID" in rendered

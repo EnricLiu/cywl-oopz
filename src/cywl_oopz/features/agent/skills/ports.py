@@ -10,6 +10,8 @@ from .models import (
     AgentSkill,
     AgentSkillBundle,
     AgentSkillDiscovery,
+    AgentSkillInspection,
+    AgentSkillOwnedSummary,
     AgentSkillResource,
     AgentSkillShare,
     SkillShareStatus,
@@ -37,6 +39,60 @@ class AgentSkillLibraryRepository(Protocol):
 
     async def get_owned(self, person_id: str, skill_id: UUID) -> AgentSkill | None:
         """Load one Skill only when the caller owns it."""
+
+    async def list_owned(self, person_id: str) -> tuple[AgentSkillOwnedSummary, ...]:
+        """List active and archived personal Skill metadata."""
+
+    async def inspect_accessible(
+        self,
+        person_id: str,
+        skill_id: UUID,
+    ) -> AgentSkillInspection | None:
+        """Read fresh instructions/manifests without resource content."""
+
+    async def read_inspectable_resource(
+        self,
+        person_id: str,
+        skill_id: UUID,
+        resource_key: str,
+    ) -> AgentSkillResource | None:
+        """Read one resource visible to management inspection."""
+
+    async def update_owned(
+        self,
+        skill: AgentSkill,
+        expected_revision: int,
+    ) -> AgentSkill:
+        """Replace core fields under an owner/revision lock."""
+
+    async def upsert_owned_resource(
+        self,
+        owner_person_id: str,
+        skill_id: UUID,
+        expected_revision: int,
+        resource: AgentSkillResource,
+    ) -> AgentSkill:
+        """Insert or replace one resource under an owner/revision lock."""
+
+    async def remove_owned_resource(
+        self,
+        owner_person_id: str,
+        skill_id: UUID,
+        expected_revision: int,
+        resource_key: str,
+    ) -> AgentSkill:
+        """Remove one resource under an owner/revision lock."""
+
+    async def set_owned_state(
+        self,
+        owner_person_id: str,
+        skill_id: UUID,
+        expected_revision: int,
+        *,
+        enabled: bool,
+        archived_at: datetime | None,
+    ) -> AgentSkill:
+        """Archive or restore one Skill under an owner/revision lock."""
 
     async def invite(
         self,
@@ -86,3 +142,11 @@ class AgentSkillReadRepository(Protocol):
         revision: int,
     ) -> AgentSkillResource | None:
         """Load one resource body at one pinned revision."""
+
+
+class AgentSkillLibraryStore(
+    AgentSkillLibraryRepository,
+    AgentSkillReadRepository,
+    Protocol,
+):
+    """Complete persistence boundary used by the library application service."""

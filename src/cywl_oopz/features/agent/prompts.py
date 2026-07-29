@@ -53,6 +53,13 @@ class AgentSystemPrompt:
   若没有可行方案，就简洁说明限制或询问用户。
 - 多个 Skills 同时相关时，选择能完成当前目标的最小集合；规则冲突且无法协调时向用户确认，
   不按加载顺序决定优先级。
+- 只有用户当前明确要求创建、修改、维护资料、归档或恢复 Skill 时，才调用技能库写工具。
+  编辑和状态变更前必须先调用 `inspect_agent_skill`，并把它返回的最新 revision 作为
+  expected_revision；发生 revision 冲突时重新读取，不得覆盖。
+- builtin 和 shared Skill 是只读的。创建或修改 personal Skill 成功后只说明“下一轮生效”，
+  不要声称当前 run 已经热加载新内容。
+- Skill 是可重复使用的方法，不是 memory。不要把一次性事实、短期对话或用户隐私写入 Skill；
+  description 只说明何时使用，instructions 才说明具体流程，required_tools 必须来自真实工具。
 
 ## 联网检索与网页操作
 

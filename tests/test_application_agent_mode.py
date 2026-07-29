@@ -67,6 +67,12 @@ async def test_composition_root_routes_chat_and_provider_command_by_agent_flag(
     assert {
         "load_agent_skill",
         "read_agent_skill_resource",
+        "list_agent_skill_library",
+        "inspect_agent_skill",
+        "create_agent_skill",
+        "update_agent_skill",
+        "manage_agent_skill_resource",
+        "set_agent_skill_state",
     }.issubset(agent_application.agent_tool_registry.names)
     assert legacy_application.chat is legacy_application.legacy_chat
     assert isinstance(
@@ -143,10 +149,39 @@ async def test_composition_root_removes_skill_tools_when_skills_are_disabled(
     assert {
         "load_agent_skill",
         "read_agent_skill_resource",
+        "list_agent_skill_library",
+        "inspect_agent_skill",
+        "create_agent_skill",
+        "update_agent_skill",
+        "manage_agent_skill_resource",
+        "set_agent_skill_state",
     }.isdisjoint(application.agent_tool_registry.names)
     assert "skills" not in {command.name for command in application.commands.commands}
     skills_health = {check.name: check for check in application.health.snapshot()}["skills"]
     assert skills_health.state.value == "disabled"
+
+    await application.agent_engine.aclose()
+    await application._provider.aclose()
+    await application.database.close()
+
+
+@pytest.mark.asyncio
+async def test_composition_root_can_disable_only_skill_authoring(monkeypatch) -> None:
+    monkeypatch.setattr(application_module, "OopzBot", FakeOopzBot)
+    application = BotApplication(settings("agent", CYWL_AGENT_SKILL_AUTHORING_ENABLED="false"))
+
+    assert {
+        "load_agent_skill",
+        "read_agent_skill_resource",
+    }.issubset(application.agent_tool_registry.names)
+    assert {
+        "list_agent_skill_library",
+        "inspect_agent_skill",
+        "create_agent_skill",
+        "update_agent_skill",
+        "manage_agent_skill_resource",
+        "set_agent_skill_state",
+    }.isdisjoint(application.agent_tool_registry.names)
 
     await application.agent_engine.aclose()
     await application._provider.aclose()

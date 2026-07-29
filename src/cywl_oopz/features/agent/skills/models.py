@@ -143,6 +143,12 @@ class AgentSkill:
             raise ValueError("Personal Skill requires an owner")
         if self.archived_at is not None and self.enabled:
             raise ValueError("Archived Skill must not be enabled")
+        if (
+            self.ownership_kind is SkillOwnershipKind.PERSONAL
+            and self.archived_at is None
+            and not self.enabled
+        ):
+            raise ValueError("Active personal Skill must be enabled")
         object.__setattr__(self, "name", name)
         object.__setattr__(self, "display_name", display_name)
         object.__setattr__(self, "description", description)
@@ -246,6 +252,32 @@ class AgentSkillBundle:
             raise ValueError("Skill resource manifests contain duplicate positions")
         object.__setattr__(self, "instructions", instructions)
         object.__setattr__(self, "resources", resources)
+
+
+@dataclass(frozen=True, slots=True)
+class AgentSkillOwnedSummary:
+    """Owner-facing discovery plus active/archive state."""
+
+    discovery: AgentSkillDiscovery
+    active: bool
+
+
+@dataclass(frozen=True, slots=True)
+class AgentSkillLibrary:
+    """Compact current view of one user's Skill library."""
+
+    owned: tuple[AgentSkillOwnedSummary, ...]
+    builtin: tuple[AgentSkillDiscovery, ...]
+    shared: tuple[AgentSkillDiscovery, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class AgentSkillInspection:
+    """Fresh readable Skill content with caller-relative access."""
+
+    bundle: AgentSkillBundle
+    active: bool
+    resource: AgentSkillResource | None = None
 
 
 @dataclass(frozen=True, slots=True)

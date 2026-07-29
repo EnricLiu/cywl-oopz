@@ -47,6 +47,7 @@ from cywl_oopz.features.agent.skills.errors import (
 )
 from cywl_oopz.features.agent.skills.models import (
     AgentSkill,
+    AgentSkillResource,
     SkillAccessKind,
     SkillOwnershipKind,
     SkillResourceKind,
@@ -143,6 +144,12 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
             "read_agent_skill_resource",
             "preview_netease_playlist",
             "import_netease_playlist",
+            "list_agent_skill_library",
+            "inspect_agent_skill",
+            "create_agent_skill",
+            "update_agent_skill",
+            "manage_agent_skill_resource",
+            "set_agent_skill_state",
         ]
 
         async with test_engine.begin() as connection:
@@ -189,6 +196,12 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
             "load_music_playlist",
             "load_agent_skill",
             "read_agent_skill_resource",
+            "list_agent_skill_library",
+            "inspect_agent_skill",
+            "create_agent_skill",
+            "update_agent_skill",
+            "manage_agent_skill_resource",
+            "set_agent_skill_state",
             "preview_netease_playlist",
             "import_netease_playlist",
         ]
@@ -272,11 +285,13 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
         assert set(skills_by_name) == {
             "music-curator",
             "netease-playlist-importer",
+            "skill-authoring",
             "test-research",
             "web-research",
         }
         music_skill = skills_by_name["music-curator"]
         import_skill = skills_by_name["netease-playlist-importer"]
+        authoring_skill = skills_by_name["skill-authoring"]
         web_skill = skills_by_name["web-research"]
         assert music_skill.version == "1.0.0"
         assert music_skill.metadata["builtin_seed"] == "20260729_12"
@@ -302,6 +317,17 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
             }
         )
         assert [resource.key for resource in import_skill.resources] == ["netease-api-behavior"]
+        assert authoring_skill.metadata["builtin_seed"] == "20260729_16"
+        assert authoring_skill.required_tools == frozenset(
+            {
+                "list_agent_skill_library",
+                "inspect_agent_skill",
+                "create_agent_skill",
+                "update_agent_skill",
+                "manage_agent_skill_resource",
+                "set_agent_skill_state",
+            }
+        )
         assert web_skill.version == "1.0.0"
         assert web_skill.metadata["builtin_seed"] == "20260729_12"
         assert web_skill.required_tools == frozenset({"search_web", "read_web_page"})
@@ -425,6 +451,86 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
         assert await skill_repository.revoke("owner-one", invitation.id) is True
         assert first_personal.id not in {
             skill.id for skill in await skill_repository.load_accessible("recipient")
+        }
+        owned_summaries = await skill_repository.list_owned("owner-one")
+        assert [(item.discovery.id, item.active) for item in owned_summaries] == [
+            (first_personal.id, True)
+        ]
+        inspected = await skill_repository.inspect_accessible(
+            "owner-one",
+            first_personal.id,
+        )
+        assert inspected is not None
+        assert inspected.bundle.instructions == first_personal.instructions
+        assert inspected.resource is None
+
+        updated_personal = await skill_repository.update_owned(
+            replace(
+                first_personal,
+                description="为 owner 规划并核对旅行安排。",
+            ),
+            first_personal.revision,
+        )
+        assert updated_personal.revision == first_personal.revision + 1
+        with pytest.raises(AgentSkillRevisionConflictError):
+            await skill_repository.update_owned(
+                replace(updated_personal, version="2"),
+                first_personal.revision,
+            )
+        personal_resource = AgentSkillResource(
+            id=uuid4(),
+            key="packing-list",
+            display_name="行李清单",
+            description="整理出发前的行李时读取。",
+            kind=SkillResourceKind.TEMPLATE,
+            media_type="text/markdown",
+            content="# 行李清单\n- 证件",
+            position=1,
+        )
+        with_resource = await skill_repository.upsert_owned_resource(
+            "owner-one",
+            first_personal.id,
+            updated_personal.revision,
+            personal_resource,
+        )
+        assert with_resource.revision == updated_personal.revision + 1
+        assert with_resource.resources == (personal_resource,)
+        inspected_resource = await skill_repository.read_inspectable_resource(
+            "owner-one",
+            first_personal.id,
+            personal_resource.key,
+        )
+        assert inspected_resource == personal_resource
+        without_resource = await skill_repository.remove_owned_resource(
+            "owner-one",
+            first_personal.id,
+            with_resource.revision,
+            personal_resource.key,
+        )
+        assert without_resource.revision == with_resource.revision + 1
+        assert without_resource.resources == ()
+        archived = await skill_repository.set_owned_state(
+            "owner-one",
+            first_personal.id,
+            without_resource.revision,
+            enabled=False,
+            archived_at=datetime.now(UTC),
+        )
+        assert archived.revision == without_resource.revision + 1
+        assert first_personal.id not in {
+            item.id for item in await skill_repository.list_accessible("owner-one")
+        }
+        assert (await skill_repository.list_owned("owner-one"))[0].active is False
+        restored = await skill_repository.set_owned_state(
+            "owner-one",
+            first_personal.id,
+            archived.revision,
+            enabled=True,
+            archived_at=None,
+        )
+        assert restored.revision == archived.revision + 1
+        assert first_personal.id in {
+            item.id for item in await skill_repository.list_accessible("owner-one")
         }
         skill_catalog = ReloadableAgentSkillCatalog(
             skill_repository,

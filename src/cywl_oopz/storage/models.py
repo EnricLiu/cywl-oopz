@@ -68,6 +68,12 @@ DEFAULT_AGENT_TOOLS = text(
     '"load_music_playlist",'
     '"load_agent_skill",'
     '"read_agent_skill_resource",'
+    '"list_agent_skill_library",'
+    '"inspect_agent_skill",'
+    '"create_agent_skill",'
+    '"update_agent_skill",'
+    '"manage_agent_skill_resource",'
+    '"set_agent_skill_state",'
     '"preview_netease_playlist",'
     '"import_netease_playlist"'
     "]'::jsonb"
@@ -331,6 +337,10 @@ class AgentSkillRecord(Base):
             "(ownership_kind = 'personal' AND "
             "char_length(btrim(owner_person_id)) > 0)",
             name="ck_agent_skills_ownership",
+        ),
+        CheckConstraint(
+            "ownership_kind = 'builtin' OR enabled = (archived_at IS NULL)",
+            name="ck_agent_skills_personal_state",
         ),
     )
 
