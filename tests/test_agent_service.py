@@ -41,6 +41,8 @@ RUNTIME_MODEL_ID = UUID("10000000-0000-0000-0000-000000000004")
 
 class InMemoryCatalogRepository:
     def __init__(self) -> None:
+        self.provider_loads = 0
+        self.model_loads = 0
         self.provider = LlmProvider(
             id=PROVIDER_ID,
             alias="provider",
@@ -77,9 +79,11 @@ class InMemoryCatalogRepository:
         )
 
     async def load_providers(self) -> tuple[LlmProvider, ...]:
+        self.provider_loads += 1
         return (self.provider,)
 
     async def load_models(self) -> tuple[LlmModel, ...]:
+        self.model_loads += 1
         return self.models
 
 
@@ -113,6 +117,7 @@ class DuplicateModelAliasCatalogRepository(InMemoryCatalogRepository):
         )
 
     async def load_providers(self) -> tuple[LlmProvider, ...]:
+        self.provider_loads += 1
         return self.provider, self.second_provider
 
 
@@ -503,7 +508,7 @@ async def test_agent_service_switches_thread_and_user_provider_preferences(
     assert selected == "provider/other"
     assert current.model.model_id == OTHER_MODEL_ID
     assert selections.user_models["another-person"] == OTHER_MODEL_ID
-    assert service.list_models() == ("provider/default", "provider/other")
+    assert await service.list_models() == ("provider/default", "provider/other")
     assert [
         (
             choice.qualified_alias,
@@ -511,7 +516,7 @@ async def test_agent_service_switches_thread_and_user_provider_preferences(
             choice.model_display_name,
             choice.is_provider_default,
         )
-        for choice in service.list_model_choices()
+        for choice in await service.list_model_choices()
     ] == [
         ("provider/default", "Provider", "Default", True),
         ("provider/other", "Provider", "Other", False),
@@ -522,9 +527,10 @@ async def test_agent_service_switches_thread_and_user_provider_preferences(
 async def test_agent_service_model_short_alias_uses_current_provider(
     chat_settings,
 ) -> None:
+    repository = DuplicateModelAliasCatalogRepository()
     service, _, _, _, _ = await build_service(
         chat_settings,
-        catalog_repository=DuplicateModelAliasCatalogRepository(),
+        catalog_repository=repository,
     )
 
     selected = await service.select_model(key(), "other")
@@ -532,6 +538,8 @@ async def test_agent_service_model_short_alias_uses_current_provider(
 
     assert selected == "provider/other"
     assert current.model.model_id == OTHER_MODEL_ID
+    assert repository.provider_loads == 3
+    assert repository.model_loads == 3
 
 
 @pytest.mark.asyncio
@@ -565,11 +573,34 @@ async def test_agent_service_force_refreshes_database_before_explicit_model_swit
     )
 
     assert selected == "provider/runtime"
-    assert service.list_models() == (
+    assert await service.list_models() == (
         "provider/default",
         "provider/other",
         "provider/runtime",
     )
+    assert repository.provider_loads == 3
+    assert repository.model_loads == 3
+
+
+@pytest.mark.asyncio
+async def test_agent_service_catalog_view_uses_one_database_read_for_selection_and_menu(
+    chat_settings,
+) -> None:
+    repository = InMemoryCatalogRepository()
+    service, _, _, _, _ = await build_service(
+        chat_settings,
+        catalog_repository=repository,
+    )
+
+    view = await service.model_catalog_view(key())
+
+    assert view.selection.model.model_id == DEFAULT_MODEL_ID
+    assert [choice.qualified_alias for choice in view.choices] == [
+        "provider/default",
+        "provider/other",
+    ]
+    assert repository.provider_loads == 2
+    assert repository.model_loads == 2
 
 
 @pytest.mark.asyncio

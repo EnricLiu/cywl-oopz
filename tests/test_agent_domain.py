@@ -95,23 +95,18 @@ class FakeSelectionRepository:
 
 
 @pytest.mark.asyncio
-async def test_provider_catalog_refreshes_after_ttl_and_coalesces_concurrent_checks() -> None:
+async def test_provider_catalog_refresh_reads_database_on_every_call() -> None:
     repository = FakeCatalogRepository(
         (provider(),),
         (model(MODEL_ID, application_default=True),),
     )
-    now = [100.0]
-    catalog = ReloadableProviderCatalog(
-        repository,
-        refresh_seconds=10,
-        clock=lambda: now[0],
-    )
+    catalog = ReloadableProviderCatalog(repository)
     await catalog.reload()
     original = catalog.snapshot
 
-    assert await catalog.refresh_if_stale() is False
-    assert repository.provider_loads == 1
-    assert repository.model_loads == 1
+    assert await catalog.refresh() is True
+    assert repository.provider_loads == 2
+    assert repository.model_loads == 2
 
     repository.models = (
         replace(
@@ -120,44 +115,36 @@ async def test_provider_catalog_refreshes_after_ttl_and_coalesces_concurrent_che
             display_name="Updated model",
         ),
     )
-    now[0] = 111
     refreshed = await asyncio.gather(
-        catalog.refresh_if_stale(),
-        catalog.refresh_if_stale(),
-        catalog.refresh_if_stale(),
+        catalog.refresh(),
+        catalog.refresh(),
+        catalog.refresh(),
     )
 
-    assert refreshed.count(True) == 1
+    assert refreshed == [True, True, True]
     assert catalog.snapshot is not original
     assert catalog.snapshot.models[MODEL_ID].remote_model_name == "updated-remote"
-    assert repository.provider_loads == 2
-    assert repository.model_loads == 2
+    assert repository.provider_loads == 5
+    assert repository.model_loads == 5
 
 
 @pytest.mark.asyncio
-async def test_provider_catalog_retains_snapshot_on_refresh_failure_and_force_retries() -> None:
+async def test_provider_catalog_retains_snapshot_on_failure_and_retries_next_read() -> None:
     repository = FakeCatalogRepository(
         (provider(),),
         (model(MODEL_ID, application_default=True),),
     )
-    now = [0.0]
-    catalog = ReloadableProviderCatalog(
-        repository,
-        refresh_seconds=10,
-        clock=lambda: now[0],
-    )
+    catalog = ReloadableProviderCatalog(repository)
     await catalog.reload()
     previous = catalog.snapshot
 
     repository.error = RuntimeError("database unavailable")
-    now[0] = 11
-    assert await catalog.refresh_if_stale() is False
+    assert await catalog.refresh() is False
     assert catalog.snapshot is previous
 
     repository.error = None
     repository.models = (replace(repository.models[0], display_name="Recovered"),)
-    assert await catalog.refresh_if_stale() is False
-    assert await catalog.refresh_if_stale(force=True) is True
+    assert await catalog.refresh() is True
     assert catalog.snapshot.models[MODEL_ID].display_name == "Recovered"
 
 
@@ -167,12 +154,7 @@ async def test_provider_selection_refreshes_database_catalog_at_run_boundary() -
         (provider(),),
         (model(MODEL_ID, application_default=True),),
     )
-    now = [0.0]
-    catalog = ReloadableProviderCatalog(
-        repository,
-        refresh_seconds=5,
-        clock=lambda: now[0],
-    )
+    catalog = ReloadableProviderCatalog(repository)
     await catalog.reload()
     selection = ProviderSelectionService(
         catalog,
@@ -185,13 +167,14 @@ async def test_provider_selection_refreshes_database_catalog_at_run_boundary() -
             remote_model_name="database-updated",
         ),
     )
-    now[0] = 6
     selected = await selection.resolve(
         ConversationKey("private", "", "", "person"),
         required_capabilities=frozenset({ModelCapability.TOOL_CALLING}),
     )
 
     assert selected.model.remote_model_name == "database-updated"
+    assert repository.provider_loads == 2
+    assert repository.model_loads == 2
 
 
 @pytest.mark.asyncio

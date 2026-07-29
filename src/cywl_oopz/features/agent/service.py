@@ -47,6 +47,7 @@ from .models import (
     AgentStopReason,
     AgentThread,
     ModelCapability,
+    ModelCatalogView,
     ModelSelection,
     SelectableModel,
 )
@@ -359,7 +360,7 @@ class AgentConversationService:
         choice = model.strip()
         if not choice:
             raise ValueError("Model choice must not be empty")
-        await self._catalog.refresh_if_stale(force=True)
+        await self._catalog.refresh()
         snapshot = self._catalog.snapshot
         if "/" in choice:
             provider_alias, model_alias = choice.split("/", 1)
@@ -372,7 +373,11 @@ class AgentConversationService:
             selectable = snapshot.selectable_models(
                 required_capabilities=self._required_capabilities,
             )
-            current = await self.current_selection(key)
+            current = await self._selection.resolve(
+                key,
+                required_capabilities=self._required_capabilities,
+                refresh_catalog=False,
+            )
             provider_matches = tuple(
                 item
                 for item in selectable
@@ -406,7 +411,7 @@ class AgentConversationService:
         user_default: bool,
     ) -> str:
         """Select a Provider default or named model for a thread or user."""
-        await self._catalog.refresh_if_stale(force=True)
+        await self._catalog.refresh()
         reference = self._catalog.snapshot.find_selectable(
             provider_alias,
             model_alias,
@@ -427,8 +432,23 @@ class AgentConversationService:
         )
         return f"{reference.provider_alias}/{reference.model_alias}"
 
-    def list_model_choices(self) -> tuple[SelectableModel, ...]:
-        """List safe display metadata; endpoints and credentials never enter replies."""
+    async def model_catalog_view(self, key: ConversationKey) -> ModelCatalogView:
+        """Read PostgreSQL once for an interactive selection and choice view."""
+        await self._catalog.refresh()
+        selection = await self._selection.resolve(
+            key,
+            required_capabilities=self._required_capabilities,
+            refresh_catalog=False,
+        )
+        return ModelCatalogView(selection, self._model_choices())
+
+    async def list_model_choices(self) -> tuple[SelectableModel, ...]:
+        """Read PostgreSQL and list safe display metadata without credentials."""
+        await self._catalog.refresh()
+        return self._model_choices()
+
+    def _model_choices(self) -> tuple[SelectableModel, ...]:
+        """Project the operation snapshot into safe user-facing choices."""
         snapshot = self._catalog.snapshot
         return tuple(
             SelectableModel(
@@ -443,13 +463,9 @@ class AgentConversationService:
             )
         )
 
-    def list_models(self) -> tuple[str, ...]:
-        """Retain the former safe alias list for non-command callers."""
-        return tuple(choice.qualified_alias for choice in self.list_model_choices())
-
-    async def refresh_model_catalog(self) -> bool:
-        """Force a safe database refresh for interactive catalog commands."""
-        return await self._catalog.refresh_if_stale(force=True)
+    async def list_models(self) -> tuple[str, ...]:
+        """Read PostgreSQL and return the former safe alias-only representation."""
+        return tuple(choice.qualified_alias for choice in await self.list_model_choices())
 
     async def current_selection(self, key: ConversationKey) -> ModelSelection:
         """Resolve current selection for status and Provider commands."""

@@ -15,6 +15,7 @@ from cywl_oopz.features.agent.commands import (
 )
 from cywl_oopz.features.agent.models import (
     AgentModelRef,
+    ModelCatalogView,
     ModelSelection,
     ModelSelectionSource,
     ProviderProtocol,
@@ -32,13 +33,9 @@ class FakeProviderService:
     def __init__(self) -> None:
         self.selections: list[tuple[str, str | None, bool]] = []
         self.model_selections: list[str] = []
-        self.catalog_refreshes = 0
-
-    async def refresh_model_catalog(self) -> bool:
-        self.catalog_refreshes += 1
-        return True
 
     async def current_selection(self, key) -> ModelSelection:
+        del key
         return ModelSelection(
             AgentModelRef(
                 provider_id=uuid4(),
@@ -53,12 +50,15 @@ class FakeProviderService:
             ModelSelectionSource.THREAD,
         )
 
-    def list_model_choices(self) -> tuple[SelectableModel, ...]:
+    def _choices(self) -> tuple[SelectableModel, ...]:
         return (
             SelectableModel("primary", "Primary AI", "chat", "Chat", True),
             SelectableModel("primary", "Primary AI", "reasoning", "Reasoning", False),
             SelectableModel("secondary", "Secondary AI", "fast", "Fast", True),
         )
+
+    async def model_catalog_view(self, key) -> ModelCatalogView:
+        return ModelCatalogView(await self.current_selection(key), self._choices())
 
     async def select_model(self, key, choice: str) -> str:
         del key
@@ -143,7 +143,6 @@ async def test_provider_command_lists_and_switches_thread_model() -> None:
     assert "!provider <Provider> [模型]" in list_context.replies[0]
     assert use_context.replies == ["✅ **当前对话模型** secondary/fast"]
     assert service.selections == [("secondary", "fast", False)]
-    assert service.catalog_refreshes == 1
 
 
 @pytest.mark.asyncio
@@ -188,7 +187,6 @@ async def test_agent_model_command_lists_current_provider_and_accepts_short_alia
     assert "secondary" not in rendered
     assert switch_context.replies == ["✅ **当前对话模型** primary/reasoning"]
     assert service.model_selections == ["reasoning"]
-    assert service.catalog_refreshes == 1
 
 
 @pytest.mark.asyncio

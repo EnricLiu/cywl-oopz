@@ -198,13 +198,11 @@ class AgentModelCommand(ChatCommandController):
 
     async def _show_models(self, context: EventContext, key: ConversationKey) -> None:
         try:
-            await self._agent.refresh_model_catalog()
-            selection = await self._agent.current_selection(key)
-            choices = self._agent.list_model_choices()
+            catalog = await self._agent.model_catalog_view(key)
         except Exception as exc:
             await self._reply_error(context, exc)
             return
-        await context.reply(self._view.models(selection, choices))
+        await context.reply(self._view.models(catalog.selection, catalog.choices))
 
 
 class ProviderCommand(ChatCommandController):
@@ -274,13 +272,11 @@ class ProviderCommand(ChatCommandController):
 
     async def _show_providers(self, context: EventContext, key: ConversationKey) -> None:
         try:
-            await self._agent.refresh_model_catalog()
-            selection = await self._agent.current_selection(key)
-            choices = self._agent.list_model_choices()
+            catalog = await self._agent.model_catalog_view(key)
         except Exception as exc:
             await self._reply_error(context, exc)
             return
-        await context.reply(self._view.providers(selection, choices))
+        await context.reply(self._view.providers(catalog.selection, catalog.choices))
 
     @staticmethod
     def _selection_arguments(arguments: tuple[str, ...]) -> tuple[str, str | None] | None:

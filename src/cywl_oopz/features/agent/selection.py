@@ -31,9 +31,11 @@ class ProviderSelectionService:
         key: ConversationKey,
         *,
         required_capabilities: frozenset[ModelCapability] = frozenset(),
+        refresh_catalog: bool = True,
     ) -> ModelSelection:
         """Apply thread → user → channel → application precedence with fallback."""
-        await self._catalog.refresh_if_stale()
+        if refresh_catalog:
+            await self._catalog.refresh()
         candidates = await self._selections.load_candidates(key)
         catalog = self._catalog.snapshot
         application_default = (

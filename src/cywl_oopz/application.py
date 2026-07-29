@@ -149,10 +149,7 @@ class BotApplication:
         )
         self.commands = CommandRouter(settings.command_prefix)
         catalog_repository = SqlAlchemyProviderCatalogRepository(self.database.session_factory)
-        self.agent_catalog = ReloadableProviderCatalog(
-            catalog_repository,
-            refresh_seconds=settings.agent.provider_catalog_refresh_seconds,
-        )
+        self.agent_catalog = ReloadableProviderCatalog(catalog_repository)
         self.agent_catalog_admin = ProviderCatalogAdminService(
             catalog_repository,
             self.agent_catalog,

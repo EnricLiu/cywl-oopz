@@ -161,6 +161,14 @@ class SelectableModel:
 
 
 @dataclass(frozen=True, slots=True)
+class ModelCatalogView:
+    """One database-fresh selection plus the choices rendered beside it."""
+
+    selection: ModelSelection
+    choices: tuple[SelectableModel, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class AgentIdentity:
     """Trusted caller identity derived from OOPZ context by the integration layer."""
 
