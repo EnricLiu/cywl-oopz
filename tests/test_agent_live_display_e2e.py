@@ -251,6 +251,17 @@ class LiveAgentDisplayHarness:
                         enabled_agent_tools=[
                             "get_agent_status",
                             "get_channel_settings",
+                            "load_agent_skill",
+                            "read_agent_skill_resource",
+                            "search_web",
+                            "read_web_page",
+                            "search_music_catalog",
+                            "get_music_queue",
+                            "set_music_playback_mode",
+                            "list_music_playlists",
+                            "get_music_playlist",
+                            "add_music_playlist_track",
+                            "load_music_playlist",
                         ],
                     )
                 )
@@ -262,6 +273,17 @@ class LiveAgentDisplayHarness:
                     *record.enabled_agent_tools,
                     "get_agent_status",
                     "get_channel_settings",
+                    "load_agent_skill",
+                    "read_agent_skill_resource",
+                    "search_web",
+                    "read_web_page",
+                    "search_music_catalog",
+                    "get_music_queue",
+                    "set_music_playback_mode",
+                    "list_music_playlists",
+                    "get_music_playlist",
+                    "add_music_playlist_track",
+                    "load_music_playlist",
                 }
             )
 
@@ -308,6 +330,17 @@ class LiveAgentDisplayHarness:
             "拿到两个结果后用一句简短中文确认完成。",
             ("get_agent_status", "get_channel_settings"),
         ),
+        (
+            "请使用 web-research 技能确认 Pydantic AI 官方文档的网址。"
+            "先加载技能，再搜索公开网页并读取一条官方结果；"
+            "最后用一句中文给出结论和实际读取的 URL。",
+            ("load_agent_skill", "search_web", "read_web_page"),
+        ),
+        (
+            "请使用 music-curator 技能查看当前 area 的共享歌单。"
+            "先加载技能，再调用 list_music_playlists；最后用一句中文总结。",
+            ("load_agent_skill", "list_music_playlists"),
+        ),
     ],
 )
 async def test_live_agent_run_uses_exactly_one_edited_oopz_message(
@@ -332,10 +365,15 @@ async def test_live_agent_run_uses_exactly_one_edited_oopz_message(
         assert " tokens\n" in terminal
         assert displayed[0].edit_time > 0
         tool_names = await harness.persisted_tool_names()
-        if not expected_tools:
+        persistent_expected = set(expected_tools).difference(
+            {"load_agent_skill", "read_agent_skill_resource"}
+        )
+        if not persistent_expected:
             assert tool_names == set()
         else:
-            assert set(expected_tools).issubset(tool_names)
+            assert persistent_expected.issubset(tool_names)
+        if "load_agent_skill" in expected_tools:
+            assert any("**加载技能**" in snapshot for snapshot in harness.gateway.edited_texts)
     finally:
         await harness.aclose()
 

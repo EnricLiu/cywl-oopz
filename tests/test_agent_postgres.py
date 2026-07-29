@@ -58,6 +58,7 @@ from cywl_oopz.features.music.models import MusicTrack
 from cywl_oopz.features.music.playlist_repository import (
     SqlAlchemyMusicPlaylistRepository,
 )
+from cywl_oopz.settings import DEFAULT_AGENT_TOOLS
 from cywl_oopz.storage.models import (
     AgentRunRecord,
     ChannelSettingsRecord,
@@ -207,7 +208,7 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
                                 required_tools
                             )
                             VALUES (
-                                'web-research', '网页研究',
+                                'test-research', '网页研究',
                                 '搜索并阅读可靠来源。', '先搜索，再阅读关键原文。', '1',
                                 '["search_web", "read_web_page"]'::jsonb
                             )
@@ -252,16 +253,40 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
         skill_repository = SqlAlchemyAgentSkillRepository(sessions)
         generation_after_insert = await skill_repository.generation()
         loaded_skills = await skill_repository.load_enabled()
-        assert len(loaded_skills) == 1
-        loaded_skill = loaded_skills[0]
-        assert loaded_skill.name == "web-research"
+        skills_by_name = {skill.name: skill for skill in loaded_skills}
+        assert set(skills_by_name) == {
+            "music-curator",
+            "test-research",
+            "web-research",
+        }
+        music_skill = skills_by_name["music-curator"]
+        web_skill = skills_by_name["web-research"]
+        assert music_skill.version == "1.0.0"
+        assert music_skill.metadata["builtin_seed"] == "20260729_12"
+        assert music_skill.required_tools == frozenset(
+            {
+                "search_music_catalog",
+                "get_music_queue",
+                "set_music_playback_mode",
+                "list_music_playlists",
+                "get_music_playlist",
+                "add_music_playlist_track",
+                "load_music_playlist",
+            }
+        )
+        assert [resource.key for resource in music_skill.resources] == ["batch-curation-guide"]
+        assert web_skill.version == "1.0.0"
+        assert web_skill.metadata["builtin_seed"] == "20260729_12"
+        assert web_skill.required_tools == frozenset({"search_web", "read_web_page"})
+        assert [resource.key for resource in web_skill.resources] == ["source-evaluation"]
+        loaded_skill = skills_by_name["test-research"]
         assert loaded_skill.revision == 2
         assert loaded_skill.required_tools == frozenset({"search_web", "read_web_page"})
         assert loaded_skill.resources[0].id == resource_row["id"]
         assert loaded_skill.resources[0].kind is SkillResourceKind.REFERENCE
         skill_catalog = ReloadableAgentSkillCatalog(
             skill_repository,
-            registered_tools=("search_web", "read_web_page"),
+            registered_tools=DEFAULT_AGENT_TOOLS,
             refresh_seconds=30,
             max_available_skills=8,
         )
@@ -282,9 +307,11 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
         after_resource_update = await skill_catalog.reload()
         assert after_resource_update is skill_catalog.snapshot
         assert after_resource_update is not before_resource_update
-        assert "官方" not in before_resource_update.skills["web-research"].resources[0].content
-        assert "官方" in after_resource_update.skills["web-research"].resources[0].content
-        reloaded_skill = (await skill_repository.load_enabled())[0]
+        assert "官方" not in before_resource_update.skills["test-research"].resources[0].content
+        assert "官方" in after_resource_update.skills["test-research"].resources[0].content
+        reloaded_skill = {skill.name: skill for skill in await skill_repository.load_enabled()}[
+            "test-research"
+        ]
         assert reloaded_skill.revision == loaded_skill.revision + 1
         assert "官方" in reloaded_skill.resources[0].content
 

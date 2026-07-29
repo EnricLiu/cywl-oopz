@@ -116,6 +116,7 @@ from .integrations.oopz.reactions import OopzReactionGateway
 from .integrations.web.agent_browser_mcp import AgentBrowserMcpGateway
 from .integrations.web.duckduckgo import DuckDuckGoSearchGateway
 from .settings import (
+    DEFAULT_AGENT_TOOLS,
     MUSIC_AGENT_TOOLS,
     SKILL_AGENT_TOOLS,
     WEB_BROWSER_INTERACTION_TOOLS,
@@ -298,7 +299,7 @@ class BotApplication:
         self.agent_tool_registry = ToolRegistry(agent_tools)
         self.agent_skill_catalog = ReloadableAgentSkillCatalog(
             SqlAlchemyAgentSkillRepository(self.database.session_factory),
-            registered_tools=self.agent_tool_registry.names,
+            registered_tools=tuple(sorted({*DEFAULT_AGENT_TOOLS, *self.agent_tool_registry.names})),
             refresh_seconds=settings.agent.skill_catalog_refresh_seconds,
             max_available_skills=settings.agent.max_available_skills,
             health=self.health,

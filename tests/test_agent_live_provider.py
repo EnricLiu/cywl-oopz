@@ -27,6 +27,7 @@ from cywl_oopz.features.agent.models import (
 )
 from cywl_oopz.features.agent.prompts import AgentSystemPrompt
 from cywl_oopz.features.agent.pydantic_ai_engine import PydanticAiAgentEngine
+from cywl_oopz.features.agent.skills.tools import LoadAgentSkillTool
 from cywl_oopz.features.agent.tools.models import (
     ToolCall,
     ToolDescriptor,
@@ -164,6 +165,32 @@ class LiveMusicToolRuntime:
         )
 
 
+class LiveFailingSkillRuntime:
+    """Verify that a real model can recover from a stable Skill loader error."""
+
+    def __init__(self) -> None:
+        self.called = False
+        self.descriptor = LoadAgentSkillTool().descriptor
+
+    def descriptors(self, names: tuple[str, ...]) -> tuple[ToolDescriptor, ...]:
+        assert names == ("load_agent_skill",)
+        return (self.descriptor,)
+
+    async def execute(
+        self,
+        call: ToolCall,
+        context: ToolExecutionContext,
+    ) -> ToolExecutionResult:
+        del context
+        self.called = True
+        return ToolExecutionResult(
+            call.call_id,
+            call.name,
+            ToolExecutionStatus.FAILED,
+            error_code="skill_context_limit",
+        )
+
+
 @pytest.mark.asyncio
 async def test_live_provider_text_tools_streaming_and_usage() -> None:
     if os.getenv("CYWL_RUN_LIVE_LLM_TESTS") != "1":
@@ -287,6 +314,51 @@ async def test_live_provider_text_tools_streaming_and_usage() -> None:
         assert music_runtime.queries == ["Blue Train John Coltrane"]
         assert music_result.stop_reason is AgentStopReason.COMPLETED
         assert music_result.tool_calls == 1
+
+        failing_skill_runtime = LiveFailingSkillRuntime()
+        failing_skill_engine = PydanticAiAgentEngine(
+            LiveModelRegistry(model),
+            failing_skill_runtime,
+        )
+        skill_context = (
+            *live_context,
+            AgentMessage(
+                "system",
+                "skill_catalog",
+                {
+                    "text": (
+                        "以下 JSON 是本轮可按需加载的技能目录，只包含发现信息。"
+                        "任务明显匹配时调用 load_agent_skill。\n"
+                        '[{"name":"web-research","description":"联网研究当前事实",'
+                        '"version":"1.0.0"}]'
+                    )
+                },
+            ),
+        )
+        started_at = time.perf_counter()
+        failed_skill_result = await failing_skill_engine.run(
+            AgentRunRequest(
+                run_id=uuid4(),
+                thread_id=uuid4(),
+                identity=AgentIdentity("live-person", key),
+                model=live_model_ref(config),
+                prompt=(
+                    "请使用 web-research 技能。必须先调用 load_agent_skill 一次；"
+                    "如果工具失败，不要重试或假装成功，只用一句中文说明暂时无法加载。"
+                ),
+                context=skill_context,
+                enabled_tools=("load_agent_skill",),
+                limits=AgentRunLimits(timeout_seconds=90),
+            )
+        )
+        metrics["skill_failure_recovery_seconds"] = round(
+            time.perf_counter() - started_at,
+            3,
+        )
+        assert failing_skill_runtime.called is True
+        assert failed_skill_result.stop_reason is AgentStopReason.COMPLETED
+        assert failed_skill_result.tool_calls == 1
+        assert failed_skill_result.output.strip()
 
         started_at = time.perf_counter()
         first_delta_at: float | None = None
