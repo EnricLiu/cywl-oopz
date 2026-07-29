@@ -8,12 +8,15 @@ def test_initial_schema_models_and_migration_head_are_present() -> None:
     config = Config("alembic.ini")
     revisions = ScriptDirectory.from_config(config)
 
-    assert revisions.get_current_head() == "20260727_10"
+    assert revisions.get_current_head() == "20260729_11"
     assert set(Base.metadata.tables) == {
         "agent_memory_items",
         "agent_memory_preferences",
         "agent_messages",
         "agent_runs",
+        "agent_skill_catalog_state",
+        "agent_skill_resources",
+        "agent_skills",
         "agent_threads",
         "agent_tool_executions",
         "channel_settings",
@@ -32,4 +35,8 @@ def test_initial_schema_models_and_migration_head_are_present() -> None:
     assert Base.metadata.tables["agent_runs"].c.status.type.name == "agent_run_status"
     assert (
         Base.metadata.tables["agent_tool_executions"].c.status.type.name == "tool_execution_status"
+    )
+    assert (
+        Base.metadata.tables["agent_skill_resources"].c.kind.type.name
+        == "agent_skill_resource_kind"
     )

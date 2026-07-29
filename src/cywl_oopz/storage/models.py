@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import (
     JSON,
     BigInteger,
+    Boolean,
     CheckConstraint,
     DateTime,
     Enum,
@@ -16,6 +17,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    SmallInteger,
     String,
     Text,
     UniqueConstraint,
@@ -32,6 +34,7 @@ from cywl_oopz.core.lifecycle import (
     ToolEffect,
     ToolExecutionStatus,
 )
+from cywl_oopz.features.agent.skills.models import SkillResourceKind
 
 CURRENT_TIMESTAMP = text("CURRENT_TIMESTAMP")
 GENERATED_UUID = text("gen_random_uuid()")
@@ -58,7 +61,9 @@ DEFAULT_AGENT_TOOLS = text(
     '"get_music_playlist",'
     '"add_music_playlist_track",'
     '"remove_music_playlist_track",'
-    '"load_music_playlist"'
+    '"load_music_playlist",'
+    '"load_agent_skill",'
+    '"read_agent_skill_resource"'
     "]'::jsonb"
 )
 TRUE = text("true")
@@ -96,6 +101,12 @@ TOOL_EFFECT_ENUM = Enum(
 TOOL_EXECUTION_STATUS_ENUM = Enum(
     ToolExecutionStatus,
     name="tool_execution_status",
+    values_callable=_enum_values,
+    validate_strings=True,
+)
+AGENT_SKILL_RESOURCE_KIND_ENUM = Enum(
+    SkillResourceKind,
+    name="agent_skill_resource_kind",
     values_callable=_enum_values,
     validate_strings=True,
 )
@@ -247,6 +258,197 @@ class MusicPlaylistTrackRecord(Base):
         DateTime(timezone=True),
         default=utc_now,
         server_default=CURRENT_TIMESTAMP,
+    )
+
+
+class AgentSkillRecord(Base):
+    """One globally enabled progressive-disclosure Agent skill."""
+
+    __tablename__ = "agent_skills"
+    __table_args__ = (
+        CheckConstraint(
+            "name ~ '^[a-z][a-z0-9-]{0,63}$'",
+            name="ck_agent_skills_name",
+        ),
+        CheckConstraint(
+            "char_length(btrim(display_name)) > 0",
+            name="ck_agent_skills_display_name",
+        ),
+        CheckConstraint(
+            "char_length(btrim(description)) > 0 AND char_length(description) <= 1024",
+            name="ck_agent_skills_description",
+        ),
+        CheckConstraint(
+            "char_length(btrim(instructions)) > 0 AND char_length(instructions) <= 20000",
+            name="ck_agent_skills_instructions",
+        ),
+        CheckConstraint(
+            "char_length(btrim(version)) > 0",
+            name="ck_agent_skills_version",
+        ),
+        CheckConstraint("revision > 0", name="ck_agent_skills_revision_positive"),
+        CheckConstraint(
+            "cywl_valid_agent_skill_required_tools(required_tools)",
+            name="ck_agent_skills_required_tools",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(metadata) = 'object'",
+            name="ck_agent_skills_metadata_object",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid,
+        primary_key=True,
+        default=uuid4,
+        server_default=GENERATED_UUID,
+    )
+    name: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    display_name: Mapped[str] = mapped_column(String(80), nullable=False)
+    description: Mapped[str] = mapped_column(String(1024), nullable=False)
+    instructions: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[str] = mapped_column(String(64), nullable=False)
+    revision: Mapped[int] = mapped_column(
+        BigInteger,
+        default=1,
+        server_default=text("1"),
+        nullable=False,
+    )
+    required_tools: Mapped[list[str]] = mapped_column(
+        JSONB,
+        default=list,
+        server_default=EMPTY_JSONB_ARRAY,
+        nullable=False,
+    )
+    skill_metadata: Mapped[dict[str, object]] = mapped_column(
+        "metadata",
+        JSONB,
+        default=dict,
+        server_default=EMPTY_JSONB_OBJECT,
+        nullable=False,
+    )
+    enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        server_default=TRUE,
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        server_default=CURRENT_TIMESTAMP,
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        server_default=CURRENT_TIMESTAMP,
+        server_onupdate=FetchedValue(),
+        nullable=False,
+    )
+
+
+class AgentSkillResourceRecord(Base):
+    """One non-executable text resource belonging to an Agent skill."""
+
+    __tablename__ = "agent_skill_resources"
+    __table_args__ = (
+        UniqueConstraint("skill_id", "key"),
+        UniqueConstraint("skill_id", "position"),
+        CheckConstraint(
+            "key ~ '^[a-z][a-z0-9-]{0,159}$'",
+            name="ck_agent_skill_resources_key",
+        ),
+        CheckConstraint(
+            "char_length(btrim(display_name)) > 0",
+            name="ck_agent_skill_resources_display_name",
+        ),
+        CheckConstraint(
+            "char_length(btrim(description)) > 0",
+            name="ck_agent_skill_resources_description",
+        ),
+        CheckConstraint(
+            "char_length(btrim(content)) > 0 AND char_length(content) <= 20000",
+            name="ck_agent_skill_resources_content",
+        ),
+        CheckConstraint(
+            "media_type IN ('text/markdown', 'text/plain', 'application/json')",
+            name="ck_agent_skill_resources_media_type",
+        ),
+        CheckConstraint(
+            "position > 0",
+            name="ck_agent_skill_resources_position_positive",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid,
+        primary_key=True,
+        default=uuid4,
+        server_default=GENERATED_UUID,
+    )
+    skill_id: Mapped[UUID] = mapped_column(
+        ForeignKey("agent_skills.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    key: Mapped[str] = mapped_column(String(160), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    description: Mapped[str] = mapped_column(String(500), nullable=False)
+    kind: Mapped[SkillResourceKind] = mapped_column(
+        AGENT_SKILL_RESOURCE_KIND_ENUM,
+        nullable=False,
+    )
+    media_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        server_default=CURRENT_TIMESTAMP,
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        server_default=CURRENT_TIMESTAMP,
+        server_onupdate=FetchedValue(),
+        nullable=False,
+    )
+
+
+class AgentSkillCatalogStateRecord(Base):
+    """Singleton generation used for cheap Agent skill catalog refresh checks."""
+
+    __tablename__ = "agent_skill_catalog_state"
+    __table_args__ = (
+        CheckConstraint(
+            "singleton_id = 1",
+            name="ck_agent_skill_catalog_state_singleton",
+        ),
+        CheckConstraint(
+            "generation > 0",
+            name="ck_agent_skill_catalog_state_generation_positive",
+        ),
+    )
+
+    singleton_id: Mapped[int] = mapped_column(
+        SmallInteger,
+        primary_key=True,
+        default=1,
+        server_default=text("1"),
+    )
+    generation: Mapped[int] = mapped_column(
+        BigInteger,
+        default=1,
+        server_default=text("1"),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        server_default=CURRENT_TIMESTAMP,
+        server_onupdate=FetchedValue(),
+        nullable=False,
     )
 
 

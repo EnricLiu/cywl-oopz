@@ -39,6 +39,10 @@ from cywl_oopz.features.agent.repository import (
     SqlAlchemyToolExecutionRepository,
 )
 from cywl_oopz.features.agent.selection import ProviderSelectionService
+from cywl_oopz.features.agent.skills.models import SkillResourceKind
+from cywl_oopz.features.agent.skills.repository import (
+    SqlAlchemyAgentSkillRepository,
+)
 from cywl_oopz.features.agent.tools.models import (
     ToolEffect,
     ToolExecution,
@@ -122,6 +126,8 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
             "add_music_playlist_track",
             "remove_music_playlist_track",
             "load_music_playlist",
+            "load_agent_skill",
+            "read_agent_skill_resource",
         ]
 
         async with test_engine.begin() as connection:
@@ -166,8 +172,108 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
             "add_music_playlist_track",
             "remove_music_playlist_track",
             "load_music_playlist",
+            "load_agent_skill",
+            "read_agent_skill_resource",
         ]
         assert defaulted["created_at"] == defaulted["updated_at"]
+
+        with pytest.raises(DBAPIError):
+            async with sessions.begin() as session:
+                await session.execute(
+                    text(
+                        """
+                        INSERT INTO agent_skills (
+                            name, display_name, description, instructions, version,
+                            required_tools
+                        )
+                        VALUES (
+                            'invalid-skill', 'Invalid', 'Invalid duplicate tools',
+                            'This row must be rejected.', '1',
+                            '["search_web", "search_web"]'::jsonb
+                        )
+                        """
+                    )
+                )
+
+        async with test_engine.begin() as connection:
+            skill_row = (
+                (
+                    await connection.execute(
+                        text(
+                            """
+                            INSERT INTO agent_skills (
+                                name, display_name, description, instructions, version,
+                                required_tools
+                            )
+                            VALUES (
+                                'web-research', '网页研究',
+                                '搜索并阅读可靠来源。', '先搜索，再阅读关键原文。', '1',
+                                '["search_web", "read_web_page"]'::jsonb
+                            )
+                            RETURNING id, revision, metadata, enabled, created_at, updated_at
+                            """
+                        )
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            resource_row = (
+                (
+                    await connection.execute(
+                        text(
+                            """
+                            INSERT INTO agent_skill_resources (
+                                skill_id, key, display_name, description, kind,
+                                media_type, content, position
+                            )
+                            VALUES (
+                                :skill_id, 'source-guide', '来源指南',
+                                '需要判断来源质量时读取。', 'reference',
+                                'text/markdown', '# 来源指南\\n优先选择一手来源。', 1
+                            )
+                            RETURNING id, created_at, updated_at
+                            """
+                        ),
+                        {"skill_id": skill_row["id"]},
+                    )
+                )
+                .mappings()
+                .one()
+            )
+        assert skill_row["revision"] == 1
+        assert skill_row["metadata"] == {}
+        assert skill_row["enabled"] is True
+        assert skill_row["created_at"] == skill_row["updated_at"]
+        assert resource_row["id"] is not None
+        assert resource_row["created_at"] == resource_row["updated_at"]
+
+        skill_repository = SqlAlchemyAgentSkillRepository(sessions)
+        generation_after_insert = await skill_repository.generation()
+        loaded_skills = await skill_repository.load_enabled()
+        assert len(loaded_skills) == 1
+        loaded_skill = loaded_skills[0]
+        assert loaded_skill.name == "web-research"
+        assert loaded_skill.revision == 2
+        assert loaded_skill.required_tools == frozenset({"search_web", "read_web_page"})
+        assert loaded_skill.resources[0].id == resource_row["id"]
+        assert loaded_skill.resources[0].kind is SkillResourceKind.REFERENCE
+
+        async with test_engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """
+                    UPDATE agent_skill_resources
+                    SET content = '# 来源指南\\n优先选择官方一手来源。'
+                    WHERE id = :resource_id
+                    """
+                ),
+                {"resource_id": resource_row["id"]},
+            )
+        assert await skill_repository.generation() > generation_after_insert
+        reloaded_skill = (await skill_repository.load_enabled())[0]
+        assert reloaded_skill.revision == loaded_skill.revision + 1
+        assert "官方" in reloaded_skill.resources[0].content
 
         playlist_repository = SqlAlchemyMusicPlaylistRepository(sessions)
         playlist = await playlist_repository.create(
@@ -246,7 +352,8 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
                             ('agent_runs', 'stop_reason'),
                             ('agent_runs', 'selection_source'),
                             ('agent_tool_executions', 'effect'),
-                            ('agent_tool_executions', 'status')
+                            ('agent_tool_executions', 'status'),
+                            ('agent_skill_resources', 'kind')
                           )
                         """
                         )
@@ -264,6 +371,7 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
             ("agent_runs", "selection_source"): "model_selection_source",
             ("agent_tool_executions", "effect"): "tool_effect",
             ("agent_tool_executions", "status"): "tool_execution_status",
+            ("agent_skill_resources", "kind"): "agent_skill_resource_kind",
         }
 
         provider_id = uuid4()
