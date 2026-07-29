@@ -278,3 +278,5 @@ async def test_skill_tools_execute_through_registry_policy_and_persist_stable_er
     assert resource.model_payload()["data"]["content"] == skill.resources[0].content
     assert unavailable.error_code == "skill_catalog_unavailable"
     assert repository.records[(context.run_id, "load")].status is ToolExecutionStatus.SUCCEEDED
+    assert LoadAgentSkillTool().descriptor.replay_in_history is False
+    assert ReadAgentSkillResourceTool().descriptor.replay_in_history is False

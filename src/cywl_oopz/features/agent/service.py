@@ -192,7 +192,11 @@ class AgentConversationService:
                         enabled_tools = tuple(
                             name for name in enabled_tools if name not in SKILL_TOOL_NAMES
                         )
-                context = await self._context_builder.build(thread, identity)
+                context = await self._context_builder.build(
+                    thread,
+                    identity,
+                    available_skills=available_skills,
+                )
                 run_id = uuid4()
                 state = AgentRunState(run_id).start(now)
                 limits = self._run_limits()

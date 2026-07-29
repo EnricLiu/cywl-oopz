@@ -154,6 +154,7 @@ class DirectToolService:
             "concurrency_safe": descriptor.concurrency_safe,
             "sequential": descriptor.sequential,
             "idempotent": descriptor.idempotent,
+            "replay_in_history": descriptor.replay_in_history,
             "input_schema": descriptor.input_model.model_json_schema(),
             "output_schema": descriptor.output_model.model_json_schema(),
         }

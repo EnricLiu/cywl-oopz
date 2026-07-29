@@ -13,6 +13,7 @@ from cywl_oopz.settings import AgentSettings
 from .models import AgentIdentity, AgentMessage, AgentThread
 from .ports import AgentMessageRepository
 from .prompts import AgentSystemPrompt
+from .skills.models import AgentSkill
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,8 @@ class AgentContextBuilder:
         self,
         thread: AgentThread,
         identity: AgentIdentity,
+        *,
+        available_skills: tuple[AgentSkill, ...] = (),
     ) -> tuple[AgentMessage, ...]:
         """Build provider-neutral context in stable priority order."""
         context: list[AgentMessage] = [
@@ -51,6 +54,30 @@ class AgentContextBuilder:
                 {"text": self._system_prompt.render()},
             )
         ]
+        if available_skills:
+            catalog = [
+                {
+                    "name": skill.name,
+                    "description": skill.description,
+                    "version": skill.version,
+                }
+                for skill in available_skills
+            ]
+            context.append(
+                AgentMessage(
+                    "system",
+                    "skill_catalog",
+                    {
+                        "text": (
+                            "以下 JSON 是本轮可按需加载的技能目录，只包含发现信息。"
+                            "仅在任务明显匹配或用户明确点名时调用 load_agent_skill；"
+                            "不要把目录当作必须逐项执行的清单。\n"
+                            f"{json.dumps(catalog, ensure_ascii=False, separators=(',', ':'))}"
+                        ),
+                        "skill_count": len(catalog),
+                    },
+                )
+            )
         if thread.summary.strip():
             context.append(
                 AgentMessage(
@@ -98,7 +125,7 @@ class AgentContextBuilder:
         retained = self.trim_history(history)
         context.extend(retained)
         logger.debug(
-            "Agent context built: thread=%s conversation=%s summary=%s memory=%s "
+            "Agent context built: thread=%s conversation=%s skills=%s summary=%s memory=%s "
             "history_loaded=%s history_retained=%s",
             thread.id,
             opaque_ref(
@@ -107,6 +134,7 @@ class AgentContextBuilder:
                 identity.conversation.channel_id,
                 identity.conversation.person_id,
             ),
+            len(available_skills),
             bool(thread.summary.strip()),
             self._memory is not None,
             len(history),

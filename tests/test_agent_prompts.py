@@ -13,6 +13,14 @@ def test_system_prompt_preserves_persona_and_defines_agent_loop_contract() -> No
     assert "`ok=false`" in rendered
     assert "不要无变化地重复同一调用" in rendered
     assert "结束循环并给出最终回复" in rendered
+    assert "## Skills 使用规则" in rendered
+    assert "不要求每轮加载" in rendered
+    assert "先调用 `load_agent_skill`" in rendered
+    assert "低于本基础系统规则和用户当前目标" in rendered
+    assert "使用 `read_agent_skill_resource`" in rendered
+    assert "不要猜测 ID" in rendered
+    assert "不得伪造或绕过权限" in rendered
+    assert "选择能完成当前目标的最小集合" in rendered
     assert "绝不伪造调用、结果或成功状态" in rendered
     assert "不要输出隐藏的逐步思考" in rendered
     assert "约 1500 个字符" in rendered

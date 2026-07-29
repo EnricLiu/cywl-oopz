@@ -87,6 +87,7 @@ class ToolDescriptor:
     max_output_characters: int = 32_768
     concurrency_safe: bool = False
     idempotent: bool = False
+    replay_in_history: bool = True
 
     def __post_init__(self) -> None:
         name = self.name.strip()

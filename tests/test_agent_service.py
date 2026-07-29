@@ -392,6 +392,11 @@ async def test_agent_service_pins_skill_scope_and_hides_loaders_for_empty_catalo
     assert [item.name for item in engine.requests[0].skill_scope.available_skills] == [
         "web-research"
     ]
+    skill_context = next(
+        item for item in engine.requests[0].context if item.kind == "skill_catalog"
+    )
+    assert "web-research" in skill_context.content["text"]
+    assert skill.instructions not in skill_context.content["text"]
 
     empty_catalog = ReloadableAgentSkillCatalog(
         InMemorySkillRepository(()),
@@ -414,6 +419,7 @@ async def test_agent_service_pins_skill_scope_and_hides_loaders_for_empty_catalo
 
     assert empty_engine.requests[0].enabled_tools == ()
     assert empty_engine.requests[0].skill_scope is None
+    assert "skill_catalog" not in {item.kind for item in empty_engine.requests[0].context}
 
 
 @pytest.mark.asyncio

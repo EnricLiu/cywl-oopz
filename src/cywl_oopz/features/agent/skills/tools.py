@@ -91,6 +91,7 @@ class LoadAgentSkillTool:
             max_output_characters=16_384,
             concurrency_safe=True,
             idempotent=True,
+            replay_in_history=False,
         )
 
     @property
@@ -165,6 +166,7 @@ class ReadAgentSkillResourceTool:
             max_output_characters=16_384,
             concurrency_safe=True,
             idempotent=True,
+            replay_in_history=False,
         )
 
     @property

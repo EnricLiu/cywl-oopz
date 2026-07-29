@@ -17,6 +17,7 @@ from cywl_oopz.features.agent.models import (
     ModelCapability,
     ProviderProtocol,
 )
+from cywl_oopz.features.agent.skills.models import AgentSkill
 from cywl_oopz.features.agent.summarization import (
     PydanticAiThreadSummarizer,
     ThreadSummarizer,
@@ -160,14 +161,28 @@ async def test_context_builder_orders_summary_memory_and_recent_messages() -> No
     memory = FakeMemory()
     builder = AgentContextBuilder(settings(), messages, memory)
     current_thread = thread()
+    skill = AgentSkill(
+        id=uuid4(),
+        name="web-research",
+        display_name="网页研究",
+        description="搜索并阅读关键来源。",
+        instructions="SECRET INSTRUCTIONS",
+        version="2",
+        revision=3,
+        required_tools=frozenset({"search_web"}),
+        resources=(),
+        metadata={"private": "metadata"},
+    )
 
     context = await builder.build(
         current_thread,
         AgentIdentity("person", current_thread.key),
+        available_skills=(skill,),
     )
 
     assert [item.kind for item in context] == [
         "text",
+        "skill_catalog",
         "summary",
         "memory",
         "text",
@@ -177,7 +192,14 @@ async def test_context_builder_orders_summary_memory_and_recent_messages() -> No
     assert memory.person_ids == ["person"]
     assert context[0].content["text"].startswith(settings().system_prompt)
     assert "## Agent 工作循环" in context[0].content["text"]
-    assert "Earlier facts." in context[1].content["text"]
+    catalog_text = context[1].content["text"]
+    assert "web-research" in catalog_text
+    assert "搜索并阅读关键来源" in catalog_text
+    assert '"version":"2"' in catalog_text
+    assert "SECRET INSTRUCTIONS" not in catalog_text
+    assert "search_web" not in catalog_text
+    assert "metadata" not in catalog_text
+    assert "Earlier facts." in context[2].content["text"]
 
     without_memory = await AgentContextBuilder(
         settings(),

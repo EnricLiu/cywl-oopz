@@ -181,7 +181,10 @@ class PydanticAiAgentEngine:
             output_tokens=usage.output_tokens,
             model_requests=usage.requests,
             tool_calls=usage.tool_calls,
-            intermediate_messages=self._map_new_tool_messages(result.new_messages()),
+            intermediate_messages=self._map_new_tool_messages(
+                result.new_messages(),
+                descriptors,
+            ),
         )
 
     async def aclose(self) -> None:
@@ -335,12 +338,16 @@ class PydanticAiAgentEngine:
     @staticmethod
     def _map_new_tool_messages(
         messages: list[ModelMessage],
+        descriptors: tuple[ToolDescriptor, ...],
     ) -> tuple[AgentMessage, ...]:
+        ephemeral_tools = frozenset(
+            descriptor.name for descriptor in descriptors if not descriptor.replay_in_history
+        )
         mapped: list[AgentMessage] = []
         for message in messages:
             if isinstance(message, ModelResponse):
                 for part in message.parts:
-                    if isinstance(part, ToolCallPart):
+                    if isinstance(part, ToolCallPart) and part.tool_name not in ephemeral_tools:
                         mapped.append(
                             AgentMessage(
                                 "assistant",
@@ -355,7 +362,7 @@ class PydanticAiAgentEngine:
                         )
             elif isinstance(message, ModelRequest):
                 for part in message.parts:
-                    if isinstance(part, ToolReturnPart):
+                    if isinstance(part, ToolReturnPart) and part.tool_name not in ephemeral_tools:
                         mapped.append(
                             AgentMessage(
                                 "tool",

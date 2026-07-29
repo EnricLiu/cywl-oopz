@@ -477,6 +477,44 @@ async def test_engine_runs_tool_loop_and_maps_provider_neutral_pairs() -> None:
     assert progress.events[1].tool_display_name == "double"
 
 
+def test_engine_filters_non_replayable_tool_messages_as_complete_pairs() -> None:
+    regular = RecordingRuntime().descriptors(("double",))[0]
+    ephemeral = LoadAgentSkillTool().descriptor
+    mapped = PydanticAiAgentEngine._map_new_tool_messages(
+        [
+            ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        "load_agent_skill",
+                        {"name": "web-research"},
+                        "call-skill",
+                    ),
+                    ToolCallPart("double", {"value": 2}, "call-double"),
+                ]
+            ),
+            ModelRequest(
+                parts=[
+                    ToolReturnPart(
+                        "load_agent_skill",
+                        {"ok": True, "data": {"instructions": "SECRET"}},
+                        "call-skill",
+                    ),
+                    ToolReturnPart(
+                        "double",
+                        {"ok": True, "data": {"value": 4}},
+                        "call-double",
+                    ),
+                ]
+            ),
+        ],
+        (regular, ephemeral),
+    )
+
+    assert [message.kind for message in mapped] == ["tool_call", "tool_result"]
+    assert {message.content["tool_name"] for message in mapped} == {"double"}
+    assert "SECRET" not in repr(mapped)
+
+
 @pytest.mark.asyncio
 async def test_engine_loads_skill_and_resource_inside_one_agent_loop() -> None:
     resource = AgentSkillResource(
@@ -579,6 +617,9 @@ async def test_engine_loads_skill_and_resource_inside_one_agent_loop() -> None:
     assert observed[1]["data"]["content"] == resource.content
     assert scope.activation_count == 1
     assert scope.resource_count == 1
+    assert result.intermediate_messages == ()
+    assert skill.instructions not in repr(result.intermediate_messages)
+    assert resource.content not in repr(result.intermediate_messages)
     assert [event.kind for event in progress.events].count(ProgressKind.TOOL_UPDATED) == 2
 
 
