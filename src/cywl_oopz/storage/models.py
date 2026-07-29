@@ -580,13 +580,13 @@ class LlmModelRecord(Base):
     __table_args__ = (
         UniqueConstraint("provider_id", "alias"),
         Index(
-            "uq_llm_models_provider_default",
+            "ux_llm_models_one_provider_default",
             "provider_id",
             unique=True,
             postgresql_where=text("is_provider_default"),
         ),
         Index(
-            "uq_llm_models_application_default",
+            "ux_llm_models_one_application_default",
             "is_application_default",
             unique=True,
             postgresql_where=text("is_application_default"),
@@ -602,6 +602,7 @@ class LlmModelRecord(Base):
     provider_id: Mapped[UUID] = mapped_column(
         ForeignKey("llm_providers.id", ondelete="CASCADE"),
         nullable=False,
+        comment="Many-to-one owner; multiple models may reference the same provider.",
     )
     alias: Mapped[str] = mapped_column(String(128), nullable=False)
     remote_model_name: Mapped[str] = mapped_column(String(256), nullable=False)

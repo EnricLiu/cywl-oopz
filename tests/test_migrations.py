@@ -8,7 +8,7 @@ def test_initial_schema_models_and_migration_head_are_present() -> None:
     config = Config("alembic.ini")
     revisions = ScriptDirectory.from_config(config)
 
-    assert revisions.get_current_head() == "20260729_13"
+    assert revisions.get_current_head() == "20260729_14"
     assert set(Base.metadata.tables) == {
         "agent_memory_items",
         "agent_memory_preferences",
@@ -40,3 +40,9 @@ def test_initial_schema_models_and_migration_head_are_present() -> None:
         Base.metadata.tables["agent_skill_resources"].c.kind.type.name
         == "agent_skill_resource_kind"
     )
+    llm_models = Base.metadata.tables["llm_models"]
+    assert llm_models.c.provider_id.unique is not True
+    assert {index.name for index in llm_models.indexes} >= {
+        "ux_llm_models_one_provider_default",
+        "ux_llm_models_one_application_default",
+    }

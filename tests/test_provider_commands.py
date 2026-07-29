@@ -7,12 +7,18 @@ from uuid import uuid4
 import pytest
 
 from cywl_oopz.commands.router import ParsedCommand
-from cywl_oopz.features.agent.commands import ProviderCommand, SkillsCommand, ToolsCommand
+from cywl_oopz.features.agent.commands import (
+    AgentModelCommand,
+    ProviderCommand,
+    SkillsCommand,
+    ToolsCommand,
+)
 from cywl_oopz.features.agent.models import (
     AgentModelRef,
     ModelSelection,
     ModelSelectionSource,
     ProviderProtocol,
+    SelectableModel,
 )
 from cywl_oopz.features.agent.skills.models import AgentSkill
 from cywl_oopz.features.agent.tools.models import ToolEffect
@@ -25,6 +31,7 @@ class FakeProviderService:
 
     def __init__(self) -> None:
         self.selections: list[tuple[str, str | None, bool]] = []
+        self.model_selections: list[str] = []
 
     async def current_selection(self, key) -> ModelSelection:
         return ModelSelection(
@@ -41,8 +48,19 @@ class FakeProviderService:
             ModelSelectionSource.THREAD,
         )
 
-    def list_models(self) -> tuple[str, ...]:
-        return ("primary/chat", "secondary/fast")
+    def list_model_choices(self) -> tuple[SelectableModel, ...]:
+        return (
+            SelectableModel("primary", "Primary AI", "chat", "Chat", True),
+            SelectableModel("primary", "Primary AI", "reasoning", "Reasoning", False),
+            SelectableModel("secondary", "Secondary AI", "fast", "Fast", True),
+        )
+
+    async def select_model(self, key, choice: str) -> str:
+        del key
+        self.model_selections.append(choice)
+        if choice == "missing":
+            raise ValueError("not found")
+        return choice if "/" in choice else f"primary/{choice}"
 
     async def select_provider(
         self,
@@ -109,15 +127,88 @@ async def test_provider_command_lists_and_switches_thread_model() -> None:
     list_context = FakeContext()
     use_context = FakeContext()
 
-    await command.execute(ParsedCommand("provider", ("list",)), list_context)
+    await command.execute(ParsedCommand("provider", ()), list_context)
     await command.execute(
-        ParsedCommand("provider", ("use", "secondary", "fast")),
+        ParsedCommand("provider", ("secondary", "fast")),
         use_context,
     )
 
-    assert "primary/chat" in list_context.replies[0]
-    assert use_context.replies == ["当前对话模型已切换为：secondary/fast"]
+    assert "🎛️ **当前模型** primary/chat · 当前对话" in list_context.replies[0]
+    assert "**primary** Primary AI：chat（默认）、reasoning" in list_context.replies[0]
+    assert "!provider <Provider> [模型]" in list_context.replies[0]
+    assert use_context.replies == ["✅ **当前对话模型** secondary/fast"]
     assert service.selections == [("secondary", "fast", False)]
+
+
+@pytest.mark.asyncio
+async def test_provider_command_keeps_old_use_syntax_and_explains_personal_default() -> None:
+    service = FakeProviderService()
+    command = ProviderCommand(service, ChatTaskSupervisor())
+    old_context = FakeContext()
+    default_context = FakeContext()
+
+    await command.execute(
+        ParsedCommand("provider", ("use", "secondary", "fast")),
+        old_context,
+    )
+    await command.execute(
+        ParsedCommand("provider", ("default", "primary")),
+        default_context,
+    )
+
+    assert old_context.replies == ["✅ **当前对话模型** secondary/fast"]
+    assert "**个人默认模型** primary/default" in default_context.replies[0]
+    assert "当前对话的独立选择不会被覆盖" in default_context.replies[0]
+    assert service.selections == [
+        ("secondary", "fast", False),
+        ("primary", None, True),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_agent_model_command_lists_current_provider_and_accepts_short_alias() -> None:
+    service = FakeProviderService()
+    command = AgentModelCommand(service, ChatTaskSupervisor())
+    list_context = FakeContext()
+    switch_context = FakeContext()
+
+    await command.execute(ParsedCommand("model", ()), list_context)
+    await command.execute(ParsedCommand("model", ("reasoning",)), switch_context)
+
+    rendered = list_context.replies[0]
+    assert "🎛️ **当前模型** primary/chat · 当前对话" in rendered
+    assert "**primary 可用模型**" in rendered
+    assert "**reasoning** · Reasoning" in rendered
+    assert "secondary" not in rendered
+    assert switch_context.replies == ["✅ **当前对话模型** primary/reasoning"]
+    assert service.model_selections == ["reasoning"]
+
+
+@pytest.mark.asyncio
+async def test_agent_model_and_provider_commands_return_specific_not_found_help() -> None:
+    service = FakeProviderService()
+    model_context = FakeContext()
+    provider_context = FakeContext()
+
+    await AgentModelCommand(service, ChatTaskSupervisor()).execute(
+        ParsedCommand("model", ("missing",)),
+        model_context,
+    )
+    service.select_provider = _missing_provider
+    await ProviderCommand(service, ChatTaskSupervisor()).execute(
+        ParsedCommand("provider", ("unknown",)),
+        provider_context,
+    )
+
+    assert "没有找到可选模型「missing」" in model_context.replies[0]
+    assert "!model <Provider>/<模型>" in model_context.replies[0]
+    assert "没有找到可选的 Provider/模型「unknown」" in provider_context.replies[0]
+    assert "!provider <Provider> [模型]" in provider_context.replies[0]
+
+
+async def _missing_provider(*args, **kwargs) -> str:
+    del args, kwargs
+    raise ValueError("not found")
 
 
 @pytest.mark.asyncio

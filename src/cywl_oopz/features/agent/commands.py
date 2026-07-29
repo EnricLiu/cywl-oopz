@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import logging
+from collections import defaultdict
 from uuid import UUID
 
 from oopz_sdk.events.context import EventContext
 
 from cywl_oopz.commands.router import ParsedCommand
+from cywl_oopz.core.lifecycle import ModelSelectionSource
 from cywl_oopz.core.observability import exception_kind
 from cywl_oopz.features.chat.commands import ChatCommandController
 from cywl_oopz.features.chat.models import ChatInvocation, ConversationKey
@@ -21,9 +23,187 @@ from .memory import (
     MemoryItemTooLongError,
     MemoryService,
 )
+from .models import ModelSelection, SelectableModel
 from .service import AgentConversationService
 
 logger = logging.getLogger(__name__)
+
+
+class ModelCommandView:
+    """Render compact OOPZ-safe Provider/model menus with stable command aliases."""
+
+    max_characters = 1900
+    _source_labels = {
+        ModelSelectionSource.THREAD: "当前对话",
+        ModelSelectionSource.USER: "个人默认",
+        ModelSelectionSource.CHANNEL: "频道默认",
+        ModelSelectionSource.APPLICATION: "系统默认",
+    }
+
+    def __init__(self, prefix: str) -> None:
+        self._prefix = prefix
+
+    def providers(
+        self,
+        selection: ModelSelection,
+        choices: tuple[SelectableModel, ...],
+    ) -> str:
+        """Show the current selection and group model aliases by Provider."""
+        groups: dict[tuple[str, str], list[SelectableModel]] = defaultdict(list)
+        for choice in choices:
+            groups[(choice.provider_alias, choice.provider_display_name)].append(choice)
+        footer = (
+            "",
+            f"切换当前对话：{self._prefix}provider <Provider> [模型]",
+            f"设为个人默认：{self._prefix}provider default <Provider> [模型]",
+        )
+        lines = [self._current(selection), "", "**可用 Provider**"]
+        for (alias, display_name), models in groups.items():
+            model_labels = "、".join(
+                f"{model.model_alias}{'（默认）' if model.is_provider_default else ''}"
+                for model in models
+            )
+            line = f"- **{alias}** {self._compact_name(display_name)}：{model_labels}"
+            if not self._can_append(lines, line, footer):
+                lines.append("…其余 Provider 已省略")
+                break
+            lines.append(line)
+        if not groups:
+            lines.append("（当前没有可选模型）")
+        return "\n".join((*lines, *footer))
+
+    def models(
+        self,
+        selection: ModelSelection,
+        choices: tuple[SelectableModel, ...],
+    ) -> str:
+        """Show models belonging to the currently selected Provider."""
+        current_provider = selection.model.provider_alias
+        provider_choices = tuple(
+            choice for choice in choices if choice.provider_alias == current_provider
+        )
+        footer = (
+            "",
+            f"切换模型：{self._prefix}model <模型>",
+            f"跨 Provider：{self._prefix}model <Provider>/<模型>",
+            f"查看全部 Provider：{self._prefix}provider",
+        )
+        lines = [self._current(selection), "", f"**{current_provider} 可用模型**"]
+        for choice in provider_choices:
+            labels = []
+            if choice.model_display_name != choice.model_alias:
+                labels.append(self._compact_name(choice.model_display_name))
+            if choice.is_provider_default:
+                labels.append("Provider 默认")
+            suffix = f" · {' · '.join(labels)}" if labels else ""
+            line = f"- **{choice.model_alias}**{suffix}"
+            if not self._can_append(lines, line, footer):
+                lines.append("…其余模型已省略")
+                break
+            lines.append(line)
+        if not provider_choices:
+            lines.append("（当前 Provider 没有其他可选模型）")
+        return "\n".join((*lines, *footer))
+
+    def provider_usage(self) -> str:
+        """Return a short syntax guide including the preferred shorthand."""
+        return "\n".join(
+            (
+                "**Provider 命令**",
+                f"- {self._prefix}provider：查看当前选择和全部 Provider",
+                f"- {self._prefix}provider <Provider> [模型]：切换当前对话",
+                f"- {self._prefix}provider default <Provider> [模型]：设置个人默认",
+                f"- 旧写法 {self._prefix}provider use ... 仍然可用",
+            )
+        )
+
+    def model_usage(self) -> str:
+        """Return the simple current-Provider model syntax."""
+        return "\n".join(
+            (
+                "**模型命令**",
+                f"- {self._prefix}model：查看当前 Provider 的模型",
+                f"- {self._prefix}model <模型>：在当前 Provider 内切换",
+                f"- {self._prefix}model <Provider>/<模型>：跨 Provider 切换",
+            )
+        )
+
+    def active_run_message(self) -> str:
+        """Explain how to cancel an in-flight run with the configured prefix."""
+        return f"当前正在生成回复；请等待完成或先使用 {self._prefix}cancel。"
+
+    @classmethod
+    def _current(cls, selection: ModelSelection) -> str:
+        source = cls._source_labels.get(selection.source, selection.source.value)
+        return (
+            f"🎛️ **当前模型** {selection.model.provider_alias}/"
+            f"{selection.model.model_alias} · {source}"
+        )
+
+    @staticmethod
+    def _compact_name(value: str) -> str:
+        return value if len(value) <= 80 else f"{value[:77]}..."
+
+    def _can_append(
+        self,
+        lines: list[str],
+        line: str,
+        footer: tuple[str, ...],
+    ) -> bool:
+        return len("\n".join((*lines, line, *footer))) <= self.max_characters
+
+
+class AgentModelCommand(ChatCommandController):
+    """Inspect or switch models with the current Provider as the default scope."""
+
+    name = "model"
+    description = "查看当前 Provider 的模型，或切换当前对话模型。"
+
+    def __init__(
+        self,
+        service: AgentConversationService,
+        tasks: ChatTaskSupervisor,
+        prefix: str = "!",
+    ) -> None:
+        super().__init__(service)
+        self._agent = service
+        self._tasks = tasks
+        self._view = ModelCommandView(prefix)
+
+    async def execute(self, command: ParsedCommand, context: EventContext) -> None:
+        key = self._key(context)
+        action = command.arguments[0].casefold() if command.arguments else ""
+        if not command.arguments or (action == "list" and len(command.arguments) == 1):
+            await self._show_models(context, key)
+            return
+        if action == "help" and len(command.arguments) == 1:
+            await context.reply(self._view.model_usage())
+            return
+        if len(command.arguments) != 1 or action in {"help", "list"}:
+            await context.reply(self._view.model_usage())
+            return
+        if self._tasks.has_active(key):
+            await context.reply(self._view.active_run_message())
+            return
+        choice = command.arguments[0]
+        try:
+            selected = await self._agent.select_model(key, choice)
+        except ValueError:
+            await context.reply(f"没有找到可选模型「{choice}」。\n{self._view.model_usage()}")
+            return
+        except Exception as exc:
+            await self._reply_error(context, exc)
+            return
+        await context.reply(f"✅ **当前对话模型** {selected}")
+
+    async def _show_models(self, context: EventContext, key: ConversationKey) -> None:
+        try:
+            selection = await self._agent.current_selection(key)
+            choices = self._agent.list_model_choices()
+        except Exception as exc:
+            await self._reply_error(context, exc)
+            return
+        await context.reply(self._view.models(selection, choices))
 
 
 class ProviderCommand(ChatCommandController):
@@ -36,57 +216,83 @@ class ProviderCommand(ChatCommandController):
         self,
         service: AgentConversationService,
         tasks: ChatTaskSupervisor,
+        prefix: str = "!",
     ) -> None:
         super().__init__(service)
         self._agent = service
         self._tasks = tasks
+        self._view = ModelCommandView(prefix)
 
     async def execute(self, command: ParsedCommand, context: EventContext) -> None:
+        key = self._key(context)
+        action = command.arguments[0].casefold() if command.arguments else ""
+        if not command.arguments or (action == "list" and len(command.arguments) == 1):
+            await self._show_providers(context, key)
+            return
+        if action == "help" and len(command.arguments) == 1:
+            await context.reply(self._view.provider_usage())
+            return
+        if action in {"help", "list"}:
+            await context.reply(self._view.provider_usage())
+            return
+
+        arguments = command.arguments[1:] if action in {"use", "default"} else command.arguments
+        user_default = action == "default"
+        parsed = self._selection_arguments(arguments)
+        if parsed is None:
+            await context.reply(self._view.provider_usage())
+            return
+        provider_alias, model_alias = parsed
+        if self._tasks.has_active(key):
+            await context.reply(self._view.active_run_message())
+            return
         try:
-            key = self._key(context)
-            if not command.arguments:
-                selection = await self._agent.current_selection(key)
-                await context.reply(
-                    "当前 Provider/模型："
-                    f"{selection.model.provider_alias}/{selection.model.model_alias}"
-                    f"（来源：{selection.source.value}）"
-                )
-                return
-
-            action, *arguments = command.arguments
-            if action == "list" and not arguments:
-                models = self._agent.list_models()
-                message = "可用 Provider/模型：\n" + (
-                    "\n".join(f"- {model}" for model in models)
-                    if models
-                    else "（当前没有可选模型）"
-                )
-                await context.reply(message)
-                return
-
-            if action not in {"use", "default"} or not 1 <= len(arguments) <= 2:
-                await context.reply(
-                    "用法：!provider [list|use <provider> [model]|default <provider> [model]]"
-                )
-                return
-            if self._tasks.has_active(key):
-                await context.reply("当前正在生成回复；请等待完成或先使用 !cancel。")
-                return
-
             selected = await self._agent.select_provider(
                 key,
-                arguments[0],
-                arguments[1] if len(arguments) == 2 else None,
-                user_default=action == "default",
+                provider_alias,
+                model_alias,
+                user_default=user_default,
             )
+        except ValueError:
+            target = provider_alias + (f"/{model_alias}" if model_alias else "")
+            await context.reply(
+                f"没有找到可选的 Provider/模型「{target}」。\n{self._view.provider_usage()}"
+            )
+            return
         except Exception as exc:
             await self._reply_error(context, exc)
             return
 
-        if action == "default":
-            await context.reply(f"后续新对话的默认模型已切换为：{selected}")
+        if user_default:
+            await context.reply(
+                f"✅ **个人默认模型** {selected}\n"
+                "未单独选择模型的对话会使用它；当前对话的独立选择不会被覆盖。"
+            )
         else:
-            await context.reply(f"当前对话模型已切换为：{selected}")
+            await context.reply(f"✅ **当前对话模型** {selected}")
+
+    async def _show_providers(self, context: EventContext, key: ConversationKey) -> None:
+        try:
+            selection = await self._agent.current_selection(key)
+            choices = self._agent.list_model_choices()
+        except Exception as exc:
+            await self._reply_error(context, exc)
+            return
+        await context.reply(self._view.providers(selection, choices))
+
+    @staticmethod
+    def _selection_arguments(arguments: tuple[str, ...]) -> tuple[str, str | None] | None:
+        if not 1 <= len(arguments) <= 2:
+            return None
+        if len(arguments) == 2:
+            return arguments[0], arguments[1]
+        value = arguments[0]
+        if "/" not in value:
+            return value, None
+        provider_alias, model_alias = value.split("/", 1)
+        if not provider_alias or not model_alias:
+            return None
+        return provider_alias, model_alias
 
 
 class ToolsCommand(ChatCommandController):

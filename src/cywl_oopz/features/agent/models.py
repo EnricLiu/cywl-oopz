@@ -145,6 +145,22 @@ class ModelSelection:
 
 
 @dataclass(frozen=True, slots=True)
+class SelectableModel:
+    """Safe catalog metadata used by user-facing model selection commands."""
+
+    provider_alias: str
+    provider_display_name: str
+    model_alias: str
+    model_display_name: str
+    is_provider_default: bool
+
+    @property
+    def qualified_alias(self) -> str:
+        """Return the stable command argument for this provider/model pair."""
+        return f"{self.provider_alias}/{self.model_alias}"
+
+
+@dataclass(frozen=True, slots=True)
 class AgentIdentity:
     """Trusted caller identity derived from OOPZ context by the integration layer."""
 

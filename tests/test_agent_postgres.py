@@ -514,6 +514,47 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
                 ),
             ),
         )
+        async with test_engine.connect() as connection:
+            provider_model_count = await connection.scalar(
+                text(
+                    """
+                    SELECT count(*)
+                    FROM llm_models
+                    WHERE provider_id = :provider_id
+                    """
+                ),
+                {"provider_id": provider_id},
+            )
+            model_indexes = {
+                row["indexname"]: row["indexdef"]
+                for row in (
+                    await connection.execute(
+                        text(
+                            """
+                            SELECT indexname, indexdef
+                            FROM pg_indexes
+                            WHERE schemaname = current_schema()
+                              AND tablename = 'llm_models'
+                            """
+                        )
+                    )
+                )
+                .mappings()
+                .all()
+            }
+            provider_id_comment = await connection.scalar(
+                text(
+                    """
+                    SELECT col_description('llm_models'::regclass, attnum)
+                    FROM pg_attribute
+                    WHERE attrelid = 'llm_models'::regclass
+                      AND attname = 'provider_id'
+                    """
+                )
+            )
+        assert provider_model_count == 2
+        assert "WHERE is_provider_default" in model_indexes["ux_llm_models_one_provider_default"]
+        assert "multiple models may reference the same provider" in provider_id_comment
         async with sessions() as session:
             async with session.begin():
                 session.add(

@@ -34,6 +34,8 @@ from cywl_oopz.settings import AgentMode, AgentSettings
 PROVIDER_ID = UUID("10000000-0000-0000-0000-000000000001")
 DEFAULT_MODEL_ID = UUID("10000000-0000-0000-0000-000000000002")
 OTHER_MODEL_ID = UUID("10000000-0000-0000-0000-000000000003")
+SECOND_PROVIDER_ID = UUID("20000000-0000-0000-0000-000000000001")
+SECOND_OTHER_MODEL_ID = UUID("20000000-0000-0000-0000-000000000002")
 
 
 class InMemoryCatalogRepository:
@@ -78,6 +80,39 @@ class InMemoryCatalogRepository:
 
     async def load_models(self) -> tuple[LlmModel, ...]:
         return self.models
+
+
+class DuplicateModelAliasCatalogRepository(InMemoryCatalogRepository):
+    """Expose the same model alias through two Providers."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.second_provider = LlmProvider(
+            id=SECOND_PROVIDER_ID,
+            alias="second",
+            display_name="Second",
+            protocol=ProviderProtocol.OPENAI_CHAT_COMPATIBLE,
+            base_url="https://second.example/v1",
+            api_key="database-key",
+            user_selectable=True,
+            enabled=True,
+        )
+        self.models += (
+            LlmModel(
+                id=SECOND_OTHER_MODEL_ID,
+                provider_id=SECOND_PROVIDER_ID,
+                alias="other",
+                remote_model_name="second-other-remote",
+                display_name="Second Other",
+                enabled=True,
+                is_provider_default=True,
+                is_application_default=False,
+                capabilities=frozenset({ModelCapability.TOOL_CALLING}),
+            ),
+        )
+
+    async def load_providers(self) -> tuple[LlmProvider, ...]:
+        return self.provider, self.second_provider
 
 
 class InMemoryThreads:
@@ -285,11 +320,12 @@ async def build_service(
     chat_settings,
     engine=None,
     *,
+    catalog_repository=None,
     tool_availability=None,
     skill_catalog=None,
     skill_availability=None,
 ):
-    catalog = ReloadableProviderCatalog(InMemoryCatalogRepository())
+    catalog = ReloadableProviderCatalog(catalog_repository or InMemoryCatalogRepository())
     await catalog.reload()
     threads = InMemoryThreads()
     selections = InMemorySelections(threads)
@@ -467,6 +503,34 @@ async def test_agent_service_switches_thread_and_user_provider_preferences(
     assert current.model.model_id == OTHER_MODEL_ID
     assert selections.user_models["another-person"] == OTHER_MODEL_ID
     assert service.list_models() == ("provider/default", "provider/other")
+    assert [
+        (
+            choice.qualified_alias,
+            choice.provider_display_name,
+            choice.model_display_name,
+            choice.is_provider_default,
+        )
+        for choice in service.list_model_choices()
+    ] == [
+        ("provider/default", "Provider", "Default", True),
+        ("provider/other", "Provider", "Other", False),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_agent_service_model_short_alias_uses_current_provider(
+    chat_settings,
+) -> None:
+    service, _, _, _, _ = await build_service(
+        chat_settings,
+        catalog_repository=DuplicateModelAliasCatalogRepository(),
+    )
+
+    selected = await service.select_model(key(), "other")
+    current = await service.current_selection(key())
+
+    assert selected == "provider/other"
+    assert current.model.model_id == OTHER_MODEL_ID
 
 
 @pytest.mark.asyncio

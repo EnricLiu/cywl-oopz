@@ -8,7 +8,9 @@ import cywl_oopz.application as application_module
 from cywl_oopz.application import BotApplication
 from cywl_oopz.core.errors import ConfigurationError
 from cywl_oopz.features.agent.catalog import ProviderCatalog
+from cywl_oopz.features.agent.commands import AgentModelCommand
 from cywl_oopz.features.agent.models import LlmModel, LlmProvider, ProviderProtocol
+from cywl_oopz.features.chat.commands import ModelCommand
 from cywl_oopz.features.web.errors import BrowserUnavailableError
 from cywl_oopz.settings import AppSettings
 
@@ -53,6 +55,10 @@ async def test_composition_root_routes_chat_and_provider_command_by_agent_flag(
     legacy_application = BotApplication(settings("legacy"))
 
     assert agent_application.chat is agent_application.agent_chat
+    assert isinstance(
+        next(command for command in agent_application.commands.commands if command.name == "model"),
+        AgentModelCommand,
+    )
     assert "provider" in {command.name for command in agent_application.commands.commands}
     assert "tools" in {command.name for command in agent_application.commands.commands}
     assert "tool" in {command.name for command in agent_application.commands.commands}
@@ -63,6 +69,12 @@ async def test_composition_root_routes_chat_and_provider_command_by_agent_flag(
         "read_agent_skill_resource",
     }.issubset(agent_application.agent_tool_registry.names)
     assert legacy_application.chat is legacy_application.legacy_chat
+    assert isinstance(
+        next(
+            command for command in legacy_application.commands.commands if command.name == "model"
+        ),
+        ModelCommand,
+    )
     assert "provider" not in {command.name for command in legacy_application.commands.commands}
     assert "tools" not in {command.name for command in legacy_application.commands.commands}
     assert "tool" not in {command.name for command in legacy_application.commands.commands}

@@ -19,6 +19,7 @@ from .core.observability import exception_kind, opaque_ref
 from .core.tasks import TaskSupervisor
 from .features.agent.catalog import ProviderCatalogAdminService, ReloadableProviderCatalog
 from .features.agent.commands import (
+    AgentModelCommand,
     MemoryCommand,
     ProviderCommand,
     SkillsCommand,
@@ -440,10 +441,25 @@ class BotApplication:
                 ),
             )
         )
-        self.commands.register(ModelCommand(self.chat, self.chat_tasks))
+        if self.settings.agent.enabled:
+            self.commands.register(
+                AgentModelCommand(
+                    self.agent_chat,
+                    self.chat_tasks,
+                    self.settings.command_prefix,
+                )
+            )
+        else:
+            self.commands.register(ModelCommand(self.legacy_chat, self.chat_tasks))
         self.commands.register(ChatStatusCommand(self.chat))
         if self.settings.agent.enabled:
-            self.commands.register(ProviderCommand(self.agent_chat, self.chat_tasks))
+            self.commands.register(
+                ProviderCommand(
+                    self.agent_chat,
+                    self.chat_tasks,
+                    self.settings.command_prefix,
+                )
+            )
             self.commands.register(ToolsCommand(self.agent_chat))
             self.commands.register(ToolCommand(self.direct_tools, self.settings.command_prefix))
             self.commands.register(MemoryCommand(self.agent_chat, self.agent_memory))

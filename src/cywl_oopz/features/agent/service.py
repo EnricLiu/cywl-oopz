@@ -48,6 +48,7 @@ from .models import (
     AgentThread,
     ModelCapability,
     ModelSelection,
+    SelectableModel,
 )
 from .ports import (
     AgentEngine,
@@ -354,7 +355,7 @@ class AgentConversationService:
         logger.info("Agent conversation cleared: conversation=%s", self._conversation_ref(key))
 
     async def select_model(self, key: ConversationKey, model: str) -> str:
-        """Compatibility path for `!model`, accepting `provider/model` or a unique alias."""
+        """Select a qualified model or a model alias within the current Provider."""
         choice = model.strip()
         if not choice:
             raise ValueError("Model choice must not be empty")
@@ -367,14 +368,23 @@ class AgentConversationService:
                 required_capabilities=self._required_capabilities,
             )
         else:
-            matches = tuple(
-                item
-                for item in snapshot.selectable_models(
-                    required_capabilities=self._required_capabilities,
-                )
-                if item.model_alias.casefold() == choice.casefold()
+            selectable = snapshot.selectable_models(
+                required_capabilities=self._required_capabilities,
             )
-            reference = matches[0] if len(matches) == 1 else None
+            current = await self.current_selection(key)
+            provider_matches = tuple(
+                item
+                for item in selectable
+                if item.provider_id == current.model.provider_id
+                and item.model_alias.casefold() == choice.casefold()
+            )
+            if len(provider_matches) == 1:
+                reference = provider_matches[0]
+            else:
+                global_matches = tuple(
+                    item for item in selectable if item.model_alias.casefold() == choice.casefold()
+                )
+                reference = global_matches[0] if len(global_matches) == 1 else None
         if reference is None:
             raise ValueError("The requested Agent model is not available")
         await self._select_thread_model(key, reference.model_id)
@@ -415,14 +425,25 @@ class AgentConversationService:
         )
         return f"{reference.provider_alias}/{reference.model_alias}"
 
-    def list_models(self) -> tuple[str, ...]:
-        """List safe aliases only; endpoints and API keys never enter chat replies."""
+    def list_model_choices(self) -> tuple[SelectableModel, ...]:
+        """List safe display metadata; endpoints and credentials never enter replies."""
+        snapshot = self._catalog.snapshot
         return tuple(
-            f"{model.provider_alias}/{model.model_alias}"
-            for model in self._catalog.snapshot.selectable_models(
+            SelectableModel(
+                provider_alias=model.provider_alias,
+                provider_display_name=snapshot.providers[model.provider_id].display_name,
+                model_alias=model.model_alias,
+                model_display_name=snapshot.models[model.model_id].display_name,
+                is_provider_default=snapshot.models[model.model_id].is_provider_default,
+            )
+            for model in snapshot.selectable_models(
                 required_capabilities=self._required_capabilities,
             )
         )
+
+    def list_models(self) -> tuple[str, ...]:
+        """Retain the former safe alias list for non-command callers."""
+        return tuple(choice.qualified_alias for choice in self.list_model_choices())
 
     async def current_selection(self, key: ConversationKey) -> ModelSelection:
         """Resolve current selection for status and Provider commands."""
