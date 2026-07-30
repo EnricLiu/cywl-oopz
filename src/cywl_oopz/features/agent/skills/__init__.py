@@ -1,11 +1,6 @@
 """PostgreSQL-backed progressive-disclosure skills for the Agent."""
 
 from .availability import SkillAvailabilityService
-from .catalog import (
-    AgentSkillCatalogDiagnostic,
-    AgentSkillCatalogSnapshot,
-    ReloadableAgentSkillCatalog,
-)
 from .library import AgentSkillLibraryService
 from .models import (
     AgentSkill,
@@ -30,7 +25,6 @@ from .ports import (
     AgentSkillLibraryRepository,
     AgentSkillLibraryStore,
     AgentSkillReadRepository,
-    AgentSkillRepository,
     SkillShareNotifier,
 )
 from .scope import AgentSkillRunScope
@@ -38,8 +32,6 @@ from .scope import AgentSkillRunScope
 __all__ = (
     "AgentSkill",
     "AgentSkillBundle",
-    "AgentSkillCatalogDiagnostic",
-    "AgentSkillCatalogSnapshot",
     "AgentSkillDiscovery",
     "AgentSkillInspection",
     "AgentSkillInviteResult",
@@ -48,7 +40,6 @@ __all__ = (
     "AgentSkillLibraryRepository",
     "AgentSkillLibraryStore",
     "AgentSkillReadRepository",
-    "AgentSkillRepository",
     "AgentSkillOwnedSummary",
     "AgentSkillOutgoingShare",
     "AgentSkillResource",
@@ -57,7 +48,6 @@ __all__ = (
     "AgentSkillRunScope",
     "AgentSkillShare",
     "AgentSkillShareSummary",
-    "ReloadableAgentSkillCatalog",
     "SkillAccessKind",
     "SkillAvailabilityService",
     "SkillOwnershipKind",

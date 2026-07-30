@@ -247,7 +247,7 @@ def test_web_page_request_uses_host_and_result_exposes_bounded_preview() -> None
 def test_skill_progress_shows_identity_and_size_without_loaded_content() -> None:
     catalog = ToolProgressCatalog()
 
-    request = catalog.request("load_agent_skill", {"name": "web-research"})
+    request = catalog.request("load_agent_skill", {"skill_id": "private-id"})
     loaded = catalog.result(
         "load_agent_skill",
         {
@@ -287,7 +287,8 @@ def test_skill_progress_shows_identity_and_size_without_loaded_content() -> None
         succeeded=False,
     )
 
-    assert request.subject == "web-research"
+    assert request.subject == ""
+    assert "private-id" not in repr(request)
     assert loaded.subject == "网页研究"
     assert loaded.summary == "v2 · 3.2k 字"
     assert resource.subject == "来源指南"

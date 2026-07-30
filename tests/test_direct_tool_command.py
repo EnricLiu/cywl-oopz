@@ -235,7 +235,7 @@ async def test_direct_skill_loader_is_explicitly_unavailable_without_run_scope()
     context = FakeContext()
 
     await router.dispatch(
-        FakeMessage('/tool load_agent_skill {"name":"web-research"}'),  # type: ignore[arg-type]
+        FakeMessage(f'/tool load_agent_skill {{"skill_id":"{uuid4()}"}}'),  # type: ignore[arg-type]
         context,  # type: ignore[arg-type]
     )
 

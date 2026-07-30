@@ -15,7 +15,6 @@ from sqlalchemy.sql.elements import ColumnElement
 
 from cywl_oopz.core.errors import DatabaseError
 from cywl_oopz.storage.models import (
-    AgentSkillCatalogStateRecord,
     AgentSkillRecord,
     AgentSkillResourceRecord,
     AgentSkillShareRecord,
@@ -50,22 +49,6 @@ class SqlAlchemyAgentSkillRepository:
 
     def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
         self._sessions = sessions
-
-    async def load_enabled(self) -> tuple[AgentSkill, ...]:
-        """Load only builtin Skills for the legacy global catalog."""
-        return await self._load_bundles(
-            AgentSkillRecord.enabled.is_(True),
-            AgentSkillRecord.ownership_kind == SkillOwnershipKind.BUILTIN,
-        )
-
-    async def load_accessible(self, person_id: str) -> tuple[AgentSkill, ...]:
-        """Load active builtin, owned, and accepted shared bundles for one user."""
-        recipient = person_id.strip()
-        if not recipient:
-            raise ValueError("Skill library person ID must not be empty")
-        return await self._load_bundles(
-            *self._accessible_predicates(recipient),
-        )
 
     async def list_accessible(
         self,
@@ -572,61 +555,6 @@ class SqlAlchemyAgentSkillRepository:
             raise _database_error("set personal Agent skill state", exc) from exc
         return result
 
-    async def invite(
-        self,
-        owner_person_id: str,
-        skill_id: UUID,
-        recipient_person_id: str,
-        now: datetime,
-    ) -> AgentSkillShare:
-        """Create, retain, or refresh one invitation under an owner lock."""
-        owner = _person_id(owner_person_id, "Skill owner")
-        recipient = _person_id(recipient_person_id, "Skill share recipient")
-        try:
-            async with self._sessions() as session:
-                async with session.begin():
-                    owned = await session.scalar(
-                        select(AgentSkillRecord)
-                        .where(
-                            AgentSkillRecord.id == skill_id,
-                            AgentSkillRecord.ownership_kind == SkillOwnershipKind.PERSONAL,
-                            AgentSkillRecord.owner_person_id == owner,
-                        )
-                        .with_for_update()
-                    )
-                    if owned is None:
-                        raise AgentSkillNotFoundError("Owned Skill was not found")
-                    record = await session.scalar(
-                        select(AgentSkillShareRecord)
-                        .where(
-                            AgentSkillShareRecord.skill_id == skill_id,
-                            AgentSkillShareRecord.recipient_person_id == recipient,
-                        )
-                        .with_for_update()
-                    )
-                    if record is None:
-                        record = AgentSkillShareRecord(
-                            skill_id=skill_id,
-                            recipient_person_id=recipient,
-                            status=SkillShareStatus.PENDING,
-                            created_at=now,
-                            updated_at=now,
-                        )
-                        session.add(record)
-                    elif record.status is SkillShareStatus.DECLINED:
-                        record.status = SkillShareStatus.PENDING
-                        record.responded_at = None
-                    await session.flush()
-                    await session.refresh(record)
-                    result = self._to_share(record)
-        except AgentSkillNotFoundError:
-            raise
-        except IntegrityError as exc:
-            raise AgentSkillConflictError("Skill invitation conflicts with current state") from exc
-        except SQLAlchemyError as exc:
-            raise _database_error("invite Agent skill recipient", exc) from exc
-        return result
-
     async def pending_invitations(
         self,
         recipient_person_id: str,
@@ -785,20 +713,6 @@ class SqlAlchemyAgentSkillRepository:
             caller_person_id=recipient,
         )
 
-    async def share_for_owner(
-        self,
-        owner_person_id: str,
-        share_id: UUID,
-    ) -> AgentSkillShareSummary | None:
-        """Read one share only through the owning personal Skill."""
-        owner = _person_id(owner_person_id, "Skill owner")
-        return await self._share_summary(
-            AgentSkillShareRecord.id == share_id,
-            AgentSkillRecord.ownership_kind == SkillOwnershipKind.PERSONAL,
-            AgentSkillRecord.owner_person_id == owner,
-            caller_person_id=owner,
-        )
-
     async def respond(
         self,
         recipient_person_id: str,
@@ -838,39 +752,6 @@ class SqlAlchemyAgentSkillRepository:
             raise
         except SQLAlchemyError as exc:
             raise _database_error("respond to Agent skill invitation", exc) from exc
-        return result
-
-    async def revoke(
-        self,
-        owner_person_id: str,
-        share_id: UUID,
-    ) -> AgentSkillShare | None:
-        """Delete one share only through its owning personal Skill."""
-        owner = _person_id(owner_person_id, "Skill owner")
-        try:
-            async with self._sessions() as session:
-                async with session.begin():
-                    record = await session.scalar(
-                        select(AgentSkillShareRecord)
-                        .join(
-                            AgentSkillRecord,
-                            AgentSkillRecord.id == AgentSkillShareRecord.skill_id,
-                        )
-                        .where(
-                            AgentSkillShareRecord.id == share_id,
-                            AgentSkillRecord.ownership_kind == SkillOwnershipKind.PERSONAL,
-                            AgentSkillRecord.owner_person_id == owner,
-                        )
-                        .with_for_update()
-                    )
-                    if record is None:
-                        return None
-                    result = self._to_share(record)
-                    await session.execute(
-                        delete(AgentSkillShareRecord).where(AgentSkillShareRecord.id == record.id)
-                    )
-        except SQLAlchemyError as exc:
-            raise _database_error("revoke Agent skill share", exc) from exc
         return result
 
     async def revoke_owned_shares(
@@ -1065,20 +946,6 @@ class SqlAlchemyAgentSkillRepository:
             required_tools=frozenset(values[6]),
             access=access,
         )
-
-    async def generation(self) -> int:
-        try:
-            async with self._sessions() as session:
-                generation = await session.scalar(
-                    select(AgentSkillCatalogStateRecord.generation).where(
-                        AgentSkillCatalogStateRecord.singleton_id == 1
-                    )
-                )
-        except SQLAlchemyError as exc:
-            raise _database_error("load Agent skill catalog generation", exc) from exc
-        if generation is None:
-            raise DatabaseError("Agent skill catalog state is missing")
-        return generation
 
     @staticmethod
     async def _locked_owned(

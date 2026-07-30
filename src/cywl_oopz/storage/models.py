@@ -17,7 +17,6 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
-    SmallInteger,
     String,
     Text,
     UniqueConstraint,
@@ -535,42 +534,6 @@ class AgentSkillShareRecord(Base):
     responded_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        default=utc_now,
-        server_default=CURRENT_TIMESTAMP,
-        server_onupdate=FetchedValue(),
-        nullable=False,
-    )
-
-
-class AgentSkillCatalogStateRecord(Base):
-    """Singleton generation used for cheap Agent skill catalog refresh checks."""
-
-    __tablename__ = "agent_skill_catalog_state"
-    __table_args__ = (
-        CheckConstraint(
-            "singleton_id = 1",
-            name="ck_agent_skill_catalog_state_singleton",
-        ),
-        CheckConstraint(
-            "generation > 0",
-            name="ck_agent_skill_catalog_state_generation_positive",
-        ),
-    )
-
-    singleton_id: Mapped[int] = mapped_column(
-        SmallInteger,
-        primary_key=True,
-        default=1,
-        server_default=text("1"),
-    )
-    generation: Mapped[int] = mapped_column(
-        BigInteger,
-        default=1,
-        server_default=text("1"),
-        nullable=False,
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from uuid import UUID
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict
 
 from cywl_oopz.core.lifecycle import ToolEffect
 from cywl_oopz.core.observability import exception_kind
@@ -35,33 +35,20 @@ SKILL_TOOL_NAMES = frozenset(
 
 
 class LoadAgentSkillInput(BaseModel):
-    """Select one visible Skill by UUID, with temporary legacy name support."""
+    """Select one visible Skill by its run-pinned UUID."""
 
-    skill_id: UUID | None = None
-    name: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9-]{0,63}$")
+    model_config = ConfigDict(extra="forbid")
 
-    @model_validator(mode="after")
-    def validate_selector(self) -> LoadAgentSkillInput:
-        if (self.skill_id is None) == (self.name is None):
-            raise ValueError("Provide exactly one of skill_id or deprecated name")
-        return self
+    skill_id: UUID
 
 
 class ReadAgentSkillResourceInput(BaseModel):
     """Select one resource from a Skill already activated in this run."""
 
-    skill_id: UUID | None = None
-    skill_name: str | None = Field(
-        default=None,
-        pattern=r"^[a-z][a-z0-9-]{0,63}$",
-    )
-    resource_id: UUID
+    model_config = ConfigDict(extra="forbid")
 
-    @model_validator(mode="after")
-    def validate_selector(self) -> ReadAgentSkillResourceInput:
-        if (self.skill_id is None) == (self.skill_name is None):
-            raise ValueError("Provide exactly one of skill_id or deprecated skill_name")
-        return self
+    skill_id: UUID
+    resource_id: UUID
 
 
 class AgentSkillIdentityOutput(BaseModel):
@@ -134,18 +121,14 @@ class LoadAgentSkillTool:
         if scope is None:
             raise ToolExecutionError("skill_catalog_unavailable")
         try:
-            skill_id = scope.resolve_selector(
-                skill_id=arguments.skill_id,
-                deprecated_name=arguments.name,
-            )
-            activation = await scope.load(skill_id)
+            activation = await scope.load(arguments.skill_id)
         except AgentSkillScopeError as exc:
             raise ToolExecutionError(exc.error_code) from exc
         except Exception as exc:
             logger.error(
                 "Agent skill activation failed unexpectedly: run=%s skill=%s error=%s",
                 context.run_id,
-                arguments.skill_id or arguments.name,
+                arguments.skill_id,
                 exception_kind(exc),
             )
             raise ToolExecutionError("skill_load_failed") from exc
@@ -214,12 +197,8 @@ class ReadAgentSkillResourceTool:
         if scope is None:
             raise ToolExecutionError("skill_catalog_unavailable")
         try:
-            skill_id = scope.resolve_selector(
-                skill_id=arguments.skill_id,
-                deprecated_name=arguments.skill_name,
-            )
             loaded = await scope.read_resource(
-                skill_id,
+                arguments.skill_id,
                 arguments.resource_id,
             )
         except AgentSkillScopeError as exc:
@@ -228,7 +207,7 @@ class ReadAgentSkillResourceTool:
             logger.error(
                 "Agent skill resource read failed unexpectedly: run=%s skill=%s error=%s",
                 context.run_id,
-                arguments.skill_id or arguments.skill_name,
+                arguments.skill_id,
                 exception_kind(exc),
             )
             raise ToolExecutionError("skill_load_failed") from exc

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections import defaultdict
 from dataclasses import dataclass
 from types import MappingProxyType
 from uuid import UUID
@@ -74,16 +73,9 @@ class AgentSkillRunScope:
         available = {skill.id: skill for skill in available_skills}
         if len(available) != len(available_skills):
             raise ValueError("Agent Skill run scope contains duplicate IDs")
-        names: dict[str, list[UUID]] = defaultdict(list)
-        for skill in available_skills:
-            names[skill.name].append(skill.id)
-
         self._repository = repository
         self._person_id = caller
         self._available = MappingProxyType(available)
-        self._names = MappingProxyType(
-            {name: tuple(skill_ids) for name, skill_ids in names.items()}
-        )
         self._max_activations = max_activations
         self._max_resources = max_resources
         self._max_instruction_characters = max_instruction_characters
@@ -110,25 +102,6 @@ class AgentSkillRunScope:
     @property
     def returned_characters(self) -> int:
         return self._returned_characters
-
-    def resolve_selector(
-        self,
-        *,
-        skill_id: UUID | None,
-        deprecated_name: str | None,
-    ) -> UUID:
-        """Resolve UUID or one temporarily supported unambiguous legacy name."""
-        if skill_id is not None:
-            if skill_id not in self._available:
-                raise AgentSkillScopeError("skill_not_available")
-            return skill_id
-        name = deprecated_name.strip() if deprecated_name is not None else ""
-        matches = self._names.get(name, ())
-        if not matches:
-            raise AgentSkillScopeError("skill_not_available")
-        if len(matches) > 1:
-            raise AgentSkillScopeError("skill_selector_ambiguous")
-        return matches[0]
 
     async def load(self, skill_id: UUID) -> AgentSkillActivation:
         """Load instructions at the run-pinned revision and charge them once."""

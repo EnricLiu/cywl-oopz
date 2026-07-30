@@ -20,21 +20,8 @@ from .models import (
 )
 
 
-class AgentSkillRepository(Protocol):
-    """Read enabled skill bundles and their catalog generation."""
-
-    async def load_enabled(self) -> tuple[AgentSkill, ...]:
-        """Load all enabled skills with their ordered text resources."""
-
-    async def generation(self) -> int:
-        """Return the monotonically increasing catalog generation."""
-
-
 class AgentSkillLibraryRepository(Protocol):
     """Owner- and recipient-scoped persistence for personal Skill libraries."""
-
-    async def load_accessible(self, person_id: str) -> tuple[AgentSkill, ...]:
-        """Load active builtin, owned, and accepted shared Skill bundles."""
 
     async def add_personal(self, skill: AgentSkill) -> None:
         """Persist one complete personal Skill bundle."""
@@ -96,15 +83,6 @@ class AgentSkillLibraryRepository(Protocol):
     ) -> AgentSkill:
         """Archive or restore one Skill under an owner/revision lock."""
 
-    async def invite(
-        self,
-        owner_person_id: str,
-        skill_id: UUID,
-        recipient_person_id: str,
-        now: datetime,
-    ) -> AgentSkillShare:
-        """Create or refresh one recipient invitation for an owned Skill."""
-
     async def invite_many(
         self,
         owner_person_id: str,
@@ -133,13 +111,6 @@ class AgentSkillLibraryRepository(Protocol):
     ) -> AgentSkillShareSummary | None:
         """Read one recipient-scoped share and safe Skill metadata."""
 
-    async def share_for_owner(
-        self,
-        owner_person_id: str,
-        share_id: UUID,
-    ) -> AgentSkillShareSummary | None:
-        """Read one owner-scoped share and safe Skill metadata."""
-
     async def respond(
         self,
         recipient_person_id: str,
@@ -148,13 +119,6 @@ class AgentSkillLibraryRepository(Protocol):
         now: datetime,
     ) -> AgentSkillShare:
         """Accept or decline one invitation belonging to the recipient."""
-
-    async def revoke(
-        self,
-        owner_person_id: str,
-        share_id: UUID,
-    ) -> AgentSkillShare | None:
-        """Delete and return one share belonging to an owned Skill."""
 
     async def revoke_owned_shares(
         self,

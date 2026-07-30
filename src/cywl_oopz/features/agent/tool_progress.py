@@ -363,9 +363,7 @@ class SkillProgressProjector(_ProjectionSupport):
                 ),
                 summary="准备撤销",
             )
-        name = arguments.get("name") if tool_name == "load_agent_skill" else None
-        name = name or arguments.get("skill_name")
-        return ToolProgressPresentation(subject=self.scalar(name))
+        return ToolProgressPresentation()
 
     def result(
         self,

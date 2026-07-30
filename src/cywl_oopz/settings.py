@@ -373,7 +373,6 @@ class AgentSettings:
     stale_run_after_seconds: int
     provider_max_retries: int = 2
     skills_enabled: bool = True
-    skill_catalog_refresh_seconds: float = 30.0
     max_available_skills: int = 32
     max_skill_activations: int = 3
     max_skill_resources: int = 4
@@ -525,11 +524,6 @@ class AgentSettings:
                 values,
                 "CYWL_AGENT_SKILLS_ENABLED",
                 True,
-            ),
-            skill_catalog_refresh_seconds=_positive_float(
-                values,
-                "CYWL_AGENT_SKILL_CATALOG_REFRESH_SECONDS",
-                30.0,
             ),
             max_available_skills=_positive_integer(
                 values,

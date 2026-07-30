@@ -9,7 +9,7 @@ from uuid import UUID, uuid4
 
 from cywl_oopz.core.observability import opaque_ref
 
-from .catalog import MAX_CATALOG_DESCRIPTION_CHARACTERS
+from .availability import MAX_SKILL_DISCOVERY_CHARACTERS
 from .errors import AgentSkillLibraryError
 from .models import (
     AgentSkill,
@@ -465,7 +465,7 @@ class AgentSkillLibraryService:
         if len(accessible) + extra_count > self._max_available_skills:
             raise AgentSkillLibraryError("skill_library_limit")
         description_characters = sum(len(skill.description) for skill in accessible)
-        if description_characters + description_delta > MAX_CATALOG_DESCRIPTION_CHARACTERS:
+        if description_characters + description_delta > MAX_SKILL_DISCOVERY_CHARACTERS:
             raise AgentSkillLibraryError("skill_library_limit")
 
     async def _notify_invitation(

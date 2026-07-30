@@ -39,6 +39,7 @@ from cywl_oopz.features.agent.skills.scope import (
     AgentSkillScopeError,
 )
 from cywl_oopz.features.agent.skills.tools import (
+    LoadAgentSkillInput,
     LoadAgentSkillTool,
     ReadAgentSkillResourceTool,
 )
@@ -319,15 +320,15 @@ async def test_skill_scope_enforces_distinct_activation_and_resource_counts() ->
 
 
 @pytest.mark.asyncio
-async def test_skill_scope_pins_revision_and_legacy_name_requires_unique_match() -> None:
+async def test_skill_scope_pins_revision_and_load_schema_requires_uuid() -> None:
     first = make_skill()
     duplicate = replace(first, id=uuid4())
     repository = InMemorySkillReadRepository((first, duplicate))
     scope = make_scope((first, duplicate), repository=repository)
 
-    with pytest.raises(AgentSkillScopeError, match="skill_selector_ambiguous"):
-        scope.resolve_selector(skill_id=None, deprecated_name=first.name)
-    assert scope.resolve_selector(skill_id=first.id, deprecated_name=None) == first.id
+    with pytest.raises(ValueError):
+        LoadAgentSkillInput.model_validate({"name": first.name})
+    assert LoadAgentSkillInput(skill_id=first.id).skill_id == first.id
 
     repository.skills[first.id] = replace(first, revision=2)
     with pytest.raises(AgentSkillScopeError, match="skill_revision_changed"):

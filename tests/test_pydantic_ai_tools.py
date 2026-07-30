@@ -489,7 +489,7 @@ def test_engine_filters_non_replayable_tool_messages_as_complete_pairs() -> None
                 parts=[
                     ToolCallPart(
                         "load_agent_skill",
-                        {"name": "web-research"},
+                        {"skill_id": str(uuid4())},
                         "call-skill",
                     ),
                     ToolCallPart("double", {"value": 2}, "call-double"),

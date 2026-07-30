@@ -4,15 +4,16 @@ from __future__ import annotations
 
 import logging
 
-from .catalog import (
-    MAX_CATALOG_DESCRIPTION_CHARACTERS,
-    AgentSkillCatalogCapacityError,
-)
 from .models import AgentSkillDiscovery
 
 logger = logging.getLogger(__name__)
 
 LOAD_AGENT_SKILL_TOOL = "load_agent_skill"
+MAX_SKILL_DISCOVERY_CHARACTERS = 8_000
+
+
+class SkillAvailabilityCapacityError(ValueError):
+    """The caller-visible discovery set exceeds a configured run budget."""
 
 
 class SkillAvailabilityService:
@@ -34,11 +35,11 @@ class SkillAvailabilityService:
             return ()
         available = tuple(skill for skill in discoveries if skill.required_tools.issubset(enabled))
         if len(available) > self._max_available_skills:
-            raise AgentSkillCatalogCapacityError(
+            raise SkillAvailabilityCapacityError(
                 "Agent Skill library exceeds the configured Skill count"
             )
-        if sum(len(skill.description) for skill in available) > MAX_CATALOG_DESCRIPTION_CHARACTERS:
-            raise AgentSkillCatalogCapacityError(
+        if sum(len(skill.description) for skill in available) > MAX_SKILL_DISCOVERY_CHARACTERS:
+            raise SkillAvailabilityCapacityError(
                 "Agent Skill library exceeds the description character budget"
             )
         logger.debug(

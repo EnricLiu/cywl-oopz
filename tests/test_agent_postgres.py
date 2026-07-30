@@ -39,7 +39,6 @@ from cywl_oopz.features.agent.repository import (
     SqlAlchemyToolExecutionRepository,
 )
 from cywl_oopz.features.agent.selection import ProviderSelectionService
-from cywl_oopz.features.agent.skills.catalog import ReloadableAgentSkillCatalog
 from cywl_oopz.features.agent.skills.errors import (
     AgentSkillConflictError,
     AgentSkillNotFoundError,
@@ -70,7 +69,6 @@ from cywl_oopz.features.music.models import MusicTrack
 from cywl_oopz.features.music.playlist_repository import (
     SqlAlchemyMusicPlaylistRepository,
 )
-from cywl_oopz.settings import DEFAULT_AGENT_TOOLS
 from cywl_oopz.storage.models import (
     AgentRunRecord,
     ChannelSettingsRecord,
@@ -113,6 +111,27 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
                 {"id": uuid4()},
             )
         await _migrate(test_engine, "upgrade", "head")
+        async with test_engine.connect() as connection:
+            catalog_state = await connection.scalar(
+                text("SELECT to_regclass('agent_skill_catalog_state')")
+            )
+            generation_triggers = await connection.scalar(
+                text(
+                    """
+                        SELECT count(*)
+                        FROM pg_trigger
+                        JOIN pg_class ON pg_class.oid = pg_trigger.tgrelid
+                        JOIN pg_namespace ON pg_namespace.oid = pg_class.relnamespace
+                        WHERE pg_namespace.nspname = current_schema()
+                          AND tgname IN (
+                            'trg_agent_skills_bump_generation',
+                            'trg_agent_skill_resources_bump_generation'
+                        )
+                    """
+                )
+            )
+        assert catalog_state is None
+        assert generation_triggers == 0
         sessions = async_sessionmaker(test_engine, expire_on_commit=False)
         async with sessions() as session:
             legacy_record = await session.scalar(
@@ -285,9 +304,8 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
         assert resource_row["created_at"] == resource_row["updated_at"]
 
         skill_repository = SqlAlchemyAgentSkillRepository(sessions)
-        generation_after_insert = await skill_repository.generation()
-        loaded_skills = await skill_repository.load_enabled()
-        skills_by_name = {skill.name: skill for skill in loaded_skills}
+        discoveries = await skill_repository.list_accessible("builtin-reader")
+        skills_by_name = {skill.name: skill for skill in discoveries}
         assert set(skills_by_name) == {
             "music-curator",
             "netease-playlist-importer",
@@ -299,8 +317,40 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
         import_skill = skills_by_name["netease-playlist-importer"]
         authoring_skill = skills_by_name["skill-authoring"]
         web_skill = skills_by_name["web-research"]
+        music_bundle = await skill_repository.load_accessible_bundle(
+            "builtin-reader",
+            music_skill.id,
+            music_skill.revision,
+        )
+        import_bundle = await skill_repository.load_accessible_bundle(
+            "builtin-reader",
+            import_skill.id,
+            import_skill.revision,
+        )
+        authoring_bundle = await skill_repository.load_accessible_bundle(
+            "builtin-reader",
+            authoring_skill.id,
+            authoring_skill.revision,
+        )
+        web_bundle = await skill_repository.load_accessible_bundle(
+            "builtin-reader",
+            web_skill.id,
+            web_skill.revision,
+        )
+        assert all(
+            bundle is not None
+            for bundle in (
+                music_bundle,
+                import_bundle,
+                authoring_bundle,
+                web_bundle,
+            )
+        )
+        assert music_bundle is not None
+        assert import_bundle is not None
+        assert authoring_bundle is not None
+        assert web_bundle is not None
         assert music_skill.version == "1.0.0"
-        assert music_skill.metadata["builtin_seed"] == "20260729_12"
         assert music_skill.required_tools == frozenset(
             {
                 "search_music_catalog",
@@ -312,9 +362,8 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
                 "load_music_playlist",
             }
         )
-        assert [resource.key for resource in music_skill.resources] == ["batch-curation-guide"]
+        assert [resource.key for resource in music_bundle.resources] == ["batch-curation-guide"]
         assert import_skill.version == "1.0.0"
-        assert import_skill.metadata["builtin_seed"] == "20260729_13"
         assert import_skill.required_tools == frozenset(
             {
                 "list_music_playlists",
@@ -322,8 +371,7 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
                 "import_netease_playlist",
             }
         )
-        assert [resource.key for resource in import_skill.resources] == ["netease-api-behavior"]
-        assert authoring_skill.metadata["builtin_seed"] == "20260729_16"
+        assert [resource.key for resource in import_bundle.resources] == ["netease-api-behavior"]
         assert "分享个人 Skill" in authoring_skill.description
         assert authoring_skill.required_tools == frozenset(
             {
@@ -338,18 +386,29 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
                 "revoke_agent_skill_share",
             }
         )
-        assert "真实 `@` 提及" in authoring_skill.instructions
+        assert "真实 `@` 提及" in authoring_bundle.instructions
         assert web_skill.version == "1.0.0"
-        assert web_skill.metadata["builtin_seed"] == "20260729_12"
         assert web_skill.required_tools == frozenset({"search_web", "read_web_page"})
-        assert [resource.key for resource in web_skill.resources] == ["source-evaluation"]
+        assert [resource.key for resource in web_bundle.resources] == ["source-evaluation"]
         loaded_skill = skills_by_name["test-research"]
+        loaded_bundle = await skill_repository.load_accessible_bundle(
+            "builtin-reader",
+            loaded_skill.id,
+            loaded_skill.revision,
+        )
+        assert loaded_bundle is not None
+        loaded_resource = await skill_repository.read_accessible_resource(
+            "builtin-reader",
+            loaded_skill.id,
+            loaded_bundle.resources[0].id,
+            loaded_skill.revision,
+        )
+        assert loaded_resource is not None
         assert loaded_skill.revision == 2
         assert loaded_skill.required_tools == frozenset({"search_web", "read_web_page"})
-        assert loaded_skill.resources[0].id == resource_row["id"]
-        assert loaded_skill.resources[0].kind is SkillResourceKind.REFERENCE
-        assert loaded_skill.ownership_kind is SkillOwnershipKind.BUILTIN
-        assert loaded_skill.owner_person_id is None
+        assert loaded_resource.id == resource_row["id"]
+        assert loaded_resource.kind is SkillResourceKind.REFERENCE
+        assert loaded_skill.access is SkillAccessKind.BUILTIN
 
         first_personal = AgentSkill(
             id=uuid4(),
@@ -376,11 +435,13 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
         with pytest.raises(AgentSkillConflictError):
             await skill_repository.add_personal(replace(first_personal, id=uuid4()))
 
-        builtin_ids = {skill.id for skill in await skill_repository.load_enabled()}
+        builtin_ids = {
+            skill.id for skill in await skill_repository.list_accessible("builtin-reader")
+        }
         assert first_personal.id not in builtin_ids
         assert second_personal.id not in builtin_ids
-        owner_one_ids = {skill.id for skill in await skill_repository.load_accessible("owner-one")}
-        unrelated_ids = {skill.id for skill in await skill_repository.load_accessible("recipient")}
+        owner_one_ids = {skill.id for skill in await skill_repository.list_accessible("owner-one")}
+        unrelated_ids = {skill.id for skill in await skill_repository.list_accessible("recipient")}
         assert first_personal.id in owner_one_ids
         assert second_personal.id not in owner_one_ids
         assert first_personal.id not in unrelated_ids
@@ -390,19 +451,14 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
         assert await skill_repository.get_owned("owner-two", first_personal.id) is None
 
         invitation_time = datetime.now(UTC)
-        invitation = await skill_repository.invite(
-            "owner-one",
-            first_personal.id,
-            "recipient",
-            invitation_time,
-        )
-        assert invitation.status is SkillShareStatus.PENDING
         invitations = await skill_repository.invite_many(
             "owner-one",
             first_personal.id,
             ("recipient", "recipient-two"),
             invitation_time,
         )
+        invitation = invitations[0]
+        assert invitation.status is SkillShareStatus.PENDING
         assert [item.recipient_person_id for item in invitations] == [
             "recipient",
             "recipient-two",
@@ -413,7 +469,7 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
         first_outgoing = next(item for item in outgoing if item.skill.id == first_personal.id)
         assert (first_outgoing.pending_count, first_outgoing.accepted_count) == (2, 0)
         assert first_personal.id not in {
-            skill.id for skill in await skill_repository.load_accessible("recipient")
+            skill.id for skill in await skill_repository.list_accessible("recipient")
         }
         with pytest.raises(AgentSkillNotFoundError):
             await skill_repository.respond(
@@ -450,7 +506,7 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
         first_outgoing = next(item for item in outgoing if item.skill.id == first_personal.id)
         assert (first_outgoing.pending_count, first_outgoing.accepted_count) == (1, 1)
         assert first_personal.id in {
-            skill.id for skill in await skill_repository.load_accessible("recipient")
+            skill.id for skill in await skill_repository.list_accessible("recipient")
         }
         recipient_discovery = await skill_repository.list_accessible("recipient")
         discovery_by_id = {item.id: item for item in recipient_discovery}
@@ -471,14 +527,14 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
             loaded_skill.revision,
         )
         assert builtin_bundle is not None
-        assert builtin_bundle.resources[0].id == loaded_skill.resources[0].id
+        assert builtin_bundle.resources[0].id == loaded_resource.id
         builtin_resource = await skill_repository.read_accessible_resource(
             "recipient",
             loaded_skill.id,
-            loaded_skill.resources[0].id,
+            loaded_resource.id,
             loaded_skill.revision,
         )
-        assert builtin_resource == loaded_skill.resources[0]
+        assert builtin_resource == loaded_resource
         with pytest.raises(AgentSkillRevisionConflictError):
             await skill_repository.load_accessible_bundle(
                 "recipient",
@@ -506,7 +562,7 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
         )
         assert removed == (accepted,)
         assert first_personal.id not in {
-            skill.id for skill in await skill_repository.load_accessible("recipient")
+            skill.id for skill in await skill_repository.list_accessible("recipient")
         }
         remaining = await skill_repository.revoke_owned_shares(
             "owner-one",
@@ -594,13 +650,13 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
         assert first_personal.id in {
             item.id for item in await skill_repository.list_accessible("owner-one")
         }
-        skill_catalog = ReloadableAgentSkillCatalog(
-            skill_repository,
-            registered_tools=DEFAULT_AGENT_TOOLS,
-            refresh_seconds=30,
-            max_available_skills=8,
+        before_resource_update = await skill_repository.read_accessible_resource(
+            "builtin-reader",
+            loaded_skill.id,
+            loaded_resource.id,
+            loaded_skill.revision,
         )
-        before_resource_update = await skill_catalog.reload()
+        assert before_resource_update is not None
 
         async with test_engine.begin() as connection:
             await connection.execute(
@@ -613,17 +669,25 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
                 ),
                 {"resource_id": resource_row["id"]},
             )
-        assert await skill_repository.generation() > generation_after_insert
-        after_resource_update = await skill_catalog.reload()
-        assert after_resource_update is skill_catalog.snapshot
-        assert after_resource_update is not before_resource_update
-        assert "官方" not in before_resource_update.skills["test-research"].resources[0].content
-        assert "官方" in after_resource_update.skills["test-research"].resources[0].content
-        reloaded_skill = {skill.name: skill for skill in await skill_repository.load_enabled()}[
-            "test-research"
-        ]
+        with pytest.raises(AgentSkillRevisionConflictError):
+            await skill_repository.load_accessible_bundle(
+                "builtin-reader",
+                loaded_skill.id,
+                loaded_skill.revision,
+            )
+        reloaded_skill = {
+            skill.name: skill for skill in await skill_repository.list_accessible("builtin-reader")
+        }["test-research"]
+        after_resource_update = await skill_repository.read_accessible_resource(
+            "builtin-reader",
+            reloaded_skill.id,
+            loaded_resource.id,
+            reloaded_skill.revision,
+        )
+        assert after_resource_update is not None
         assert reloaded_skill.revision == loaded_skill.revision + 1
-        assert "官方" in reloaded_skill.resources[0].content
+        assert "官方" not in before_resource_update.content
+        assert "官方" in after_resource_update.content
 
         playlist_repository = SqlAlchemyMusicPlaylistRepository(sessions)
         playlist = await playlist_repository.create(
