@@ -116,10 +116,12 @@ from .features.web.browser import BrowserSessionManager
 from .features.web.errors import BrowserError
 from .features.web.service import WebSearchService
 from .integrations.oopz.agent_presenter import OopzAgentPresenterFactory
+from .integrations.oopz.chat_invocation import OopzChatInvocationFactory
 from .integrations.oopz.editable_messages import OopzEditableMessageGateway
 from .integrations.oopz.message_renderer import OopzMessageRenderer
 from .integrations.oopz.music import OopzMusicVoiceGateway
 from .integrations.oopz.reactions import OopzReactionGateway
+from .integrations.oopz.skill_sharing import OopzSkillShareNotifier
 from .integrations.web.agent_browser_mcp import AgentBrowserMcpGateway
 from .integrations.web.duckduckgo import DuckDuckGoSearchGateway
 from .settings import (
@@ -145,6 +147,7 @@ class BotApplication:
         self.health = HealthRegistry()
         self.database = Database(settings.database)
         self.bot = OopzBot(settings.oopz)
+        self.chat_invocations = OopzChatInvocationFactory(settings.oopz.person_uid)
         self.agent_presenters = OopzAgentPresenterFactory(
             OopzEditableMessageGateway(self.bot),
             OopzMessageRenderer(),
@@ -175,6 +178,7 @@ class BotApplication:
         )
         channel_settings = SqlAlchemyChannelSettingsRepository(self.database.session_factory)
         self.agent_skill_repository = SqlAlchemyAgentSkillRepository(self.database.session_factory)
+        self.agent_skill_notifier = OopzSkillShareNotifier(self.bot)
         agent_tools = [
             GetAgentStatusTool(
                 timeout_seconds=settings.agent.tool_timeout_seconds,
@@ -335,6 +339,9 @@ class BotApplication:
                 max_resources_per_skill=settings.agent.max_resources_per_skill,
                 max_instruction_characters=(settings.agent.max_skill_instruction_characters),
                 max_resource_characters=settings.agent.max_skill_resource_characters,
+                max_accepted_shared_skills=settings.agent.max_accepted_shared_skills,
+                max_share_recipients_per_call=(settings.agent.max_skill_share_recipients_per_call),
+                notifier=self.agent_skill_notifier,
             )
             agent_tools.extend(skill_library_tools(self.agent_skill_library))
         else:
@@ -415,11 +422,13 @@ class BotApplication:
             self.chat,
             settings.oopz.person_uid,
             self.agent_presenters,
+            self.chat_invocations,
         )
         self._ambient_handler = AmbientChatHandler(
             self.chat,
             channel_settings,
             self.agent_presenters,
+            self.chat_invocations,
         )
         self._register_commands()
         self.bot.on_ready(self._on_ready)
@@ -452,7 +461,13 @@ class BotApplication:
         self.commands.register(PingCommand())
         self.commands.register(HelpCommand(self.commands))
         self.commands.register(StatusCommand(self.health))
-        self.commands.register(ChatCommand(self.chat, self.agent_presenters))
+        self.commands.register(
+            ChatCommand(
+                self.chat,
+                self.agent_presenters,
+                self.chat_invocations,
+            )
+        )
         self.commands.register(NewConversationCommand(self.chat, self.chat_tasks))
         self.commands.register(
             CancelChatCommand(
@@ -483,10 +498,16 @@ class BotApplication:
                 )
             )
             self.commands.register(ToolsCommand(self.agent_chat))
-            self.commands.register(ToolCommand(self.direct_tools, self.settings.command_prefix))
+            self.commands.register(
+                ToolCommand(
+                    self.direct_tools,
+                    self.settings.command_prefix,
+                    self.chat_invocations,
+                )
+            )
             self.commands.register(MemoryCommand(self.agent_chat, self.agent_memory))
             if self.settings.agent.skills_enabled:
-                self.commands.register(SkillsCommand(self.agent_chat))
+                self.commands.register(SkillsCommand(self.agent_chat, self.agent_skill_library))
 
     async def run(self) -> None:
         """Start the database check before entering the long-running OOPZ client."""

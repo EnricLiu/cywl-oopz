@@ -31,10 +31,12 @@ from .models import (
     AgentSkillBundle,
     AgentSkillDiscovery,
     AgentSkillInspection,
+    AgentSkillOutgoingShare,
     AgentSkillOwnedSummary,
     AgentSkillResource,
     AgentSkillResourceManifest,
     AgentSkillShare,
+    AgentSkillShareSummary,
     SkillAccessKind,
     SkillOwnershipKind,
     SkillShareStatus,
@@ -625,6 +627,178 @@ class SqlAlchemyAgentSkillRepository:
             raise _database_error("invite Agent skill recipient", exc) from exc
         return result
 
+    async def pending_invitations(
+        self,
+        recipient_person_id: str,
+    ) -> tuple[AgentSkillShareSummary, ...]:
+        """List pending invitations with metadata but without Skill content."""
+        recipient = _person_id(recipient_person_id, "Skill share recipient")
+        try:
+            async with self._sessions() as session:
+                rows = (
+                    await session.execute(
+                        select(
+                            AgentSkillShareRecord,
+                            *self._discovery_columns(),
+                            AgentSkillRecord.enabled,
+                            AgentSkillRecord.archived_at,
+                        )
+                        .join(
+                            AgentSkillRecord,
+                            AgentSkillRecord.id == AgentSkillShareRecord.skill_id,
+                        )
+                        .where(
+                            AgentSkillShareRecord.recipient_person_id == recipient,
+                            AgentSkillShareRecord.status == SkillShareStatus.PENDING,
+                        )
+                        .order_by(
+                            AgentSkillShareRecord.created_at,
+                            AgentSkillShareRecord.id,
+                        )
+                    )
+                ).all()
+        except SQLAlchemyError as exc:
+            raise _database_error("list Agent skill invitations", exc) from exc
+        return tuple(self._to_share_summary(row, recipient) for row in rows)
+
+    async def invite_many(
+        self,
+        owner_person_id: str,
+        skill_id: UUID,
+        recipient_person_ids: tuple[str, ...],
+        now: datetime,
+    ) -> tuple[AgentSkillShare, ...]:
+        """Create or refresh several invitations in one transaction."""
+        owner = _person_id(owner_person_id, "Skill owner")
+        recipients = tuple(
+            dict.fromkeys(
+                _person_id(value, "Skill share recipient") for value in recipient_person_ids
+            )
+        )
+        if not recipients:
+            raise ValueError("Skill share recipients must not be empty")
+        try:
+            async with self._sessions() as session:
+                async with session.begin():
+                    owned = await session.scalar(
+                        select(AgentSkillRecord)
+                        .where(
+                            AgentSkillRecord.id == skill_id,
+                            AgentSkillRecord.ownership_kind == SkillOwnershipKind.PERSONAL,
+                            AgentSkillRecord.owner_person_id == owner,
+                        )
+                        .with_for_update()
+                    )
+                    if owned is None:
+                        raise AgentSkillNotFoundError("Owned Skill was not found")
+                    existing = (
+                        await session.scalars(
+                            select(AgentSkillShareRecord)
+                            .where(
+                                AgentSkillShareRecord.skill_id == skill_id,
+                                AgentSkillShareRecord.recipient_person_id.in_(recipients),
+                            )
+                            .with_for_update()
+                        )
+                    ).all()
+                    by_recipient = {record.recipient_person_id: record for record in existing}
+                    records: list[AgentSkillShareRecord] = []
+                    for recipient in recipients:
+                        record = by_recipient.get(recipient)
+                        if record is None:
+                            record = AgentSkillShareRecord(
+                                skill_id=skill_id,
+                                recipient_person_id=recipient,
+                                status=SkillShareStatus.PENDING,
+                                created_at=now,
+                                updated_at=now,
+                            )
+                            session.add(record)
+                        elif record.status is SkillShareStatus.DECLINED:
+                            record.status = SkillShareStatus.PENDING
+                            record.responded_at = None
+                        records.append(record)
+                    await session.flush()
+                    for record in records:
+                        await session.refresh(record)
+                    result = tuple(self._to_share(record) for record in records)
+        except AgentSkillNotFoundError:
+            raise
+        except IntegrityError as exc:
+            raise AgentSkillConflictError("Skill invitations conflict with current state") from exc
+        except SQLAlchemyError as exc:
+            raise _database_error("invite Agent skill recipients", exc) from exc
+        return result
+
+    async def outgoing_shares(
+        self,
+        owner_person_id: str,
+    ) -> tuple[AgentSkillOutgoingShare, ...]:
+        """Aggregate owner shares without returning recipient identities."""
+        owner = _person_id(owner_person_id, "Skill owner")
+        try:
+            async with self._sessions() as session:
+                rows = (
+                    await session.execute(
+                        select(
+                            AgentSkillShareRecord.status,
+                            *self._discovery_columns(),
+                            AgentSkillRecord.enabled,
+                            AgentSkillRecord.archived_at,
+                        )
+                        .join(
+                            AgentSkillRecord,
+                            AgentSkillRecord.id == AgentSkillShareRecord.skill_id,
+                        )
+                        .where(
+                            AgentSkillRecord.ownership_kind == SkillOwnershipKind.PERSONAL,
+                            AgentSkillRecord.owner_person_id == owner,
+                        )
+                        .order_by(AgentSkillRecord.name, AgentSkillRecord.id)
+                    )
+                ).all()
+        except SQLAlchemyError as exc:
+            raise _database_error("list outgoing Agent skill shares", exc) from exc
+        grouped: dict[UUID, tuple[AgentSkillDiscovery, int, int, bool]] = {}
+        for row in rows:
+            discovery = self._to_discovery(row[1:], owner)
+            active = bool(row[10]) and row[11] is None
+            current = grouped.get(discovery.id, (discovery, 0, 0, active))
+            pending = current[1] + int(row[0] is SkillShareStatus.PENDING)
+            accepted = current[2] + int(row[0] is SkillShareStatus.ACCEPTED)
+            grouped[discovery.id] = (discovery, pending, accepted, active)
+        return tuple(
+            AgentSkillOutgoingShare(discovery, pending, accepted, active)
+            for discovery, pending, accepted, active in grouped.values()
+        )
+
+    async def share_for_recipient(
+        self,
+        recipient_person_id: str,
+        share_id: UUID,
+    ) -> AgentSkillShareSummary | None:
+        """Read one share only through its recipient scope."""
+        recipient = _person_id(recipient_person_id, "Skill share recipient")
+        return await self._share_summary(
+            AgentSkillShareRecord.id == share_id,
+            AgentSkillShareRecord.recipient_person_id == recipient,
+            caller_person_id=recipient,
+        )
+
+    async def share_for_owner(
+        self,
+        owner_person_id: str,
+        share_id: UUID,
+    ) -> AgentSkillShareSummary | None:
+        """Read one share only through the owning personal Skill."""
+        owner = _person_id(owner_person_id, "Skill owner")
+        return await self._share_summary(
+            AgentSkillShareRecord.id == share_id,
+            AgentSkillRecord.ownership_kind == SkillOwnershipKind.PERSONAL,
+            AgentSkillRecord.owner_person_id == owner,
+            caller_person_id=owner,
+        )
+
     async def respond(
         self,
         recipient_person_id: str,
@@ -649,13 +823,18 @@ class SqlAlchemyAgentSkillRepository:
                     )
                     if record is None:
                         raise AgentSkillNotFoundError("Skill invitation was not found")
+                    if (
+                        record.status is not SkillShareStatus.PENDING
+                        and record.status is not status
+                    ):
+                        raise AgentSkillConflictError("Skill invitation has already been answered")
                     if record.status is not status:
                         record.status = status
                         record.responded_at = now
                     await session.flush()
                     await session.refresh(record)
                     result = self._to_share(record)
-        except AgentSkillNotFoundError:
+        except (AgentSkillConflictError, AgentSkillNotFoundError):
             raise
         except SQLAlchemyError as exc:
             raise _database_error("respond to Agent skill invitation", exc) from exc
@@ -665,7 +844,7 @@ class SqlAlchemyAgentSkillRepository:
         self,
         owner_person_id: str,
         share_id: UUID,
-    ) -> bool:
+    ) -> AgentSkillShare | None:
         """Delete one share only through its owning personal Skill."""
         owner = _person_id(owner_person_id, "Skill owner")
         try:
@@ -685,13 +864,14 @@ class SqlAlchemyAgentSkillRepository:
                         .with_for_update()
                     )
                     if record is None:
-                        return False
+                        return None
+                    result = self._to_share(record)
                     await session.execute(
                         delete(AgentSkillShareRecord).where(AgentSkillShareRecord.id == record.id)
                     )
         except SQLAlchemyError as exc:
             raise _database_error("revoke Agent skill share", exc) from exc
-        return True
+        return result
 
     async def _load_bundles(
         self,
@@ -878,6 +1058,46 @@ class SqlAlchemyAgentSkillRepository:
             )
         ).all()
         return self._to_skills([record], list(resources))[0]
+
+    async def _share_summary(
+        self,
+        *predicates: ColumnElement[bool],
+        caller_person_id: str,
+    ) -> AgentSkillShareSummary | None:
+        try:
+            async with self._sessions() as session:
+                row = (
+                    await session.execute(
+                        select(
+                            AgentSkillShareRecord,
+                            *self._discovery_columns(),
+                            AgentSkillRecord.enabled,
+                            AgentSkillRecord.archived_at,
+                        )
+                        .join(
+                            AgentSkillRecord,
+                            AgentSkillRecord.id == AgentSkillShareRecord.skill_id,
+                        )
+                        .where(*predicates)
+                    )
+                ).one_or_none()
+        except SQLAlchemyError as exc:
+            raise _database_error("load Agent skill share", exc) from exc
+        if row is None:
+            return None
+        return self._to_share_summary(row, caller_person_id)
+
+    @classmethod
+    def _to_share_summary(
+        cls,
+        row: Sequence[object],
+        caller_person_id: str,
+    ) -> AgentSkillShareSummary:
+        return AgentSkillShareSummary(
+            cls._to_share(row[0]),
+            cls._to_discovery(row[1:], caller_person_id),
+            active=bool(row[10]) and row[11] is None,
+        )
 
     @staticmethod
     def _skill_record(skill: AgentSkill) -> AgentSkillRecord:

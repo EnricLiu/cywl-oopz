@@ -13,14 +13,19 @@ from .catalog import MAX_CATALOG_DESCRIPTION_CHARACTERS
 from .errors import AgentSkillLibraryError
 from .models import (
     AgentSkill,
+    AgentSkillDiscovery,
     AgentSkillInspection,
+    AgentSkillInviteResult,
     AgentSkillLibrary,
     AgentSkillResource,
+    AgentSkillRevokeResult,
+    AgentSkillShareSummary,
     SkillAccessKind,
     SkillOwnershipKind,
     SkillResourceKind,
+    SkillShareStatus,
 )
-from .ports import AgentSkillLibraryStore
+from .ports import AgentSkillLibraryStore, SkillShareNotifier
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +43,9 @@ class AgentSkillLibraryService:
         max_resources_per_skill: int,
         max_instruction_characters: int,
         max_resource_characters: int,
+        max_accepted_shared_skills: int = 8,
+        max_share_recipients_per_call: int = 5,
+        notifier: SkillShareNotifier | None = None,
     ) -> None:
         limits = (
             max_personal_skills,
@@ -45,6 +53,8 @@ class AgentSkillLibraryService:
             max_resources_per_skill,
             max_instruction_characters,
             max_resource_characters,
+            max_accepted_shared_skills,
+            max_share_recipients_per_call,
         )
         if any(limit <= 0 for limit in limits):
             raise ValueError("Agent Skill library limits must be positive")
@@ -55,15 +65,22 @@ class AgentSkillLibraryService:
         self._max_resources_per_skill = max_resources_per_skill
         self._max_instruction_characters = max_instruction_characters
         self._max_resource_characters = max_resource_characters
+        self._max_accepted_shared_skills = max_accepted_shared_skills
+        self._max_share_recipients_per_call = max_share_recipients_per_call
+        self._notifier = notifier
 
     async def library(self, person_id: str) -> AgentSkillLibrary:
         """Return compact active and archived caller-relative library groups."""
         owned = await self._repository.list_owned(person_id)
         accessible = await self._repository.list_accessible(person_id)
+        pending = await self._repository.pending_invitations(person_id)
+        outgoing = await self._repository.outgoing_shares(person_id)
         return AgentSkillLibrary(
             owned=owned,
             builtin=tuple(skill for skill in accessible if skill.access is SkillAccessKind.BUILTIN),
             shared=tuple(skill for skill in accessible if skill.access is SkillAccessKind.SHARED),
+            pending_invitations=pending,
+            outgoing_shares=outgoing,
         )
 
     async def inspect(
@@ -287,6 +304,109 @@ class AgentSkillLibraryService:
             archived_at=None if active else datetime.now(UTC),
         )
 
+    async def invite(
+        self,
+        person_id: str,
+        skill_id: UUID,
+        mentioned_person_ids: tuple[str, ...],
+    ) -> AgentSkillInviteResult:
+        """Invite only trusted current-message mention targets."""
+        owner = _person_id(person_id)
+        current = await self._repository.get_owned(owner, skill_id)
+        if current is None:
+            raise AgentSkillLibraryError("skill_not_owned")
+        if not current.enabled or current.archived_at is not None:
+            raise AgentSkillLibraryError("skill_archived")
+        recipients = tuple(
+            dict.fromkeys(
+                recipient.strip()
+                for recipient in mentioned_person_ids
+                if recipient.strip() and recipient.strip() != owner
+            )
+        )
+        if not recipients:
+            raise AgentSkillLibraryError("skill_share_target_required")
+        if len(recipients) > self._max_share_recipients_per_call:
+            raise AgentSkillLibraryError("skill_share_target_limit")
+        now = datetime.now(UTC)
+        shares = await self._repository.invite_many(
+            owner,
+            skill_id,
+            recipients,
+            now,
+        )
+        discovery = _owned_discovery(current)
+        notification_failures = 0
+        for share in shares:
+            if not await self._notify_invitation(
+                share.recipient_person_id,
+                discovery,
+            ):
+                notification_failures += 1
+        return AgentSkillInviteResult(
+            discovery,
+            shares,
+            notification_failures,
+        )
+
+    async def respond(
+        self,
+        person_id: str,
+        share_id: UUID,
+        *,
+        accepted: bool,
+    ) -> AgentSkillShareSummary:
+        """Accept or decline one caller-owned invitation."""
+        recipient = _person_id(person_id)
+        current = await self._repository.share_for_recipient(recipient, share_id)
+        if current is None:
+            raise AgentSkillLibraryError("skill_invitation_not_found")
+        target_status = SkillShareStatus.ACCEPTED if accepted else SkillShareStatus.DECLINED
+        if (
+            current.share.status is not SkillShareStatus.PENDING
+            and current.share.status is not target_status
+        ):
+            raise AgentSkillLibraryError("skill_invitation_answered")
+        if accepted and current.share.status is not SkillShareStatus.ACCEPTED:
+            library = await self.library(recipient)
+            if len(library.shared) >= self._max_accepted_shared_skills:
+                raise AgentSkillLibraryError("skill_shared_library_limit")
+            if current.active:
+                await self._ensure_active_capacity(
+                    recipient,
+                    extra_count=1,
+                    description_delta=len(current.skill.description),
+                )
+        await self._repository.respond(
+            recipient,
+            share_id,
+            target_status,
+            datetime.now(UTC),
+        )
+        updated = await self._repository.share_for_recipient(recipient, share_id)
+        if updated is None:
+            raise AgentSkillLibraryError("skill_invitation_not_found")
+        return updated
+
+    async def revoke(
+        self,
+        person_id: str,
+        share_id: UUID,
+    ) -> AgentSkillRevokeResult:
+        """Revoke one owner-scoped invitation or accepted grant."""
+        owner = _person_id(person_id)
+        summary = await self._repository.share_for_owner(owner, share_id)
+        if summary is None:
+            raise AgentSkillLibraryError("skill_share_not_found")
+        removed = await self._repository.revoke(owner, share_id)
+        if removed is None:
+            raise AgentSkillLibraryError("skill_share_not_found")
+        delivered = await self._notify_revoked(
+            removed.recipient_person_id,
+            summary.skill,
+        )
+        return AgentSkillRevokeResult(summary, delivered)
+
     async def _owned(
         self,
         person_id: str,
@@ -322,9 +442,56 @@ class AgentSkillLibraryService:
         if description_characters + description_delta > MAX_CATALOG_DESCRIPTION_CHARACTERS:
             raise AgentSkillLibraryError("skill_library_limit")
 
+    async def _notify_invitation(
+        self,
+        recipient_person_id: str,
+        skill: AgentSkillDiscovery,
+    ) -> bool:
+        if self._notifier is None:
+            return True
+        try:
+            return await self._notifier.invitation(recipient_person_id, skill)
+        except Exception:
+            logger.warning(
+                "Skill invitation notification failed: recipient=%s skill=%s",
+                opaque_ref(recipient_person_id),
+                skill.id,
+            )
+            return False
+
+    async def _notify_revoked(
+        self,
+        recipient_person_id: str,
+        skill: AgentSkillDiscovery,
+    ) -> bool:
+        if self._notifier is None:
+            return True
+        try:
+            return await self._notifier.revoked(recipient_person_id, skill)
+        except Exception:
+            logger.warning(
+                "Skill revoke notification failed: recipient=%s skill=%s",
+                opaque_ref(recipient_person_id),
+                skill.id,
+            )
+            return False
+
 
 def _person_id(value: str) -> str:
     person_id = value.strip()
     if not person_id:
         raise ValueError("Skill library person ID must not be empty")
     return person_id
+
+
+def _owned_discovery(skill: AgentSkill) -> AgentSkillDiscovery:
+    return AgentSkillDiscovery(
+        id=skill.id,
+        name=skill.name,
+        display_name=skill.display_name,
+        description=skill.description,
+        version=skill.version,
+        revision=skill.revision,
+        required_tools=skill.required_tools,
+        access=SkillAccessKind.OWNED,
+    )

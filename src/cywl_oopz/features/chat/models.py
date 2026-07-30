@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Protocol
 
 from cywl_oopz.core.errors import ProviderResponseError
 
@@ -88,18 +88,39 @@ class ChatInvocation:
 
     source_message_id: str
     transport_channel_id: str
+    mentioned_person_ids: tuple[str, ...] = ()
 
     @classmethod
-    def from_oopz_context(cls, context: Any) -> ChatInvocation:
+    def from_oopz_context(
+        cls,
+        context: Any,
+        *,
+        excluded_person_ids: tuple[str, ...] = (),
+    ) -> ChatInvocation:
         """Extract only stable message targeting values from the SDK boundary."""
         event = getattr(context, "event", None)
         message = getattr(event, "message", None)
         if message is None:
             raise ValueError("A chat invocation requires an OOPZ message event")
+        sender_id = str(getattr(message, "sender_id", "")).strip()
+        excluded = {sender_id, *(value.strip() for value in excluded_person_ids)}
+        mentioned: list[str] = []
+        for mention in getattr(message, "mention_list", ()) or ():
+            person_id = str(getattr(mention, "person", "")).strip()
+            if person_id and person_id not in excluded and person_id not in mentioned:
+                mentioned.append(person_id)
         return cls(
             source_message_id=str(getattr(message, "message_id", "")).strip(),
             transport_channel_id=str(getattr(message, "channel", "")).strip(),
+            mentioned_person_ids=tuple(mentioned),
         )
+
+
+class ChatInvocationFactory(Protocol):
+    """Build trusted transport metadata from one OOPZ event context."""
+
+    def from_context(self, context: Any) -> ChatInvocation:
+        """Return one normalized invocation."""
 
 
 @dataclass(frozen=True, slots=True)

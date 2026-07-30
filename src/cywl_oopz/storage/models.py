@@ -74,6 +74,9 @@ DEFAULT_AGENT_TOOLS = text(
     '"update_agent_skill",'
     '"manage_agent_skill_resource",'
     '"set_agent_skill_state",'
+    '"invite_agent_skill_share",'
+    '"respond_agent_skill_share",'
+    '"revoke_agent_skill_share",'
     '"preview_netease_playlist",'
     '"import_netease_playlist"'
     "]'::jsonb"
@@ -185,6 +188,19 @@ class ChannelSettingsRecord(Base):
             "add_music_playlist_track",
             "remove_music_playlist_track",
             "load_music_playlist",
+            "load_agent_skill",
+            "read_agent_skill_resource",
+            "list_agent_skill_library",
+            "inspect_agent_skill",
+            "create_agent_skill",
+            "update_agent_skill",
+            "manage_agent_skill_resource",
+            "set_agent_skill_state",
+            "invite_agent_skill_share",
+            "respond_agent_skill_share",
+            "revoke_agent_skill_share",
+            "preview_netease_playlist",
+            "import_netease_playlist",
         ],
         server_default=DEFAULT_AGENT_TOOLS,
         nullable=False,

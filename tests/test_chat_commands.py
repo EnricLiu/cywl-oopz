@@ -20,6 +20,7 @@ from cywl_oopz.features.chat.models import ChatResponse, ConversationKey
 from cywl_oopz.features.chat.progress import ConversationProgressEvent, ProgressKind
 from cywl_oopz.features.chat.service import ChatService
 from cywl_oopz.features.chat.tasks import ChatTaskSupervisor
+from cywl_oopz.integrations.oopz.chat_invocation import OopzChatInvocationFactory
 from cywl_oopz.testing.chat import (
     InMemoryChannelSettingsRepository,
     InMemoryConversationRepository,
@@ -49,6 +50,24 @@ class FakeContext:
 
 def context_for(message: FakeMessage, *, private: bool = False) -> FakeContext:
     return FakeContext(event=SimpleNamespace(message=message, is_private=private))
+
+
+def test_oopz_invocation_factory_keeps_only_trusted_recipient_mentions() -> None:
+    message = FakeMessage(
+        "分享给朋友",
+        mention_list=(
+            SimpleNamespace(person="bot"),
+            SimpleNamespace(person="person-1"),
+            SimpleNamespace(person="friend"),
+            SimpleNamespace(person="friend"),
+            SimpleNamespace(person=""),
+        ),
+    )
+    message.message_id = "source-message"
+    invocation = OopzChatInvocationFactory("bot").from_context(context_for(message))
+
+    assert invocation.mentioned_person_ids == ("friend",)
+    assert invocation.source_message_id == "source-message"
 
 
 @pytest.mark.asyncio

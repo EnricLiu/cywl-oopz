@@ -164,6 +164,9 @@ class AgentConversationService:
                     transport_channel_id=(
                         invocation.transport_channel_id if invocation is not None else ""
                     ),
+                    mentioned_person_ids=(
+                        invocation.mentioned_person_ids if invocation is not None else ()
+                    ),
                 )
                 enabled_tools = (
                     await self._tool_availability.names(identity, selection.model)

@@ -22,7 +22,7 @@ from cywl_oopz.core.observability import opaque_ref
 from cywl_oopz.storage.channel_settings import ChannelSettingsRepository
 
 from .history import ChatInputTooLongError
-from .models import ChatInvocation, ConversationKey
+from .models import ChatInvocation, ChatInvocationFactory, ConversationKey
 from .progress import (
     ConversationPresenterFactory,
     ConversationProgressSession,
@@ -42,9 +42,11 @@ class ChatCommandController:
         self,
         service: ChatUseCase,
         presenter_factory: ConversationPresenterFactory | None = None,
+        invocation_factory: ChatInvocationFactory | None = None,
     ) -> None:
         self._service = service
         self._presenters = presenter_factory or NoopPresenterFactory()
+        self._invocations = invocation_factory
 
     @staticmethod
     def _key(context: EventContext) -> ConversationKey:
@@ -73,6 +75,11 @@ class ChatCommandController:
         logger.error("Unexpected chat command failure: error=%s", type(error).__name__)
         return "处理请求时出现了问题，请稍后重试。"
 
+    def _invocation(self, context: EventContext) -> ChatInvocation:
+        if self._invocations is not None:
+            return self._invocations.from_context(context)
+        return ChatInvocation.from_oopz_context(context)
+
     async def _reply_error(self, context: EventContext, error: Exception) -> None:
         logger.warning(
             "Chat command failed: conversation=%s error=%s",
@@ -99,7 +106,7 @@ class ChatCommandController:
             response = await self._service.ask(
                 self._key(context),
                 prompt,
-                invocation=ChatInvocation.from_oopz_context(context),
+                invocation=self._invocation(context),
                 progress=presentation,
             )
         except asyncio.CancelledError:
@@ -164,8 +171,9 @@ class MentionChatHandler(ChatCommandController):
         service: ChatUseCase,
         bot_person_id: str,
         presenter_factory: ConversationPresenterFactory | None = None,
+        invocation_factory: ChatInvocationFactory | None = None,
     ) -> None:
-        super().__init__(service, presenter_factory)
+        super().__init__(service, presenter_factory, invocation_factory)
         self._bot_person_id = bot_person_id
 
     async def handle(self, message: OopzMessage, context: EventContext) -> bool:
@@ -195,8 +203,9 @@ class AmbientChatHandler(ChatCommandController):
         service: ChatUseCase,
         channels: ChannelSettingsRepository,
         presenter_factory: ConversationPresenterFactory | None = None,
+        invocation_factory: ChatInvocationFactory | None = None,
     ) -> None:
-        super().__init__(service, presenter_factory)
+        super().__init__(service, presenter_factory, invocation_factory)
         self._channels = channels
 
     async def matches(self, message: OopzMessage, context: EventContext) -> bool:

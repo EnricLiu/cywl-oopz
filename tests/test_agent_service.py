@@ -30,7 +30,7 @@ from cywl_oopz.features.agent.skills.models import (
     AgentSkillDiscovery,
     SkillAccessKind,
 )
-from cywl_oopz.features.chat.models import ConversationKey
+from cywl_oopz.features.chat.models import ChatInvocation, ConversationKey
 from cywl_oopz.features.chat.progress import ConversationProgressEvent, ProgressKind
 from cywl_oopz.settings import AgentMode, AgentSettings
 
@@ -488,6 +488,29 @@ async def test_agent_service_emits_accepted_and_passes_the_same_progress_sink(
 
     assert [event.kind for event in progress.events] == [ProgressKind.ACCEPTED]
     assert engine.progress == [progress]
+
+
+@pytest.mark.asyncio
+async def test_agent_service_copies_trusted_mentions_into_run_identity(
+    chat_settings,
+) -> None:
+    engine = RecordingEngine()
+    service, _, _, _, _ = await build_service(chat_settings, engine)
+
+    await service.ask(
+        key(),
+        "把技能分享给刚才提及的人",
+        invocation=ChatInvocation(
+            "source",
+            "channel",
+            mentioned_person_ids=("friend-one", "friend-two"),
+        ),
+    )
+
+    assert engine.requests[0].identity.mentioned_person_ids == (
+        "friend-one",
+        "friend-two",
+    )
 
 
 @pytest.mark.asyncio

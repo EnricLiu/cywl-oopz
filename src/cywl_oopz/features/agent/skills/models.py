@@ -269,6 +269,8 @@ class AgentSkillLibrary:
     owned: tuple[AgentSkillOwnedSummary, ...]
     builtin: tuple[AgentSkillDiscovery, ...]
     shared: tuple[AgentSkillDiscovery, ...]
+    pending_invitations: tuple[AgentSkillShareSummary, ...] = ()
+    outgoing_shares: tuple[AgentSkillOutgoingShare, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -301,6 +303,46 @@ class AgentSkillShare:
         if self.status is not SkillShareStatus.PENDING and self.responded_at is None:
             raise ValueError("Responded Skill share requires a response time")
         object.__setattr__(self, "recipient_person_id", recipient)
+
+
+@dataclass(frozen=True, slots=True)
+class AgentSkillShareSummary:
+    """Invitation/grant joined with safe Skill discovery."""
+
+    share: AgentSkillShare
+    skill: AgentSkillDiscovery
+    active: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class AgentSkillOutgoingShare:
+    """Owner-facing aggregate that never exposes recipient IDs."""
+
+    skill: AgentSkillDiscovery
+    pending_count: int
+    accepted_count: int
+    active: bool = True
+
+    def __post_init__(self) -> None:
+        if self.pending_count < 0 or self.accepted_count < 0:
+            raise ValueError("Skill share counts must not be negative")
+
+
+@dataclass(frozen=True, slots=True)
+class AgentSkillInviteResult:
+    """Committed invitations plus best-effort notification metrics."""
+
+    skill: AgentSkillDiscovery
+    shares: tuple[AgentSkillShare, ...]
+    notification_failures: int
+
+
+@dataclass(frozen=True, slots=True)
+class AgentSkillRevokeResult:
+    """One revoked share with safe metadata and notification status."""
+
+    summary: AgentSkillShareSummary
+    notification_delivered: bool
 
 
 def _validate_line(value: str, label: str, limit: int) -> None:

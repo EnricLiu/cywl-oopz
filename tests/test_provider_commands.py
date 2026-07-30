@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -23,7 +24,11 @@ from cywl_oopz.features.agent.models import (
 )
 from cywl_oopz.features.agent.skills.models import (
     AgentSkillDiscovery,
+    AgentSkillLibrary,
+    AgentSkillShare,
+    AgentSkillShareSummary,
     SkillAccessKind,
+    SkillShareStatus,
 )
 from cywl_oopz.features.agent.tools.models import ToolEffect
 from cywl_oopz.features.agent.tools.policy import AvailableTool
@@ -242,3 +247,53 @@ async def test_skills_command_lists_safe_discovery_metadata_only() -> None:
     assert "**网页研究** web-research · 我的 · v1" in context.replies[0]
     assert "搜索并阅读关键来源" in context.replies[0]
     assert "先搜索，再阅读" not in context.replies[0]
+
+
+@pytest.mark.asyncio
+async def test_skills_command_lists_shared_skills_and_pending_invitations() -> None:
+    shared = AgentSkillDiscovery(
+        id=uuid4(),
+        name="travel-planner",
+        display_name="旅行规划",
+        description="规划旅行时使用。",
+        version="1",
+        revision=1,
+        required_tools=frozenset(),
+        access=SkillAccessKind.SHARED,
+    )
+    now = datetime.now(UTC)
+    invitation = AgentSkillShareSummary(
+        AgentSkillShare(
+            id=uuid4(),
+            skill_id=shared.id,
+            recipient_person_id="person",
+            status=SkillShareStatus.PENDING,
+            created_at=now,
+            updated_at=now,
+        ),
+        shared,
+    )
+
+    class Library:
+        async def library(self, person_id):
+            assert person_id == "person"
+            return AgentSkillLibrary(
+                owned=(),
+                builtin=(),
+                shared=(shared,),
+                pending_invitations=(invitation,),
+            )
+
+    command = SkillsCommand(FakeProviderService(), Library())
+    shared_context = FakeContext()
+    invitation_context = FakeContext()
+
+    await command.execute(ParsedCommand("skills", ("shared",)), shared_context)
+    await command.execute(
+        ParsedCommand("skills", ("invitations",)),
+        invitation_context,
+    )
+
+    assert "**旅行规划** travel-planner · v1" in shared_context.replies[0]
+    assert str(invitation.share.id) in invitation_context.replies[0]
+    assert "person" not in invitation_context.replies[0]

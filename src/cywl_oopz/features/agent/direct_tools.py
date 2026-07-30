@@ -99,6 +99,7 @@ class DirectToolService:
             key,
             source_message_id=invocation.source_message_id,
             transport_channel_id=invocation.transport_channel_id,
+            mentioned_person_ids=invocation.mentioned_person_ids,
         )
         selection = await self._selection.resolve(
             key,

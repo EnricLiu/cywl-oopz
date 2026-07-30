@@ -349,6 +349,15 @@ class SkillProgressProjector(_ProjectionSupport):
             return ToolProgressPresentation(
                 summary="准备归档" if action == "archive" else "准备恢复"
             )
+        if tool_name == "invite_agent_skill_share":
+            return ToolProgressPresentation(subject="当前消息提及的用户")
+        if tool_name == "respond_agent_skill_share":
+            decision = self.scalar(arguments.get("decision"))
+            return ToolProgressPresentation(
+                summary="准备接受" if decision == "accept" else "准备拒绝"
+            )
+        if tool_name == "revoke_agent_skill_share":
+            return ToolProgressPresentation(summary="准备撤销")
         name = arguments.get("name") if tool_name == "load_agent_skill" else None
         name = name or arguments.get("skill_name")
         return ToolProgressPresentation(subject=self.scalar(name))
@@ -363,10 +372,14 @@ class SkillProgressProjector(_ProjectionSupport):
         if tool_name == "list_agent_skill_library":
             owned = values.get("owned")
             shared = values.get("shared")
+            pending = values.get("pending_invitations")
             owned_count = len(owned) if isinstance(owned, list | tuple) else 0
             shared_count = len(shared) if isinstance(shared, list | tuple) else 0
+            pending_count = len(pending) if isinstance(pending, list | tuple) else 0
             return ToolProgressPresentation(
-                summary=f"{owned_count} 个我的技能 · {shared_count} 个共享"
+                summary=(
+                    f"{owned_count} 个我的技能 · {shared_count} 个共享 · {pending_count} 个待接受"
+                )
             )
         if tool_name == "inspect_agent_skill":
             subject = self.scalar(skill_values.get("display_name") or skill_values.get("name"))
@@ -392,6 +405,31 @@ class SkillProgressProjector(_ProjectionSupport):
             return ToolProgressPresentation(
                 subject=subject,
                 summary=f"已保存 · 下轮生效{suffix}",
+            )
+        if tool_name == "invite_agent_skill_share":
+            subject = self.scalar(skill_values.get("display_name") or skill_values.get("name"))
+            invitation_count = values.get("invitation_count")
+            failures = values.get("notification_failures")
+            count = invitation_count if isinstance(invitation_count, int) else 0
+            failure_count = failures if isinstance(failures, int) else 0
+            suffix = f" · {failure_count} 个通知失败" if failure_count else ""
+            return ToolProgressPresentation(
+                subject=subject,
+                summary=f"已邀请 {count} 人{suffix}",
+            )
+        if tool_name == "respond_agent_skill_share":
+            subject = self.scalar(skill_values.get("display_name") or skill_values.get("name"))
+            accepted = values.get("status") == "accepted"
+            return ToolProgressPresentation(
+                subject=subject,
+                summary="已接受 · 下轮可用" if accepted else "已拒绝",
+            )
+        if tool_name == "revoke_agent_skill_share":
+            subject = self.scalar(skill_values.get("display_name") or skill_values.get("name"))
+            delivered = values.get("notification_delivered") is True
+            return ToolProgressPresentation(
+                subject=subject,
+                summary="已撤销" if delivered else "已撤销 · 私信通知失败",
             )
         repeated = values.get("already_loaded") is True
         characters = values.get("character_count")
@@ -512,6 +550,13 @@ class ToolProgressCatalog:
         "skill_resource_too_long": "技能资料超过长度限制",
         "skill_revision_conflict": "内容已被修改，请重新查看后再编辑",
         "skill_unknown_required_tools": "技能引用了不存在的工具",
+        "skill_archived": "这个技能当前已归档",
+        "skill_share_target_required": "请在当前消息中 @ 要分享的用户",
+        "skill_share_target_limit": "一次提及的分享对象过多",
+        "skill_invitation_not_found": "没有找到属于你的这项技能邀请",
+        "skill_invitation_answered": "这项技能邀请已经处理过",
+        "skill_shared_library_limit": "已接受的共享技能已达上限",
+        "skill_share_not_found": "没有找到这项技能分享",
         "invalid_agent_skill": "技能内容格式不正确",
         "invalid_agent_skill_resource": "技能资料格式不正确",
         "browser_failed": "浏览器操作失败",
@@ -576,6 +621,9 @@ class ToolProgressCatalog:
             "update_agent_skill",
             "manage_agent_skill_resource",
             "set_agent_skill_state",
+            "invite_agent_skill_share",
+            "respond_agent_skill_share",
+            "revoke_agent_skill_share",
         }:
             return self._skills
         return self._generic

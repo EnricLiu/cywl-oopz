@@ -13,7 +13,11 @@ from cywl_oopz.commands.router import ParsedCommand
 from cywl_oopz.core.lifecycle import ModelSelectionSource
 from cywl_oopz.core.observability import exception_kind
 from cywl_oopz.features.chat.commands import ChatCommandController
-from cywl_oopz.features.chat.models import ChatInvocation, ConversationKey
+from cywl_oopz.features.chat.models import (
+    ChatInvocation,
+    ChatInvocationFactory,
+    ConversationKey,
+)
 from cywl_oopz.features.chat.tasks import ChatTaskSupervisor
 
 from .direct_tools import DirectToolService
@@ -25,6 +29,7 @@ from .memory import (
 )
 from .models import ModelSelection, SelectableModel
 from .service import AgentConversationService
+from .skills.library import AgentSkillLibraryService
 
 logger = logging.getLogger(__name__)
 
@@ -324,19 +329,28 @@ class ToolsCommand(ChatCommandController):
 
 
 class SkillsCommand(ChatCommandController):
-    """List only the Agent skills available in the current conversation."""
+    """List available Skills and caller-scoped sharing state."""
 
     name = "skills"
     description = "查看当前 Agent 可按需加载的技能。"
     max_reply_characters = 1900
 
-    def __init__(self, service: AgentConversationService) -> None:
+    def __init__(
+        self,
+        service: AgentConversationService,
+        library: AgentSkillLibraryService | None = None,
+    ) -> None:
         super().__init__(service)
         self._agent = service
+        self._library = library
 
     async def execute(self, command: ParsedCommand, context: EventContext) -> None:
-        if command.arguments:
-            await context.reply("用法：!skills")
+        action = command.arguments[0].casefold() if len(command.arguments) == 1 else ""
+        if command.arguments and action not in {"owned", "shared", "invitations"}:
+            await context.reply("用法：!skills [owned|shared|invitations]")
+            return
+        if action:
+            await self._show_library_group(action, context)
             return
         try:
             skills = await self._agent.available_skills(self._key(context))
@@ -372,6 +386,69 @@ class SkillsCommand(ChatCommandController):
             lines.append(line)
         await context.reply("\n".join(lines))
 
+    async def _show_library_group(
+        self,
+        action: str,
+        context: EventContext,
+    ) -> None:
+        if self._library is None:
+            await context.reply("当前未启用个人技能库。")
+            return
+        try:
+            person_id = self._key(context).person_id
+            library = await self._library.library(person_id)
+        except Exception as exc:
+            await self._reply_error(context, exc)
+            return
+        if action == "owned":
+            lines = ["**我的技能**"]
+            if not library.owned:
+                lines.append("（暂无）")
+            else:
+                lines.extend(
+                    (
+                        f"- **{item.discovery.display_name}** "
+                        f"{item.discovery.name} · "
+                        f"{'使用中' if item.active else '已归档'}"
+                    )
+                    for item in library.owned
+                )
+        elif action == "shared":
+            lines = ["**已接受的共享技能**"]
+            if not library.shared:
+                lines.append("（暂无）")
+            else:
+                lines.extend(
+                    f"- **{skill.display_name}** {skill.name} · v{skill.version}"
+                    for skill in library.shared
+                )
+        else:
+            lines = ["**待处理的技能邀请**"]
+            if not library.pending_invitations:
+                lines.append("（暂无）")
+            else:
+                lines.extend(
+                    (
+                        f"- **{item.skill.display_name}** · 邀请 ID "
+                        f"{item.share.id}"
+                        f"{'' if item.active else ' · 当前已归档'}"
+                    )
+                    for item in library.pending_invitations
+                )
+                lines.append("可直接告诉未来接受或拒绝其中一项。")
+        await context.reply(self._bounded(lines))
+
+    def _bounded(self, lines: list[str]) -> str:
+        rendered: list[str] = []
+        for index, line in enumerate(lines):
+            remaining = len(lines) - index
+            omitted = f"\n…另有 {remaining} 项未显示。" if remaining else ""
+            if len("\n".join((*rendered, line))) + len(omitted) > self.max_reply_characters:
+                rendered.append(f"…另有 {remaining} 项未显示。")
+                break
+            rendered.append(line)
+        return "\n".join(rendered)
+
 
 class ToolCommand:
     """Describe or directly execute one Agent tool for development debugging."""
@@ -380,9 +457,15 @@ class ToolCommand:
     description = "直接执行 Agent 工具，或查看指定工具的 JSON Schema。"
     max_reply_characters = 1900
 
-    def __init__(self, service: DirectToolService, prefix: str) -> None:
+    def __init__(
+        self,
+        service: DirectToolService,
+        prefix: str,
+        invocation_factory: ChatInvocationFactory | None = None,
+    ) -> None:
         self._service = service
         self._prefix = prefix
+        self._invocations = invocation_factory
 
     async def execute(self, command: ParsedCommand, context: EventContext) -> None:
         parts = self._raw_arguments(command).split(maxsplit=1)
@@ -432,7 +515,11 @@ class ToolCommand:
         try:
             result = await self._service.execute(
                 ConversationKey.from_oopz_context(context),
-                ChatInvocation.from_oopz_context(context),
+                (
+                    self._invocations.from_context(context)
+                    if self._invocations is not None
+                    else ChatInvocation.from_oopz_context(context)
+                ),
                 tool_name,
                 arguments,
             )

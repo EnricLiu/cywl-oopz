@@ -26,10 +26,12 @@ from .library import AgentSkillLibraryService
 from .models import (
     AgentSkill,
     AgentSkillDiscovery,
+    AgentSkillOutgoingShare,
     AgentSkillResource,
     AgentSkillResourceManifest,
     SkillAccessKind,
     SkillResourceKind,
+    SkillShareStatus,
 )
 
 SKILL_LIBRARY_TOOL_NAMES = frozenset(
@@ -40,6 +42,9 @@ SKILL_LIBRARY_TOOL_NAMES = frozenset(
         "update_agent_skill",
         "manage_agent_skill_resource",
         "set_agent_skill_state",
+        "invite_agent_skill_share",
+        "respond_agent_skill_share",
+        "revoke_agent_skill_share",
     }
 )
 
@@ -146,6 +151,26 @@ class SetAgentSkillStateInput(SkillLibraryInput):
     action: SkillStateAction
 
 
+class InviteAgentSkillShareInput(SkillLibraryInput):
+    """Recipients come only from trusted current-message mentions."""
+
+    skill_id: UUID
+
+
+class SkillShareDecision(StrEnum):
+    ACCEPT = "accept"
+    DECLINE = "decline"
+
+
+class RespondAgentSkillShareInput(SkillLibraryInput):
+    share_id: UUID
+    decision: SkillShareDecision
+
+
+class RevokeAgentSkillShareInput(SkillLibraryInput):
+    share_id: UUID
+
+
 class AgentSkillSummaryOutput(BaseModel):
     skill_id: UUID
     name: str
@@ -170,10 +195,25 @@ class AgentSkillResourceContentOutput(AgentSkillResourceManifestOutput):
     content: str
 
 
+class AgentSkillInvitationOutput(BaseModel):
+    share_id: UUID
+    skill: AgentSkillSummaryOutput
+    status: SkillShareStatus
+    active: bool
+
+
+class AgentSkillOutgoingShareOutput(BaseModel):
+    skill: AgentSkillSummaryOutput
+    pending_count: int
+    accepted_count: int
+
+
 class ListAgentSkillLibraryOutput(BaseModel):
     owned: tuple[AgentSkillSummaryOutput, ...]
     builtin: tuple[AgentSkillSummaryOutput, ...]
     shared: tuple[AgentSkillSummaryOutput, ...]
+    pending_invitations: tuple[AgentSkillInvitationOutput, ...] = ()
+    outgoing_shares: tuple[AgentSkillOutgoingShareOutput, ...] = ()
 
 
 class InspectAgentSkillOutput(BaseModel):
@@ -193,13 +233,35 @@ class MutateAgentSkillOutput(BaseModel):
     next_run: bool = True
 
 
+class InviteAgentSkillShareOutput(BaseModel):
+    skill: AgentSkillSummaryOutput
+    invitation_count: int
+    notification_failures: int
+
+
+class RespondAgentSkillShareOutput(BaseModel):
+    share_id: UUID
+    skill: AgentSkillSummaryOutput
+    status: SkillShareStatus
+    next_run: bool = True
+
+
+class RevokeAgentSkillShareOutput(BaseModel):
+    share_id: UUID
+    skill: AgentSkillSummaryOutput
+    notification_delivered: bool
+    next_run: bool = True
+
+
 class ListAgentSkillLibraryTool:
     def __init__(self, service: AgentSkillLibraryService) -> None:
         self._service = service
         self._descriptor = ToolDescriptor(
             name="list_agent_skill_library",
             display_name="检查技能库",
-            description="列出当前用户拥有、内置和已接受共享的技能，不读取正文。",
+            description=(
+                "列出当前用户拥有、内置、已接受共享、待处理邀请和发出分享的技能状态，不读取正文。"
+            ),
             input_model=ListAgentSkillLibraryInput,
             output_model=ListAgentSkillLibraryOutput,
             effect=ToolEffect.READ,
@@ -226,6 +288,16 @@ class ListAgentSkillLibraryTool:
             owned=tuple(_summary(item.discovery, active=item.active) for item in library.owned),
             builtin=tuple(_summary(item, active=True) for item in library.builtin),
             shared=tuple(_summary(item, active=True) for item in library.shared),
+            pending_invitations=tuple(
+                AgentSkillInvitationOutput(
+                    share_id=item.share.id,
+                    skill=_summary(item.skill, active=item.active),
+                    status=item.share.status,
+                    active=item.active,
+                )
+                for item in library.pending_invitations
+            ),
+            outgoing_shares=tuple(_outgoing_share(item) for item in library.outgoing_shares),
         )
 
 
@@ -433,6 +505,137 @@ class SetAgentSkillStateTool:
         return _mutation(skill, (arguments.action.value,))
 
 
+class InviteAgentSkillShareTool:
+    def __init__(self, service: AgentSkillLibraryService) -> None:
+        self._service = service
+        self._descriptor = ToolDescriptor(
+            name="invite_agent_skill_share",
+            display_name="分享技能",
+            description=(
+                "邀请当前消息中真实提及的用户读取一项个人技能；"
+                "输入不接受 recipient ID，没有有效提及时不要调用。"
+            ),
+            input_model=InviteAgentSkillShareInput,
+            output_model=InviteAgentSkillShareOutput,
+            effect=ToolEffect.WRITE,
+            timeout_seconds=5,
+            max_retries=0,
+            max_output_characters=4096,
+            idempotent=True,
+            replay_in_history=False,
+        )
+
+    @property
+    def descriptor(self) -> ToolDescriptor:
+        return self._descriptor
+
+    async def execute(
+        self,
+        context: ToolExecutionContext,
+        arguments: BaseModel,
+    ) -> BaseModel:
+        if not isinstance(arguments, InviteAgentSkillShareInput):
+            raise TypeError("InviteAgentSkillShareTool received unexpected arguments")
+        result = await _library_call(
+            self._service.invite(
+                context.identity.person_id,
+                arguments.skill_id,
+                context.identity.mentioned_person_ids,
+            )
+        )
+        return InviteAgentSkillShareOutput(
+            skill=_summary(result.skill, active=True),
+            invitation_count=len(result.shares),
+            notification_failures=result.notification_failures,
+        )
+
+
+class RespondAgentSkillShareTool:
+    def __init__(self, service: AgentSkillLibraryService) -> None:
+        self._service = service
+        self._descriptor = ToolDescriptor(
+            name="respond_agent_skill_share",
+            display_name="回应技能邀请",
+            description="接受或拒绝一项属于当前用户的技能邀请。",
+            input_model=RespondAgentSkillShareInput,
+            output_model=RespondAgentSkillShareOutput,
+            effect=ToolEffect.WRITE,
+            timeout_seconds=3,
+            max_retries=0,
+            max_output_characters=4096,
+            idempotent=True,
+            replay_in_history=False,
+        )
+
+    @property
+    def descriptor(self) -> ToolDescriptor:
+        return self._descriptor
+
+    async def execute(
+        self,
+        context: ToolExecutionContext,
+        arguments: BaseModel,
+    ) -> BaseModel:
+        if not isinstance(arguments, RespondAgentSkillShareInput):
+            raise TypeError("RespondAgentSkillShareTool received unexpected arguments")
+        result = await _library_call(
+            self._service.respond(
+                context.identity.person_id,
+                arguments.share_id,
+                accepted=arguments.decision is SkillShareDecision.ACCEPT,
+            )
+        )
+        return RespondAgentSkillShareOutput(
+            share_id=result.share.id,
+            skill=_summary(result.skill, active=result.active),
+            status=result.share.status,
+        )
+
+
+class RevokeAgentSkillShareTool:
+    def __init__(self, service: AgentSkillLibraryService) -> None:
+        self._service = service
+        self._descriptor = ToolDescriptor(
+            name="revoke_agent_skill_share",
+            display_name="撤销技能分享",
+            description="撤销当前用户拥有的一个待处理邀请或已接受只读授权。",
+            input_model=RevokeAgentSkillShareInput,
+            output_model=RevokeAgentSkillShareOutput,
+            effect=ToolEffect.WRITE,
+            timeout_seconds=5,
+            max_retries=0,
+            max_output_characters=4096,
+            idempotent=True,
+            replay_in_history=False,
+        )
+
+    @property
+    def descriptor(self) -> ToolDescriptor:
+        return self._descriptor
+
+    async def execute(
+        self,
+        context: ToolExecutionContext,
+        arguments: BaseModel,
+    ) -> BaseModel:
+        if not isinstance(arguments, RevokeAgentSkillShareInput):
+            raise TypeError("RevokeAgentSkillShareTool received unexpected arguments")
+        result = await _library_call(
+            self._service.revoke(
+                context.identity.person_id,
+                arguments.share_id,
+            )
+        )
+        return RevokeAgentSkillShareOutput(
+            share_id=result.summary.share.id,
+            skill=_summary(
+                result.summary.skill,
+                active=result.summary.active,
+            ),
+            notification_delivered=result.notification_delivered,
+        )
+
+
 def skill_library_tools(
     service: AgentSkillLibraryService,
 ) -> tuple[
@@ -442,6 +645,9 @@ def skill_library_tools(
     UpdateAgentSkillTool,
     ManageAgentSkillResourceTool,
     SetAgentSkillStateTool,
+    InviteAgentSkillShareTool,
+    RespondAgentSkillShareTool,
+    RevokeAgentSkillShareTool,
 ]:
     """Build the complete U2 library tool group for the composition root."""
     return (
@@ -451,6 +657,9 @@ def skill_library_tools(
         UpdateAgentSkillTool(service),
         ManageAgentSkillResourceTool(service),
         SetAgentSkillStateTool(service),
+        InviteAgentSkillShareTool(service),
+        RespondAgentSkillShareTool(service),
+        RevokeAgentSkillShareTool(service),
     )
 
 
@@ -504,6 +713,16 @@ def _owned_summary(skill: AgentSkill) -> AgentSkillSummaryOutput:
         revision=skill.revision,
         access=SkillAccessKind.OWNED,
         active=skill.enabled and skill.archived_at is None,
+    )
+
+
+def _outgoing_share(
+    share: AgentSkillOutgoingShare,
+) -> AgentSkillOutgoingShareOutput:
+    return AgentSkillOutgoingShareOutput(
+        skill=_summary(share.skill, active=share.active),
+        pending_count=share.pending_count,
+        accepted_count=share.accepted_count,
     )
 
 

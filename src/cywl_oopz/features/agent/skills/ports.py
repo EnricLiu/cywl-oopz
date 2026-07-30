@@ -11,9 +11,11 @@ from .models import (
     AgentSkillBundle,
     AgentSkillDiscovery,
     AgentSkillInspection,
+    AgentSkillOutgoingShare,
     AgentSkillOwnedSummary,
     AgentSkillResource,
     AgentSkillShare,
+    AgentSkillShareSummary,
     SkillShareStatus,
 )
 
@@ -103,6 +105,41 @@ class AgentSkillLibraryRepository(Protocol):
     ) -> AgentSkillShare:
         """Create or refresh one recipient invitation for an owned Skill."""
 
+    async def invite_many(
+        self,
+        owner_person_id: str,
+        skill_id: UUID,
+        recipient_person_ids: tuple[str, ...],
+        now: datetime,
+    ) -> tuple[AgentSkillShare, ...]:
+        """Atomically create or refresh several recipient invitations."""
+
+    async def pending_invitations(
+        self,
+        recipient_person_id: str,
+    ) -> tuple[AgentSkillShareSummary, ...]:
+        """List pending invitations for one recipient."""
+
+    async def outgoing_shares(
+        self,
+        owner_person_id: str,
+    ) -> tuple[AgentSkillOutgoingShare, ...]:
+        """Aggregate pending and accepted shares for one owner."""
+
+    async def share_for_recipient(
+        self,
+        recipient_person_id: str,
+        share_id: UUID,
+    ) -> AgentSkillShareSummary | None:
+        """Read one recipient-scoped share and safe Skill metadata."""
+
+    async def share_for_owner(
+        self,
+        owner_person_id: str,
+        share_id: UUID,
+    ) -> AgentSkillShareSummary | None:
+        """Read one owner-scoped share and safe Skill metadata."""
+
     async def respond(
         self,
         recipient_person_id: str,
@@ -116,8 +153,26 @@ class AgentSkillLibraryRepository(Protocol):
         self,
         owner_person_id: str,
         share_id: UUID,
+    ) -> AgentSkillShare | None:
+        """Delete and return one share belonging to an owned Skill."""
+
+
+class SkillShareNotifier(Protocol):
+    """Best-effort private notification boundary for Skill sharing."""
+
+    async def invitation(
+        self,
+        recipient_person_id: str,
+        skill: AgentSkillDiscovery,
     ) -> bool:
-        """Delete one share belonging to an owned Skill."""
+        """Notify one recipient about an invitation."""
+
+    async def revoked(
+        self,
+        recipient_person_id: str,
+        skill: AgentSkillDiscovery,
+    ) -> bool:
+        """Notify one recipient that a grant was revoked."""
 
 
 class AgentSkillReadRepository(Protocol):

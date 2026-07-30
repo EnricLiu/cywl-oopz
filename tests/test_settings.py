@@ -75,6 +75,9 @@ def test_app_settings_use_the_injected_oopz_credentials(monkeypatch) -> None:
         "update_agent_skill",
         "manage_agent_skill_resource",
         "set_agent_skill_state",
+        "invite_agent_skill_share",
+        "respond_agent_skill_share",
+        "revoke_agent_skill_share",
         "preview_netease_playlist",
         "import_netease_playlist",
     )
@@ -89,6 +92,8 @@ def test_app_settings_use_the_injected_oopz_credentials(monkeypatch) -> None:
     assert settings.agent.skill_authoring_enabled is True
     assert settings.agent.max_personal_skills == 16
     assert settings.agent.max_resources_per_skill == 8
+    assert settings.agent.max_accepted_shared_skills == 8
+    assert settings.agent.max_skill_share_recipients_per_call == 5
     assert settings.agent.max_skill_activations == 3
     assert settings.agent.max_skill_resources == 4
     assert settings.agent.max_skill_instruction_characters == 12000
@@ -180,6 +185,8 @@ def test_agent_skill_catalog_settings_are_validated() -> None:
             "CYWL_AGENT_SKILL_AUTHORING_ENABLED": "false",
             "CYWL_AGENT_MAX_PERSONAL_SKILLS": "7",
             "CYWL_AGENT_MAX_RESOURCES_PER_SKILL": "5",
+            "CYWL_AGENT_MAX_ACCEPTED_SHARED_SKILLS": "4",
+            "CYWL_AGENT_MAX_SKILL_SHARE_RECIPIENTS_PER_CALL": "3",
         }
     )
 
@@ -194,6 +201,8 @@ def test_agent_skill_catalog_settings_are_validated() -> None:
     assert settings.agent.skill_authoring_enabled is False
     assert settings.agent.max_personal_skills == 7
     assert settings.agent.max_resources_per_skill == 5
+    assert settings.agent.max_accepted_shared_skills == 4
+    assert settings.agent.max_skill_share_recipients_per_call == 3
 
     with pytest.raises(ConfigurationError, match="SKILL_CATALOG_REFRESH_SECONDS"):
         AppSettings.from_mapping(

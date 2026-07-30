@@ -48,6 +48,9 @@ DEFAULT_AGENT_TOOLS = (
     "update_agent_skill",
     "manage_agent_skill_resource",
     "set_agent_skill_state",
+    "invite_agent_skill_share",
+    "respond_agent_skill_share",
+    "revoke_agent_skill_share",
     "preview_netease_playlist",
     "import_netease_playlist",
 )
@@ -103,6 +106,9 @@ SKILL_AUTHORING_AGENT_TOOLS = frozenset(
         "update_agent_skill",
         "manage_agent_skill_resource",
         "set_agent_skill_state",
+        "invite_agent_skill_share",
+        "respond_agent_skill_share",
+        "revoke_agent_skill_share",
     }
 )
 SKILL_AGENT_TOOLS = SKILL_RUNTIME_AGENT_TOOLS | SKILL_AUTHORING_AGENT_TOOLS
@@ -377,6 +383,8 @@ class AgentSettings:
     skill_authoring_enabled: bool = True
     max_personal_skills: int = 16
     max_resources_per_skill: int = 8
+    max_accepted_shared_skills: int = 8
+    max_skill_share_recipients_per_call: int = 5
 
     @property
     def enabled(self) -> bool:
@@ -567,6 +575,16 @@ class AgentSettings:
                 values,
                 "CYWL_AGENT_MAX_RESOURCES_PER_SKILL",
                 8,
+            ),
+            max_accepted_shared_skills=_positive_integer(
+                values,
+                "CYWL_AGENT_MAX_ACCEPTED_SHARED_SKILLS",
+                8,
+            ),
+            max_skill_share_recipients_per_call=_positive_integer(
+                values,
+                "CYWL_AGENT_MAX_SKILL_SHARE_RECIPIENTS_PER_CALL",
+                5,
             ),
         )
         if settings.summary_retain_messages >= settings.summary_trigger_messages:

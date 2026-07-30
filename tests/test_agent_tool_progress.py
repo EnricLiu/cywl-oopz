@@ -63,6 +63,37 @@ def test_result_summary_explains_success_and_known_errors_without_raw_payloads()
     assert "private" not in repr((succeeded, failed, unknown))
 
 
+def test_skill_share_progress_is_dynamic_but_hides_ids_and_recipients() -> None:
+    catalog = ToolProgressCatalog()
+    request = catalog.request(
+        "invite_agent_skill_share",
+        {"skill_id": "private-skill-id"},
+    )
+    result = catalog.result(
+        "invite_agent_skill_share",
+        {
+            "ok": True,
+            "data": {
+                "skill": {"display_name": "旅行规划", "skill_id": "private-skill-id"},
+                "invitation_count": 2,
+                "notification_failures": 1,
+            },
+        },
+        succeeded=True,
+    )
+    error = catalog.result(
+        "respond_agent_skill_share",
+        {"ok": False, "error": "skill_invitation_answered"},
+        succeeded=False,
+    )
+
+    assert request.subject == "当前消息提及的用户"
+    assert result.subject == "旅行规划"
+    assert result.summary == "已邀请 2 人 · 1 个通知失败"
+    assert error.summary == "这项技能邀请已经处理过"
+    assert "private-skill-id" not in repr((request, result, error))
+
+
 def test_browser_and_music_results_have_compact_human_summaries() -> None:
     catalog = ToolProgressCatalog()
 

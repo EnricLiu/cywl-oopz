@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -11,9 +12,15 @@ from cywl_oopz.features.agent.skills.errors import AgentSkillLibraryError
 from cywl_oopz.features.agent.skills.library import AgentSkillLibraryService
 from cywl_oopz.features.agent.skills.models import (
     AgentSkill,
+    AgentSkillDiscovery,
     AgentSkillResource,
+    AgentSkillRevokeResult,
+    AgentSkillShare,
+    AgentSkillShareSummary,
+    SkillAccessKind,
     SkillOwnershipKind,
     SkillResourceKind,
+    SkillShareStatus,
 )
 
 
@@ -63,12 +70,27 @@ def store(**overrides):
         "upsert_owned_resource": AsyncMock(),
         "remove_owned_resource": AsyncMock(),
         "set_owned_state": AsyncMock(),
+        "invite_many": AsyncMock(return_value=()),
+        "pending_invitations": AsyncMock(return_value=()),
+        "outgoing_shares": AsyncMock(return_value=()),
+        "share_for_recipient": AsyncMock(return_value=None),
+        "share_for_owner": AsyncMock(return_value=None),
+        "respond": AsyncMock(),
+        "revoke": AsyncMock(return_value=None),
     }
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
 
 
-def service(repository, *, max_personal: int = 2, max_resources: int = 2):
+def service(
+    repository,
+    *,
+    max_personal: int = 2,
+    max_resources: int = 2,
+    max_shared: int = 8,
+    max_recipients: int = 5,
+    notifier=None,
+):
     return AgentSkillLibraryService(
         repository,
         registered_tools=frozenset({"search_web", "load_agent_skill"}),
@@ -77,6 +99,9 @@ def service(repository, *, max_personal: int = 2, max_resources: int = 2):
         max_resources_per_skill=max_resources,
         max_instruction_characters=1000,
         max_resource_characters=1000,
+        max_accepted_shared_skills=max_shared,
+        max_share_recipients_per_call=max_recipients,
+        notifier=notifier,
     )
 
 
@@ -183,3 +208,127 @@ async def test_library_service_updates_and_bounds_resources_without_noop_writes(
             content=existing.content,
             position=existing.position,
         )
+
+
+def share_summary(
+    skill: AgentSkill,
+    *,
+    recipient: str = "friend",
+    status: SkillShareStatus = SkillShareStatus.PENDING,
+    active: bool = True,
+) -> AgentSkillShareSummary:
+    now = datetime.now(UTC)
+    share = AgentSkillShare(
+        id=uuid4(),
+        skill_id=skill.id,
+        recipient_person_id=recipient,
+        status=status,
+        created_at=now,
+        updated_at=now,
+        responded_at=None if status is SkillShareStatus.PENDING else now,
+    )
+    discovery = AgentSkillDiscovery(
+        id=skill.id,
+        name=skill.name,
+        display_name=skill.display_name,
+        description=skill.description,
+        version=skill.version,
+        revision=skill.revision,
+        required_tools=skill.required_tools,
+        access=SkillAccessKind.SHARED,
+    )
+    return AgentSkillShareSummary(share, discovery, active)
+
+
+@pytest.mark.asyncio
+async def test_library_service_invites_only_trusted_mentions_and_keeps_notification_failures() -> (
+    None
+):
+    skill = personal_skill()
+    first = share_summary(skill, recipient="friend-one").share
+    second = share_summary(skill, recipient="friend-two").share
+    repository = store(
+        get_owned=AsyncMock(return_value=skill),
+        invite_many=AsyncMock(return_value=(first, second)),
+    )
+    notifier = SimpleNamespace(
+        invitation=AsyncMock(side_effect=(True, False)),
+        revoked=AsyncMock(return_value=True),
+    )
+    library = service(repository, notifier=notifier)
+
+    result = await library.invite(
+        "person",
+        skill.id,
+        ("friend-one", "friend-one", "person", "friend-two"),
+    )
+
+    assert len(result.shares) == 2
+    assert result.notification_failures == 1
+    assert repository.invite_many.await_args.args[2] == ("friend-one", "friend-two")
+    assert notifier.invitation.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_library_service_rejects_missing_or_excessive_share_mentions() -> None:
+    skill = personal_skill()
+    repository = store(get_owned=AsyncMock(return_value=skill))
+    library = service(repository, max_recipients=1)
+
+    with pytest.raises(AgentSkillLibraryError, match="skill_share_target_required"):
+        await library.invite("person", skill.id, ("person",))
+    with pytest.raises(AgentSkillLibraryError, match="skill_share_target_limit"):
+        await library.invite("person", skill.id, ("one", "two"))
+    repository.invite_many.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_library_service_accepts_pending_invitation_and_rejects_status_flip() -> None:
+    skill = personal_skill()
+    pending = share_summary(skill)
+    accepted = share_summary(skill, status=SkillShareStatus.ACCEPTED)
+    repository = store(
+        share_for_recipient=AsyncMock(side_effect=(pending, accepted)),
+    )
+    library = service(repository)
+
+    result = await library.respond("friend", pending.share.id, accepted=True)
+
+    assert result.share.status is SkillShareStatus.ACCEPTED
+    repository.respond.assert_awaited_once()
+
+    repository.share_for_recipient.side_effect = None
+    repository.share_for_recipient.return_value = accepted
+    with pytest.raises(AgentSkillLibraryError, match="skill_invitation_answered"):
+        await library.respond("friend", accepted.share.id, accepted=False)
+
+
+@pytest.mark.asyncio
+async def test_library_service_enforces_shared_capacity_and_revokes_best_effort() -> None:
+    skill = personal_skill()
+    pending = share_summary(skill)
+    repository = store(
+        share_for_recipient=AsyncMock(return_value=pending),
+        list_accessible=AsyncMock(
+            return_value=tuple(replace(pending.skill, id=uuid4()) for _ in range(2))
+        ),
+    )
+    limited = service(repository, max_shared=2)
+    with pytest.raises(AgentSkillLibraryError, match="skill_shared_library_limit"):
+        await limited.respond("friend", pending.share.id, accepted=True)
+
+    repository = store(
+        share_for_owner=AsyncMock(return_value=pending),
+        revoke=AsyncMock(return_value=pending.share),
+    )
+    notifier = SimpleNamespace(
+        invitation=AsyncMock(return_value=True),
+        revoked=AsyncMock(return_value=False),
+    )
+    library = service(repository, notifier=notifier)
+
+    result = await library.revoke("person", pending.share.id)
+
+    assert isinstance(result, AgentSkillRevokeResult)
+    assert result.notification_delivered is False
+    notifier.revoked.assert_awaited_once_with("friend", pending.skill)

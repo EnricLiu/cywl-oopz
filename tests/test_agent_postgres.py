@@ -150,6 +150,9 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
             "update_agent_skill",
             "manage_agent_skill_resource",
             "set_agent_skill_state",
+            "invite_agent_skill_share",
+            "respond_agent_skill_share",
+            "revoke_agent_skill_share",
         ]
 
         async with test_engine.begin() as connection:
@@ -202,6 +205,9 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
             "update_agent_skill",
             "manage_agent_skill_resource",
             "set_agent_skill_state",
+            "invite_agent_skill_share",
+            "respond_agent_skill_share",
+            "revoke_agent_skill_share",
             "preview_netease_playlist",
             "import_netease_playlist",
         ]
@@ -318,6 +324,7 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
         )
         assert [resource.key for resource in import_skill.resources] == ["netease-api-behavior"]
         assert authoring_skill.metadata["builtin_seed"] == "20260729_16"
+        assert "分享个人 Skill" in authoring_skill.description
         assert authoring_skill.required_tools == frozenset(
             {
                 "list_agent_skill_library",
@@ -326,8 +333,12 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
                 "update_agent_skill",
                 "manage_agent_skill_resource",
                 "set_agent_skill_state",
+                "invite_agent_skill_share",
+                "respond_agent_skill_share",
+                "revoke_agent_skill_share",
             }
         )
+        assert "真实 `@` 提及" in authoring_skill.instructions
         assert web_skill.version == "1.0.0"
         assert web_skill.metadata["builtin_seed"] == "20260729_12"
         assert web_skill.required_tools == frozenset({"search_web", "read_web_page"})
@@ -386,6 +397,21 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
             invitation_time,
         )
         assert invitation.status is SkillShareStatus.PENDING
+        invitations = await skill_repository.invite_many(
+            "owner-one",
+            first_personal.id,
+            ("recipient", "recipient-two"),
+            invitation_time,
+        )
+        assert [item.recipient_person_id for item in invitations] == [
+            "recipient",
+            "recipient-two",
+        ]
+        pending = await skill_repository.pending_invitations("recipient")
+        assert [item.share.id for item in pending] == [invitation.id]
+        outgoing = await skill_repository.outgoing_shares("owner-one")
+        first_outgoing = next(item for item in outgoing if item.skill.id == first_personal.id)
+        assert (first_outgoing.pending_count, first_outgoing.accepted_count) == (2, 0)
         assert first_personal.id not in {
             skill.id for skill in await skill_repository.load_accessible("recipient")
         }
@@ -403,6 +429,26 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
             invitation_time,
         )
         assert accepted.status is SkillShareStatus.ACCEPTED
+        repeated = await skill_repository.respond(
+            "recipient",
+            invitation.id,
+            SkillShareStatus.ACCEPTED,
+            invitation_time,
+        )
+        assert repeated.status is SkillShareStatus.ACCEPTED
+        with pytest.raises(AgentSkillConflictError):
+            await skill_repository.respond(
+                "recipient",
+                invitation.id,
+                SkillShareStatus.DECLINED,
+                invitation_time,
+            )
+        summary = await skill_repository.share_for_recipient("recipient", invitation.id)
+        assert summary is not None
+        assert summary.share.status is SkillShareStatus.ACCEPTED
+        outgoing = await skill_repository.outgoing_shares("owner-one")
+        first_outgoing = next(item for item in outgoing if item.skill.id == first_personal.id)
+        assert (first_outgoing.pending_count, first_outgoing.accepted_count) == (1, 1)
         assert first_personal.id in {
             skill.id for skill in await skill_repository.load_accessible("recipient")
         }
@@ -447,8 +493,8 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
             )
             is None
         )
-        assert await skill_repository.revoke("owner-two", invitation.id) is False
-        assert await skill_repository.revoke("owner-one", invitation.id) is True
+        assert await skill_repository.revoke("owner-two", invitation.id) is None
+        assert await skill_repository.revoke("owner-one", invitation.id) == accepted
         assert first_personal.id not in {
             skill.id for skill in await skill_repository.load_accessible("recipient")
         }

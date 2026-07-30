@@ -16,17 +16,22 @@ from cywl_oopz.features.agent.skills.library_tools import (
     CreateAgentSkillTool,
     InspectAgentSkillInput,
     InspectAgentSkillTool,
+    InviteAgentSkillShareInput,
+    InviteAgentSkillShareTool,
 )
 from cywl_oopz.features.agent.skills.models import (
     AgentSkill,
     AgentSkillBundle,
     AgentSkillDiscovery,
     AgentSkillInspection,
+    AgentSkillInviteResult,
     AgentSkillResource,
     AgentSkillResourceManifest,
+    AgentSkillShare,
     SkillAccessKind,
     SkillOwnershipKind,
     SkillResourceKind,
+    SkillShareStatus,
 )
 from cywl_oopz.features.agent.skills.scope import (
     AgentSkillRunScope,
@@ -463,6 +468,57 @@ async def test_skill_inspection_exposes_manifest_and_only_requested_resource_con
     assert without_content.model_dump()["resource"] is None
     assert "content" not in without_content.model_dump()["resources"][0]
     assert with_content.model_dump()["resource"]["content"] == skill.resources[0].content
+
+
+@pytest.mark.asyncio
+async def test_skill_share_tool_uses_identity_mentions_and_never_accepts_recipient_ids() -> None:
+    skill = replace(
+        make_skill(),
+        ownership_kind=SkillOwnershipKind.PERSONAL,
+        owner_person_id="person",
+        resources=(),
+    )
+    now = datetime.now(UTC)
+    share = AgentSkillShare(
+        id=uuid4(),
+        skill_id=skill.id,
+        recipient_person_id="friend",
+        status=SkillShareStatus.PENDING,
+        created_at=now,
+        updated_at=now,
+    )
+    calls: list[tuple[str, UUID, tuple[str, ...]]] = []
+
+    class Library:
+        async def invite(self, person_id, skill_id, mentioned_person_ids):
+            calls.append((person_id, skill_id, mentioned_person_ids))
+            return AgentSkillInviteResult(
+                replace(_discovery(skill), access=SkillAccessKind.OWNED),
+                (share,),
+                0,
+            )
+
+    tool = InviteAgentSkillShareTool(Library())
+    context = replace(
+        execution_context(None),
+        identity=replace(
+            execution_context(None).identity,
+            mentioned_person_ids=("friend",),
+        ),
+    )
+
+    result = await tool.execute(
+        context,
+        InviteAgentSkillShareInput(skill_id=skill.id),
+    )
+
+    assert calls == [("person", skill.id, ("friend",))]
+    assert result.invitation_count == 1
+    assert "friend" not in repr(result.model_dump())
+    with pytest.raises(ValueError):
+        InviteAgentSkillShareInput.model_validate(
+            {"skill_id": str(skill.id), "recipient_person_id": "attacker-controlled"}
+        )
 
 
 def _discovery(skill: AgentSkill) -> AgentSkillDiscovery:
