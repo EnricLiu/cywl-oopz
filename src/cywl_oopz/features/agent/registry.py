@@ -233,6 +233,6 @@ class AgentModelRegistry:
 
     def _max_retries(self, config: Mapping[str, Any]) -> int:
         raw = config.get("max_retries", self._default_max_retries)
-        if type(raw) is not int or not 0 <= raw <= 5:
-            raise ConfigurationError("Provider max_retries must be an integer between 0 and 5")
+        if type(raw) is not int or not 0 <= raw <= 10:
+            raise ConfigurationError("Provider max_retries must be an integer between 0 and 10")
         return raw

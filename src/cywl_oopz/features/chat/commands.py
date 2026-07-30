@@ -117,6 +117,7 @@ class ChatCommandController:
                 "Chat request failed: conversation=%s error=%s",
                 self._conversation_ref(context),
                 type(exc).__name__,
+                exc_info=True,
             )
             message = self._error_message(exc)
             if presentation.owns_message:
