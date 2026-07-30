@@ -800,7 +800,7 @@ class AppSettings:
     agent: AgentSettings
     music: MusicSettings
     web: WebToolsSettings
-    command_prefix: str = "!"
+    command_prefix: str = "/"
     environment: str = "development"
 
     @classmethod
@@ -823,7 +823,7 @@ class AppSettings:
     @classmethod
     def _build(cls, values: Mapping[str, str], oopz: OopzConfig) -> AppSettings:
         """Build all settings while keeping the SDK login source explicit."""
-        command_prefix = values.get("CYWL_COMMAND_PREFIX", "!").strip()
+        command_prefix = values.get("CYWL_COMMAND_PREFIX", "/").strip()
         if not command_prefix:
             raise ConfigurationError("CYWL_COMMAND_PREFIX must not be empty")
 

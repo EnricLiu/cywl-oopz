@@ -655,7 +655,7 @@ class BotApplication:
                 "Rejected duplicate chat task: conversation=%s",
                 opaque_ref(key.scope, key.area_id, key.channel_id, key.person_id),
             )
-            await context.reply("当前对话正在生成回复；可使用 !cancel 取消后再试。")
+            await context.reply("当前对话正在生成回复；可使用 /cancel 取消后再试。")
 
     @staticmethod
     def _message_reference(message: OopzMessage, context: EventContext) -> str:

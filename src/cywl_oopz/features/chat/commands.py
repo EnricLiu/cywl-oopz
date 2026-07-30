@@ -71,7 +71,7 @@ class ChatCommandController:
         if isinstance(error, AuthorizationError):
             return "你没有执行此操作的权限。"
         if isinstance(error, ValueError):
-            return "命令参数不正确，请使用 !help 查看用法。"
+            return "命令参数不正确，请使用 /help 查看用法。"
         logger.error("Unexpected chat command failure: error=%s", type(error).__name__)
         return "处理请求时出现了问题，请稍后重试。"
 
@@ -151,7 +151,7 @@ class ChatCommandController:
 
 
 class ChatCommand(ChatCommandController):
-    """Start or continue a text conversation with `!chat <prompt>`."""
+    """Start or continue a text conversation with `/chat <prompt>`."""
 
     name = "chat"
     description = "向 LLM 发起或继续文字对话。"
@@ -159,7 +159,7 @@ class ChatCommand(ChatCommandController):
     async def execute(self, command: ParsedCommand, context: EventContext) -> None:
         prompt = " ".join(command.arguments)
         if not prompt.strip():
-            await context.reply("用法：!chat <想说的话>")
+            await context.reply("用法：/chat <想说的话>")
             return
         await self._ask_with_presenter(context, prompt)
 
@@ -183,7 +183,7 @@ class MentionChatHandler(ChatCommandController):
             return False
         prompt = (message.plain_text or message.text or message.content).strip()
         if not prompt:
-            await context.reply("你好！请在提及我后附上想问的内容，或使用 !chat <内容>。")
+            await context.reply("你好！请在提及我后附上想问的内容，或使用 /chat <内容>。")
             return True
         await self._ask_with_presenter(context, prompt)
         return True
@@ -232,7 +232,7 @@ class AmbientChatHandler(ChatCommandController):
 
 
 class NewConversationCommand(ChatCommandController):
-    """Forget only the caller's active conversation with `!new`."""
+    """Forget only the caller's active conversation with `/new`."""
 
     name = "new"
     description = "清空当前文字对话的上下文。"
@@ -257,7 +257,7 @@ class NewConversationCommand(ChatCommandController):
 
 
 class CancelChatCommand(ChatCommandController):
-    """Cancel the caller's active LLM response with `!cancel`."""
+    """Cancel the caller's active LLM response with `/cancel`."""
 
     name = "cancel"
     description = "取消当前正在生成的文字回复。"
@@ -287,7 +287,7 @@ class CancelChatCommand(ChatCommandController):
 
 
 class ModelCommand(ChatCommandController):
-    """Show or change an allow-listed model with `!model [name]`."""
+    """Show or change an allow-listed model with `/model [name]`."""
 
     name = "model"
     description = "查看或切换允许使用的模型。"
@@ -307,10 +307,10 @@ class ModelCommand(ChatCommandController):
                 await context.reply(f"当前模型：{status.model}")
                 return
             if len(command.arguments) != 1:
-                await context.reply("用法：!model [模型名称]")
+                await context.reply("用法：/model [模型名称]")
                 return
             if self._tasks.has_active(key):
-                await context.reply("当前正在生成回复；请等待完成或先使用 !cancel。")
+                await context.reply("当前正在生成回复；请等待完成或先使用 /cancel。")
                 return
             selected = await self._service.select_model(key, command.arguments[0])
         except Exception as exc:
@@ -320,7 +320,7 @@ class ModelCommand(ChatCommandController):
 
 
 class ChatStatusCommand(ChatCommandController):
-    """Show safe conversation metadata with `!chat-status`."""
+    """Show safe conversation metadata with `/chat-status`."""
 
     name = "chat-status"
     description = "查看文字对话状态，不显示聊天内容。"

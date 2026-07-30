@@ -146,7 +146,7 @@ async def test_provider_command_lists_and_switches_thread_model() -> None:
 
     assert "🎛️ **当前模型** primary/chat · 当前对话" in list_context.replies[0]
     assert "**primary** Primary AI：chat（默认）、reasoning" in list_context.replies[0]
-    assert "!provider <Provider> [模型]" in list_context.replies[0]
+    assert "/provider <Provider> [模型]" in list_context.replies[0]
     assert use_context.replies == ["✅ **当前对话模型** secondary/fast"]
     assert service.selections == [("secondary", "fast", False)]
 
@@ -212,9 +212,9 @@ async def test_agent_model_and_provider_commands_return_specific_not_found_help(
     )
 
     assert "没有找到可选模型「missing」" in model_context.replies[0]
-    assert "!model <Provider>/<模型>" in model_context.replies[0]
+    assert "/model <Provider>/<模型>" in model_context.replies[0]
     assert "没有找到可选的 Provider/模型「unknown」" in provider_context.replies[0]
-    assert "!provider <Provider> [模型]" in provider_context.replies[0]
+    assert "/provider <Provider> [模型]" in provider_context.replies[0]
 
 
 async def _missing_provider(*args, **kwargs) -> str:
