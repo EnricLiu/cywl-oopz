@@ -391,21 +391,47 @@ class AgentSkillLibraryService:
     async def revoke(
         self,
         person_id: str,
-        share_id: UUID,
+        skill_id: UUID,
+        mentioned_person_ids: tuple[str, ...],
+        *,
+        revoke_all: bool,
     ) -> AgentSkillRevokeResult:
-        """Revoke one owner-scoped invitation or accepted grant."""
+        """Revoke mentioned recipients or every grant for one owned Skill."""
         owner = _person_id(person_id)
-        summary = await self._repository.share_for_owner(owner, share_id)
-        if summary is None:
-            raise AgentSkillLibraryError("skill_share_not_found")
-        removed = await self._repository.revoke(owner, share_id)
-        if removed is None:
-            raise AgentSkillLibraryError("skill_share_not_found")
-        delivered = await self._notify_revoked(
-            removed.recipient_person_id,
-            summary.skill,
+        current = await self._repository.get_owned(owner, skill_id)
+        if current is None:
+            raise AgentSkillLibraryError("skill_not_owned")
+        recipients = tuple(
+            dict.fromkeys(
+                recipient.strip()
+                for recipient in mentioned_person_ids
+                if recipient.strip() and recipient.strip() != owner
+            )
         )
-        return AgentSkillRevokeResult(summary, delivered)
+        if revoke_all and recipients:
+            raise AgentSkillLibraryError("skill_share_target_conflict")
+        if not revoke_all and not recipients:
+            raise AgentSkillLibraryError("skill_share_target_required")
+        removed = await self._repository.revoke_owned_shares(
+            owner,
+            skill_id,
+            None if revoke_all else recipients,
+        )
+        if not removed:
+            raise AgentSkillLibraryError("skill_share_not_found")
+        discovery = _owned_discovery(current)
+        notification_failures = 0
+        for share in removed:
+            if not await self._notify_revoked(
+                share.recipient_person_id,
+                discovery,
+            ):
+                notification_failures += 1
+        return AgentSkillRevokeResult(
+            discovery,
+            removed,
+            notification_failures,
+        )
 
     async def _owned(
         self,

@@ -18,6 +18,7 @@ from cywl_oopz.features.agent.skills.library_tools import (
     InspectAgentSkillTool,
     InviteAgentSkillShareInput,
     InviteAgentSkillShareTool,
+    RevokeAgentSkillShareInput,
 )
 from cywl_oopz.features.agent.skills.models import (
     AgentSkill,
@@ -517,6 +518,10 @@ async def test_skill_share_tool_uses_identity_mentions_and_never_accepts_recipie
     assert "friend" not in repr(result.model_dump())
     with pytest.raises(ValueError):
         InviteAgentSkillShareInput.model_validate(
+            {"skill_id": str(skill.id), "recipient_person_id": "attacker-controlled"}
+        )
+    with pytest.raises(ValueError):
+        RevokeAgentSkillShareInput.model_validate(
             {"skill_id": str(skill.id), "recipient_person_id": "attacker-controlled"}
         )
 

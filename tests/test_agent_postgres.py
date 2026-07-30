@@ -493,11 +493,27 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
             )
             is None
         )
-        assert await skill_repository.revoke("owner-two", invitation.id) is None
-        assert await skill_repository.revoke("owner-one", invitation.id) == accepted
+        with pytest.raises(AgentSkillNotFoundError):
+            await skill_repository.revoke_owned_shares(
+                "owner-two",
+                first_personal.id,
+                ("recipient",),
+            )
+        removed = await skill_repository.revoke_owned_shares(
+            "owner-one",
+            first_personal.id,
+            ("recipient",),
+        )
+        assert removed == (accepted,)
         assert first_personal.id not in {
             skill.id for skill in await skill_repository.load_accessible("recipient")
         }
+        remaining = await skill_repository.revoke_owned_shares(
+            "owner-one",
+            first_personal.id,
+            None,
+        )
+        assert [item.recipient_person_id for item in remaining] == ["recipient-two"]
         owned_summaries = await skill_repository.list_owned("owner-one")
         assert [(item.discovery.id, item.active) for item in owned_summaries] == [
             (first_personal.id, True)

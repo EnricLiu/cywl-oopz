@@ -179,6 +179,56 @@ async def test_web_research_loop_uses_one_bounded_message_and_safe_stage_names()
 
 
 @pytest.mark.asyncio
+async def test_skill_share_loop_shows_notification_degradation_in_one_message() -> None:
+    gateway = FakeGateway()
+    session = await opened_session(gateway)
+
+    await session.emit(
+        ConversationProgressEvent(
+            ProgressKind.TOOL_STARTED,
+            call_id="private-share-id",
+            tool_name="invite_agent_skill_share",
+            tool_display_name="分享技能",
+            tool_subject="当前消息提及的用户",
+        )
+    )
+    await session.emit(
+        ConversationProgressEvent(
+            ProgressKind.TOOL_SUCCEEDED,
+            call_id="private-share-id",
+            tool_name="invite_agent_skill_share",
+            tool_display_name="分享技能",
+            tool_subject="旅行规划",
+            tool_summary="已邀请 2 人 · 1 个通知失败",
+        )
+    )
+    async with asyncio.timeout(1):
+        while not any("1 个通知失败" in snapshot for snapshot in gateway.edits):
+            await asyncio.sleep(0)
+
+    await session.complete(
+        ChatResponse(
+            "邀请已经保存；一位朋友的私信通知失败，但仍可从技能邀请列表查看。",
+            "provider/model",
+            elapsed_seconds=1.2,
+            model_requests=2,
+            tool_calls=1,
+        )
+    )
+    await session.aclose()
+
+    snapshots = gateway.created + gateway.edits
+    assert len(gateway.created) == 1
+    assert any(
+        "✅ **分享技能** 旅行规划 · 已邀请 2 人 · 1 个通知失败" in snapshot
+        for snapshot in gateway.edits
+    )
+    assert "private-share-id" not in repr(snapshots)
+    assert "invite_agent_skill_share" not in repr(snapshots)
+    assert gateway.edits[-1].startswith("🎵 **初音未来** · 1.2s · 1 次工具")
+
+
+@pytest.mark.asyncio
 async def test_running_tool_heartbeats_without_mutating_reducer_state_and_stops_at_terminal() -> (
     None
 ):

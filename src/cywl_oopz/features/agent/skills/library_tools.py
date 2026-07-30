@@ -168,7 +168,8 @@ class RespondAgentSkillShareInput(SkillLibraryInput):
 
 
 class RevokeAgentSkillShareInput(SkillLibraryInput):
-    share_id: UUID
+    skill_id: UUID
+    revoke_all: bool = False
 
 
 class AgentSkillSummaryOutput(BaseModel):
@@ -247,9 +248,9 @@ class RespondAgentSkillShareOutput(BaseModel):
 
 
 class RevokeAgentSkillShareOutput(BaseModel):
-    share_id: UUID
     skill: AgentSkillSummaryOutput
-    notification_delivered: bool
+    revoked_count: int
+    notification_failures: int
     next_run: bool = True
 
 
@@ -598,7 +599,11 @@ class RevokeAgentSkillShareTool:
         self._descriptor = ToolDescriptor(
             name="revoke_agent_skill_share",
             display_name="撤销技能分享",
-            description="撤销当前用户拥有的一个待处理邀请或已接受只读授权。",
+            description=(
+                "撤销当前用户拥有的技能分享。默认目标只来自当前消息真实提及；"
+                "仅当用户明确要求撤销该技能全部分享时设置 revoke_all=true，"
+                "此时当前消息不能再提及目标。"
+            ),
             input_model=RevokeAgentSkillShareInput,
             output_model=RevokeAgentSkillShareOutput,
             effect=ToolEffect.WRITE,
@@ -623,16 +628,15 @@ class RevokeAgentSkillShareTool:
         result = await _library_call(
             self._service.revoke(
                 context.identity.person_id,
-                arguments.share_id,
+                arguments.skill_id,
+                context.identity.mentioned_person_ids,
+                revoke_all=arguments.revoke_all,
             )
         )
         return RevokeAgentSkillShareOutput(
-            share_id=result.summary.share.id,
-            skill=_summary(
-                result.summary.skill,
-                active=result.summary.active,
-            ),
-            notification_delivered=result.notification_delivered,
+            skill=_summary(result.skill, active=True),
+            revoked_count=len(result.shares),
+            notification_failures=result.notification_failures,
         )
 
 

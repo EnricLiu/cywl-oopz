@@ -357,7 +357,12 @@ class SkillProgressProjector(_ProjectionSupport):
                 summary="准备接受" if decision == "accept" else "准备拒绝"
             )
         if tool_name == "revoke_agent_skill_share":
-            return ToolProgressPresentation(summary="准备撤销")
+            return ToolProgressPresentation(
+                subject=(
+                    "全部分享" if arguments.get("revoke_all") is True else "当前消息提及的用户"
+                ),
+                summary="准备撤销",
+            )
         name = arguments.get("name") if tool_name == "load_agent_skill" else None
         name = name or arguments.get("skill_name")
         return ToolProgressPresentation(subject=self.scalar(name))
@@ -426,10 +431,14 @@ class SkillProgressProjector(_ProjectionSupport):
             )
         if tool_name == "revoke_agent_skill_share":
             subject = self.scalar(skill_values.get("display_name") or skill_values.get("name"))
-            delivered = values.get("notification_delivered") is True
+            revoked = values.get("revoked_count")
+            failures = values.get("notification_failures")
+            revoked_count = revoked if isinstance(revoked, int) else 0
+            failure_count = failures if isinstance(failures, int) else 0
+            suffix = f" · {failure_count} 个通知失败" if failure_count else ""
             return ToolProgressPresentation(
                 subject=subject,
-                summary="已撤销" if delivered else "已撤销 · 私信通知失败",
+                summary=f"已撤销 {revoked_count} 项分享{suffix}",
             )
         repeated = values.get("already_loaded") is True
         characters = values.get("character_count")
@@ -553,6 +562,7 @@ class ToolProgressCatalog:
         "skill_archived": "这个技能当前已归档",
         "skill_share_target_required": "请在当前消息中 @ 要分享的用户",
         "skill_share_target_limit": "一次提及的分享对象过多",
+        "skill_share_target_conflict": "全部撤销时不能同时指定用户",
         "skill_invitation_not_found": "没有找到属于你的这项技能邀请",
         "skill_invitation_answered": "这项技能邀请已经处理过",
         "skill_shared_library_limit": "已接受的共享技能已达上限",

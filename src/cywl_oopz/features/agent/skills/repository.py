@@ -873,6 +873,63 @@ class SqlAlchemyAgentSkillRepository:
             raise _database_error("revoke Agent skill share", exc) from exc
         return result
 
+    async def revoke_owned_shares(
+        self,
+        owner_person_id: str,
+        skill_id: UUID,
+        recipient_person_ids: tuple[str, ...] | None,
+    ) -> tuple[AgentSkillShare, ...]:
+        """Delete selected or all shares through one owner-scoped Skill lock."""
+        owner = _person_id(owner_person_id, "Skill owner")
+        recipients = (
+            tuple(
+                dict.fromkeys(
+                    _person_id(value, "Skill share recipient") for value in recipient_person_ids
+                )
+            )
+            if recipient_person_ids is not None
+            else None
+        )
+        if recipients == ():
+            raise ValueError("Skill share recipients must not be empty")
+        try:
+            async with self._sessions() as session:
+                async with session.begin():
+                    owned = await session.scalar(
+                        select(AgentSkillRecord.id)
+                        .where(
+                            AgentSkillRecord.id == skill_id,
+                            AgentSkillRecord.ownership_kind == SkillOwnershipKind.PERSONAL,
+                            AgentSkillRecord.owner_person_id == owner,
+                        )
+                        .with_for_update()
+                    )
+                    if owned is None:
+                        raise AgentSkillNotFoundError("Owned Skill was not found")
+                    statement = (
+                        select(AgentSkillShareRecord)
+                        .where(AgentSkillShareRecord.skill_id == skill_id)
+                        .order_by(AgentSkillShareRecord.created_at, AgentSkillShareRecord.id)
+                        .with_for_update()
+                    )
+                    if recipients is not None:
+                        statement = statement.where(
+                            AgentSkillShareRecord.recipient_person_id.in_(recipients)
+                        )
+                    records = (await session.scalars(statement)).all()
+                    result = tuple(self._to_share(record) for record in records)
+                    if records:
+                        await session.execute(
+                            delete(AgentSkillShareRecord).where(
+                                AgentSkillShareRecord.id.in_(tuple(record.id for record in records))
+                            )
+                        )
+        except AgentSkillNotFoundError:
+            raise
+        except SQLAlchemyError as exc:
+            raise _database_error("revoke Agent skill shares", exc) from exc
+        return result
+
     async def _load_bundles(
         self,
         *predicates: ColumnElement[bool],

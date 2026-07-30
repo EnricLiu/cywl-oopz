@@ -77,6 +77,7 @@ def store(**overrides):
         "share_for_owner": AsyncMock(return_value=None),
         "respond": AsyncMock(),
         "revoke": AsyncMock(return_value=None),
+        "revoke_owned_shares": AsyncMock(return_value=()),
     }
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
@@ -318,8 +319,8 @@ async def test_library_service_enforces_shared_capacity_and_revokes_best_effort(
         await limited.respond("friend", pending.share.id, accepted=True)
 
     repository = store(
-        share_for_owner=AsyncMock(return_value=pending),
-        revoke=AsyncMock(return_value=pending.share),
+        get_owned=AsyncMock(return_value=skill),
+        revoke_owned_shares=AsyncMock(return_value=(pending.share,)),
     )
     notifier = SimpleNamespace(
         invitation=AsyncMock(return_value=True),
@@ -327,8 +328,38 @@ async def test_library_service_enforces_shared_capacity_and_revokes_best_effort(
     )
     library = service(repository, notifier=notifier)
 
-    result = await library.revoke("person", pending.share.id)
+    result = await library.revoke(
+        "person",
+        skill.id,
+        ("friend",),
+        revoke_all=False,
+    )
 
     assert isinstance(result, AgentSkillRevokeResult)
-    assert result.notification_delivered is False
-    notifier.revoked.assert_awaited_once_with("friend", pending.skill)
+    assert result.notification_failures == 1
+    notifier.revoked.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_library_service_requires_mentions_unless_all_shares_are_explicitly_revoked() -> None:
+    skill = personal_skill()
+    share = share_summary(skill).share
+    repository = store(
+        get_owned=AsyncMock(return_value=skill),
+        revoke_owned_shares=AsyncMock(return_value=(share,)),
+    )
+    library = service(repository)
+
+    with pytest.raises(AgentSkillLibraryError, match="skill_share_target_required"):
+        await library.revoke("person", skill.id, (), revoke_all=False)
+    with pytest.raises(AgentSkillLibraryError, match="skill_share_target_conflict"):
+        await library.revoke("person", skill.id, ("friend",), revoke_all=True)
+
+    result = await library.revoke("person", skill.id, (), revoke_all=True)
+
+    assert len(result.shares) == 1
+    repository.revoke_owned_shares.assert_awaited_once_with(
+        "person",
+        skill.id,
+        None,
+    )

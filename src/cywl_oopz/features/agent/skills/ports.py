@@ -156,6 +156,14 @@ class AgentSkillLibraryRepository(Protocol):
     ) -> AgentSkillShare | None:
         """Delete and return one share belonging to an owned Skill."""
 
+    async def revoke_owned_shares(
+        self,
+        owner_person_id: str,
+        skill_id: UUID,
+        recipient_person_ids: tuple[str, ...] | None,
+    ) -> tuple[AgentSkillShare, ...]:
+        """Atomically revoke selected recipients, or every share for one owned Skill."""
+
 
 class SkillShareNotifier(Protocol):
     """Best-effort private notification boundary for Skill sharing."""

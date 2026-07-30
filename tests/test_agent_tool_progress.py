@@ -93,6 +93,20 @@ def test_skill_share_progress_is_dynamic_but_hides_ids_and_recipients() -> None:
     assert error.summary == "这项技能邀请已经处理过"
     assert "private-skill-id" not in repr((request, result, error))
 
+    revoked = catalog.result(
+        "revoke_agent_skill_share",
+        {
+            "ok": True,
+            "data": {
+                "skill": {"display_name": "旅行规划"},
+                "revoked_count": 2,
+                "notification_failures": 1,
+            },
+        },
+        succeeded=True,
+    )
+    assert revoked.summary == "已撤销 2 项分享 · 1 个通知失败"
+
 
 def test_browser_and_music_results_have_compact_human_summaries() -> None:
     catalog = ToolProgressCatalog()

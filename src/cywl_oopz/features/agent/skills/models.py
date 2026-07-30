@@ -339,10 +339,11 @@ class AgentSkillInviteResult:
 
 @dataclass(frozen=True, slots=True)
 class AgentSkillRevokeResult:
-    """One revoked share with safe metadata and notification status."""
+    """Revoked grants plus safe metadata and notification metrics."""
 
-    summary: AgentSkillShareSummary
-    notification_delivered: bool
+    skill: AgentSkillDiscovery
+    shares: tuple[AgentSkillShare, ...]
+    notification_failures: int
 
 
 def _validate_line(value: str, label: str, limit: int) -> None:
