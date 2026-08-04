@@ -200,6 +200,9 @@ async def test_realtime_runtime_streams_audio_and_persists_final_turns() -> None
     await provider_session.emit(
         VoiceResponseCompleted("response-1", {"input_tokens": 3, "output_tokens": 2})
     )
+    await provider_session.emit(
+        VoiceResponseCompleted("response-1", {"input_tokens": 3, "output_tokens": 2})
+    )
 
     await wait_until(lambda: bool(provider_session.sent_audio))
     await wait_until(lambda: bool(media.outputs))
@@ -210,6 +213,10 @@ async def test_realtime_runtime_streams_audio_and_persists_final_turns() -> None
     assert sessions.turns == [
         (runtime._context.descriptor.session_id, 1, VoiceTurnRole.USER, "你好"),
         (runtime._context.descriptor.session_id, 2, VoiceTurnRole.ASSISTANT, "你好呀"),
+    ]
+    assert sessions.turn_usage == [
+        {},
+        {"input_tokens": 3, "output_tokens": 2},
     ]
     assert runtime.state is VoiceSessionState.LISTENING
     assert runtime.stats.provider_connect_attempts == 1
@@ -742,7 +749,8 @@ async def test_realtime_runtime_barge_in_flushes_then_drops_late_audio() -> None
             "item-1",
         )
     )
-    await provider_session.emit(VoiceResponseCancelled("response-1"))
+    await provider_session.emit(VoiceResponseCancelled("response-1", {"output_tokens": 4}))
+    await provider_session.emit(VoiceResponseCancelled("response-1", {"output_tokens": 4}))
     await provider_session.emit(VoiceUserSpeechStarted())
     await wait_until(lambda: runtime.stats.duplicate_speech_started == 1)
     assert len(media.outputs) == output_count
@@ -767,7 +775,8 @@ async def test_realtime_runtime_barge_in_flushes_then_drops_late_audio() -> None
     assert sessions.turns[0][3] == "新回答"
 
     await runtime.request_stop(VoiceStopReason.COMMAND)
-    await runtime.wait_finished()
+    result = await runtime.wait_finished()
+    assert result.usage == {"output_tokens": 4}
     await runtime.aclose()
 
 

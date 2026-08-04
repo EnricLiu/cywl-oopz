@@ -9,7 +9,7 @@ import time
 from collections import deque
 from collections.abc import Callable, Mapping
 from contextlib import suppress
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from uuid import UUID
 
 from cywl_oopz.core.observability import exception_kind, opaque_ref
@@ -75,6 +75,7 @@ logger = logging.getLogger(__name__)
 ProviderBuilder = Callable[[VoiceSessionRuntimeContext], RealtimeVoiceProvider]
 _AUDIO_STAGING_CHUNKS = 8
 _CANCELLED_RESPONSE_HISTORY = 64
+_RESPONSE_USAGE_HISTORY = 64
 _COMPLETED_TOOL_CALL_HISTORY = 128
 _INTERRUPT_TIMEOUT_SECONDS = 1.5
 _TASK_SUBMIT_TIMEOUT_SECONDS = 0.25
@@ -189,6 +190,7 @@ class _ActiveResponse:
     provider_item_id: str = ""
     provider_done: bool = False
     pending_transcript: VoiceTranscriptFinal | None = None
+    usage: dict[str, int | float] = field(default_factory=dict)
 
 
 _AudioEvent = VoiceAssistantAudio | _AudioBarrier
@@ -249,6 +251,8 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
         self._active_response: _ActiveResponse | None = None
         self._cancelled_response_ids: deque[str] = deque()
         self._cancelled_response_set: set[str] = set()
+        self._usage_response_ids: deque[str] = deque()
+        self._usage_response_set: set[str] = set()
         self._tool_calls_in_flight: set[str] = set()
         self._completed_tool_call_ids: deque[str] = deque()
         self._completed_tool_call_set: set[str] = set()
@@ -951,10 +955,10 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
             elif isinstance(model_event, VoiceTranscriptFinal):
                 await self._handle_final_transcript(model_event)
             elif isinstance(model_event, VoiceResponseCompleted):
-                self._accumulate_usage(model_event.usage)
-                await self._complete_response_playout(model_event.response_id)
+                self._accumulate_response_usage(model_event.response_id, model_event.usage)
+                await self._complete_response_playout(model_event.response_id, model_event.usage)
             elif isinstance(model_event, VoiceResponseCancelled):
-                self._accumulate_usage(model_event.usage)
+                self._accumulate_response_usage(model_event.response_id, model_event.usage)
                 if model_event.response_id in self._cancelled_response_set:
                     continue
                 active = self._active_response
@@ -1494,7 +1498,12 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
             return
         active.pending_transcript = event
 
-    async def _persist_transcript(self, event: VoiceTranscriptFinal) -> None:
+    async def _persist_transcript(
+        self,
+        event: VoiceTranscriptFinal,
+        *,
+        usage: Mapping[str, int | float] | None = None,
+    ) -> None:
         self._recovery_turns.append(
             VoiceRecoveryTurn(event.role, _compact_recovery_text(event.text, 500))
         )
@@ -1506,6 +1515,7 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                 VoiceTurnRole(event.role),
                 event.text,
                 provider_item_id=event.provider_item_id,
+                usage=dict(usage or {}),
             )
         except Exception as exc:
             logger.warning(
@@ -1515,7 +1525,11 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                 exception_kind(exc),
             )
 
-    async def _complete_response_playout(self, response_id: str) -> None:
+    async def _complete_response_playout(
+        self,
+        response_id: str,
+        usage: Mapping[str, int | float],
+    ) -> None:
         if response_id in self._cancelled_response_set:
             return
         active = self._active_response
@@ -1524,6 +1538,7 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
         if active.provider_done:
             return
         active.provider_done = True
+        active.usage = dict(usage)
         await self._cancel_response_drain()
         task = self._spawn(
             self._drain_response(response_id, active.generation),
@@ -1560,7 +1575,7 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
         self._active_response = None
         self._drain_task = None
         if transcript is not None:
-            await self._persist_transcript(transcript)
+            await self._persist_transcript(transcript, usage=active.usage)
         self._stats = replace(
             self._stats,
             responses_drained=self._stats.responses_drained + 1,
@@ -1688,6 +1703,20 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
     def _accumulate_usage(self, usage) -> None:
         for key, value in usage.items():
             self._usage[key] = self._usage.get(key, 0) + value
+
+    def _accumulate_response_usage(
+        self,
+        response_id: str,
+        usage: Mapping[str, int | float],
+    ) -> None:
+        if response_id in self._usage_response_set:
+            return
+        if len(self._usage_response_ids) >= _RESPONSE_USAGE_HISTORY:
+            expired = self._usage_response_ids.popleft()
+            self._usage_response_set.discard(expired)
+        self._usage_response_ids.append(response_id)
+        self._usage_response_set.add(response_id)
+        self._accumulate_usage(usage)
 
     async def _oopz_input_pump(
         self,

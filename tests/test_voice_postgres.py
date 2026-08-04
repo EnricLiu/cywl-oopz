@@ -186,6 +186,7 @@ async def test_voice_migration_and_repositories_on_postgresql() -> None:
             VoiceTurnRole.USER,
             "你好，未来。",
             provider_item_id="item-1",
+            usage={"input_tokens": 3},
         )
         await history.finish(
             descriptor.session_id,
@@ -204,6 +205,7 @@ async def test_voice_migration_and_repositories_on_postgresql() -> None:
         assert stored_session.ended_at is not None
         assert stored_turn is not None
         assert stored_turn.transcript == "你好，未来。"
+        assert stored_turn.usage == {"input_tokens": 3}
 
         stale_descriptors = [
             VoiceSessionDescriptor(

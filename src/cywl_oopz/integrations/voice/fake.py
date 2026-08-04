@@ -158,6 +158,7 @@ class FakeVoiceSessionRepository:
         self.finished: list[tuple[UUID, PersistedVoiceSessionStatus, str]] = []
         self.finished_usage: list[dict[str, object]] = []
         self.turns: list[tuple[UUID, int, VoiceTurnRole, str]] = []
+        self.turn_usage: list[dict[str, object]] = []
         self.stale_recovery_count = 0
         self.recovery_calls = 0
 
@@ -190,8 +191,9 @@ class FakeVoiceSessionRepository:
         provider_item_id="",
         usage=None,
     ) -> None:
-        del provider_item_id, usage
+        del provider_item_id
         self.turns.append((session_id, sequence, role, transcript))
+        self.turn_usage.append(dict(usage or {}))
 
 
 class FakeVoiceLease:
