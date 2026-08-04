@@ -57,6 +57,9 @@ class OopzVoiceMediaSession:
         self._subscription = subscription
         self._output = output
         self._close_lock = asyncio.Lock()
+        self._closing = False
+        self._subscription_closed = False
+        self._output_closed = False
         self._closed = False
 
     async def input_frames(self) -> AsyncIterator[RemoteAudioFrame]:
@@ -128,21 +131,33 @@ class OopzVoiceMediaSession:
         async with self._close_lock:
             if self._closed:
                 return
-            self._closed = True
-            try:
-                await self._subscription.aclose()
-            except Exception as exc:
+            self._closing = True
+            operations = []
+            names = []
+            if not self._subscription_closed:
+                operations.append(self._close_subscription())
+                names.append("owner audio subscription")
+            if not self._output_closed:
+                operations.append(self._close_output())
+                names.append("PCM output")
+            results = await asyncio.gather(*operations, return_exceptions=True)
+            for name, result in zip(names, results, strict=True):
+                if not isinstance(result, BaseException):
+                    continue
                 logger.warning(
-                    "Could not close OOPZ owner audio subscription: error=%s",
-                    exception_kind(exc),
+                    "Could not close OOPZ %s: error=%s",
+                    name,
+                    exception_kind(result),
                 )
-            try:
-                await self._output.aclose()
-            except Exception as exc:
-                logger.warning(
-                    "Could not close OOPZ PCM output: error=%s",
-                    exception_kind(exc),
-                )
+            self._closed = self._subscription_closed and self._output_closed
+
+    async def _close_subscription(self) -> None:
+        await self._subscription.aclose()
+        self._subscription_closed = True
+
+    async def _close_output(self) -> None:
+        await self._output.aclose()
+        self._output_closed = True
 
     def _cursor_from_stats(self) -> PlaybackCursor:
         stats = self._output.stats

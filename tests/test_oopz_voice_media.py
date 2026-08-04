@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from uuid import UUID
 
@@ -177,6 +178,79 @@ async def test_oopz_media_opens_only_owner_input_and_fixed_output_contract() -> 
     await media.aclose()
     await media.aclose()
     assert subscription.close_count == 1
+    assert output.close_count == 1
+
+
+@pytest.mark.asyncio
+async def test_oopz_media_close_retries_both_resources_after_cancellation() -> None:
+    subscription = FakeSubscription()
+    output = FakeOutput()
+    media = await OopzVoiceMediaGateway(
+        SimpleNamespace(voice=FakeVoice(subscription, output)), settings()
+    ).open(descriptor(), FakeLease())
+    subscription_started = asyncio.Event()
+    output_started = asyncio.Event()
+    allow_close = asyncio.Event()
+
+    async def stalled_subscription_close() -> None:
+        subscription.close_count += 1
+        subscription_started.set()
+        await allow_close.wait()
+
+    async def stalled_output_close() -> None:
+        output.close_count += 1
+        output_started.set()
+        await allow_close.wait()
+
+    subscription.aclose = stalled_subscription_close
+    output.aclose = stalled_output_close
+    closing = asyncio.create_task(media.aclose())
+    await subscription_started.wait()
+    await output_started.wait()
+
+    closing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await closing
+
+    assert media._closing is True
+    assert media._closed is False
+    assert media._subscription_closed is False
+    assert media._output_closed is False
+    allow_close.set()
+    await media.aclose()
+
+    assert subscription.close_count == 2
+    assert output.close_count == 2
+    assert media._closed is True
+
+
+@pytest.mark.asyncio
+async def test_oopz_media_close_retries_only_failed_resource() -> None:
+    subscription = FakeSubscription()
+    output = FakeOutput()
+    media = await OopzVoiceMediaGateway(
+        SimpleNamespace(voice=FakeVoice(subscription, output)), settings()
+    ).open(descriptor(), FakeLease())
+    remaining_failures = 1
+
+    async def flaky_subscription_close() -> None:
+        nonlocal remaining_failures
+        subscription.close_count += 1
+        if remaining_failures:
+            remaining_failures -= 1
+            raise RuntimeError("fixture close failure")
+
+    subscription.aclose = flaky_subscription_close
+    await media.aclose()
+
+    assert media._closed is False
+    assert media._subscription_closed is False
+    assert media._output_closed is True
+    assert output.close_count == 1
+    await media.aclose()
+
+    assert media._closed is True
+    assert subscription.close_count == 2
     assert output.close_count == 1
 
 
