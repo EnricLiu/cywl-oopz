@@ -21,10 +21,14 @@ from cywl_oopz.features.voice.errors import (
 from cywl_oopz.features.voice.events import (
     VoiceModelEvent,
     VoiceProviderFailed,
+    VoiceResponseCancelled,
+    VoiceResponseCompleted,
+    VoiceResponseStarted,
     VoiceSessionFinished,
 )
 from cywl_oopz.features.voice.models import (
     PcmChunk,
+    PlaybackCursor,
     VoiceProviderCapabilities,
     VoiceSessionDescriptor,
 )
@@ -36,6 +40,7 @@ from .qwen_protocol import (
     audio_append_event,
     encode_client_event,
     parse_server_event,
+    response_cancel_event,
 )
 
 logger = logging.getLogger(__name__)
@@ -51,6 +56,7 @@ class QwenOmniRealtimeSession:
         self._writer_lock = asyncio.Lock()
         self._close_lock = asyncio.Lock()
         self._events_started = False
+        self._active_response_id = ""
         self._finishing = False
         self._closed = False
 
@@ -63,6 +69,13 @@ class QwenOmniRealtimeSession:
         """Send the one initial session update before the event reader starts."""
         await self._send(config.session_update(instructions, _event_id()))
 
+    async def interrupt(self, cursor: PlaybackCursor) -> None:
+        """Cancel generation; Qwen currently has no played-audio context truncate event."""
+        del cursor
+        if not self._active_response_id or self._closed or self._finishing:
+            return
+        await self._send(response_cancel_event(_event_id()))
+
     async def events(self) -> AsyncIterator[VoiceModelEvent]:
         if self._events_started:
             raise RuntimeError("Qwen event stream may only be consumed once")
@@ -72,6 +85,11 @@ class QwenOmniRealtimeSession:
             async for raw in self._websocket:
                 event = parse_server_event(raw)
                 if event is not None:
+                    if isinstance(event, VoiceResponseStarted):
+                        self._active_response_id = event.response_id
+                    elif isinstance(event, VoiceResponseCompleted | VoiceResponseCancelled):
+                        if event.response_id == self._active_response_id:
+                            self._active_response_id = ""
                     yield event
                 if isinstance(event, VoiceSessionFinished):
                     finished = True
@@ -141,7 +159,10 @@ class QwenOmniRealtimeProvider:
     @property
     def capabilities(self) -> VoiceProviderCapabilities:
         # I6 intentionally exposes no tools or out-of-band context injection.
-        return VoiceProviderCapabilities()
+        return VoiceProviderCapabilities(
+            response_cancel=True,
+            context_truncate_to_playout=False,
+        )
 
     async def connect(self, descriptor: VoiceSessionDescriptor) -> QwenOmniRealtimeSession:
         if self._closed:

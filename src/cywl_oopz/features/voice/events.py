@@ -30,18 +30,31 @@ class VoiceUserSpeechStopped:
 
 
 @dataclass(frozen=True, slots=True)
+class VoiceResponseStarted:
+    """A Provider response acquired a stable identifier and began generation."""
+
+    response_id: str
+
+    def __post_init__(self) -> None:
+        _validate_identifier(self.response_id, "response")
+
+
+@dataclass(frozen=True, slots=True)
 class VoiceTranscriptFinal:
     """Final text for one user or assistant turn."""
 
     role: str
     text: str
     provider_item_id: str = ""
+    response_id: str = ""
 
     def __post_init__(self) -> None:
         if self.role not in {"user", "assistant"} or not self.text.strip():
             raise ValueError("Final transcript requires a supported role and non-empty text")
         if len(self.provider_item_id) > 256:
             raise ValueError("Provider item identifier is too long")
+        if len(self.response_id) > 256:
+            raise ValueError("Provider response identifier is too long")
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +62,13 @@ class VoiceAssistantAudio:
     """Incremental assistant audio emitted by the Provider."""
 
     chunk: PcmChunk
+    response_id: str
+    provider_item_id: str = ""
+
+    def __post_init__(self) -> None:
+        _validate_identifier(self.response_id, "response")
+        if len(self.provider_item_id) > 256:
+            raise ValueError("Provider item identifier is too long")
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +77,20 @@ class VoiceResponseCompleted:
 
     response_id: str
     usage: Mapping[str, int | float] = field(default_factory=lambda: MappingProxyType({}))
+
+    def __post_init__(self) -> None:
+        _validate_identifier(self.response_id, "response")
+
+
+@dataclass(frozen=True, slots=True)
+class VoiceResponseCancelled:
+    """One response stopped before normal completion and may emit late terminal events."""
+
+    response_id: str
+    usage: Mapping[str, int | float] = field(default_factory=lambda: MappingProxyType({}))
+
+    def __post_init__(self) -> None:
+        _validate_identifier(self.response_id, "response")
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,8 +106,15 @@ VoiceModelEvent = (
     | VoiceSessionFinished
     | VoiceUserSpeechStarted
     | VoiceUserSpeechStopped
+    | VoiceResponseStarted
     | VoiceTranscriptFinal
     | VoiceAssistantAudio
     | VoiceResponseCompleted
+    | VoiceResponseCancelled
     | VoiceProviderFailed
 )
+
+
+def _validate_identifier(value: str, kind: str) -> None:
+    if not value.strip() or len(value) > 256:
+        raise ValueError(f"Provider {kind} identifier is invalid")

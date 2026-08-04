@@ -354,6 +354,16 @@ class VoiceOutputTransitQueue:
             self._condition.notify_all()
             return chunk
 
+    async def wait_empty(self, generation: int) -> None:
+        """Wait until one generation has left the project transit queue or is invalidated."""
+        async with self._condition:
+            while (
+                not self._closed
+                and generation == self._generation
+                and any(chunk.generation == generation for chunk in self._items)
+            ):
+                await self._condition.wait()
+
     async def flush(self) -> int:
         """Invalidate the old response and wake blocked producers and consumers."""
         return await self.start_generation()

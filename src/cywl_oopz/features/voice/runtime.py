@@ -6,9 +6,10 @@ import asyncio
 import logging
 import random
 import time
+from collections import deque
 from collections.abc import Callable
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from cywl_oopz.core.observability import exception_kind, opaque_ref
 from cywl_oopz.settings import VoiceSettings
@@ -24,7 +25,9 @@ from .events import (
     VoiceAssistantAudio,
     VoiceModelEvent,
     VoiceProviderFailed,
+    VoiceResponseCancelled,
     VoiceResponseCompleted,
+    VoiceResponseStarted,
     VoiceSessionFinished,
     VoiceSessionReady,
     VoiceTranscriptFinal,
@@ -33,8 +36,10 @@ from .events import (
 )
 from .models import (
     PcmChunk,
+    PlaybackCursor,
     VoiceMediaEndReason,
     VoiceRuntimeResult,
+    VoiceRuntimeStats,
     VoiceSessionState,
     VoiceStopReason,
 )
@@ -53,6 +58,9 @@ from .settings import VoiceTurnRole
 logger = logging.getLogger(__name__)
 
 ProviderBuilder = Callable[[VoiceSessionRuntimeContext], RealtimeVoiceProvider]
+_AUDIO_STAGING_CHUNKS = 8
+_CANCELLED_RESPONSE_HISTORY = 64
+_INTERRUPT_TIMEOUT_SECONDS = 1.5
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,7 +92,38 @@ class _WatchdogExpired:
     reason: VoiceStopReason
 
 
-_ControlEvent = _ProviderEvent | _StopRequested | _MediaEnded | _PumpFailed | _WatchdogExpired
+@dataclass(frozen=True, slots=True)
+class _ResponseDrained:
+    response_id: str
+    generation: int
+    cursor: PlaybackCursor
+
+
+@dataclass(frozen=True, slots=True)
+class _AudioBarrier:
+    response_id: str
+    generation: int
+    routed: asyncio.Future[None]
+
+
+@dataclass(slots=True)
+class _ActiveResponse:
+    response_id: str
+    generation: int
+    provider_item_id: str = ""
+    provider_done: bool = False
+    pending_transcript: VoiceTranscriptFinal | None = None
+
+
+_AudioEvent = VoiceAssistantAudio | _AudioBarrier
+_ControlEvent = (
+    _ProviderEvent
+    | _StopRequested
+    | _MediaEnded
+    | _PumpFailed
+    | _WatchdogExpired
+    | _ResponseDrained
+)
 
 
 class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
@@ -104,6 +143,7 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
         self._sessions = sessions
         self._provider_builder = provider_builder
         self._control: asyncio.Queue[_ControlEvent] = asyncio.Queue(settings.event_queue_size)
+        self._audio_events: asyncio.Queue[_AudioEvent] = asyncio.Queue(_AUDIO_STAGING_CHUNKS)
         self._input = VoiceInputQueue(settings.input_queue_ms)
         self._output = VoiceOutputTransitQueue(settings.output_queue_ms)
         self._state = VoiceSessionState.STARTING
@@ -113,8 +153,14 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
         self._provider: RealtimeVoiceProvider | None = None
         self._provider_session: RealtimeVoiceSession | None = None
         self._tasks: set[asyncio.Task[None]] = set()
+        self._drain_task: asyncio.Task[None] | None = None
+        self._active_response: _ActiveResponse | None = None
+        self._cancelled_response_ids: deque[str] = deque()
+        self._cancelled_response_set: set[str] = set()
+        self._user_speaking = False
         self._turn_sequence = 0
         self._usage: dict[str, int | float] = {}
+        self._stats = VoiceRuntimeStats()
         self._last_activity = time.monotonic()
         self._started_at = self._last_activity
         self._start_lock = asyncio.Lock()
@@ -125,6 +171,10 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
     @property
     def state(self) -> VoiceSessionState:
         return self._state
+
+    @property
+    def stats(self) -> VoiceRuntimeStats:
+        return self._stats
 
     async def start(self) -> None:
         async with self._start_lock:
@@ -141,6 +191,7 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
             self._spawn(self._control_loop(), "voice-control")
             self._spawn(self._oopz_input_pump(), "voice-oopz-input")
             self._spawn(self._provider_input_sender(), "voice-provider-input")
+            self._spawn(self._provider_audio_router(), "voice-provider-audio")
             self._spawn(self._oopz_output_pump(), "voice-oopz-output")
             self._spawn(self._media_terminal_watcher(), "voice-media-terminal")
             self._spawn(self._watchdog(), "voice-watchdog")
@@ -250,9 +301,11 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
             "Voice Provider connection attempts exhausted"
         ) from last_error
 
-    async def _recover_provider(self) -> bool:
+    async def _recover_provider(self, *, playout_flushed: bool = False) -> bool:
         self._state = VoiceSessionState.RECOVERING
         self._provider_ready.clear()
+        self._discard_active_response()
+        await self._cancel_response_drain()
         try:
             await self._sessions.mark_recovering(self._context.descriptor.session_id)
         except Exception as exc:
@@ -261,11 +314,12 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                 opaque_ref(str(self._context.descriptor.session_id)),
                 exception_kind(exc),
             )
-        await self._output.flush()
-        media = self._media
-        if media is not None:
-            with suppress(Exception):
-                await media.flush_output()
+        if not playout_flushed:
+            await self._output.flush()
+            media = self._media
+            if media is not None:
+                with suppress(Exception):
+                    await media.flush_output()
         old_provider = self._provider
         self._provider = None
         self._provider_session = None
@@ -318,6 +372,11 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                             self._provider_input_sender(),
                             "voice-provider-input-recovered",
                         )
+                    elif event.pump == "provider_output_backpressure":
+                        self._spawn(
+                            self._provider_audio_router(),
+                            "voice-provider-audio-recovered",
+                        )
                     continue
                 self._state = VoiceSessionState.FAILED
                 reason = (
@@ -327,12 +386,19 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                 )
                 self._complete(reason)
                 return
+            if isinstance(event, _ResponseDrained):
+                await self._handle_response_drained(event)
+                continue
             if event.session is not self._provider_session:
                 continue
             model_event = event.event
             self._last_activity = time.monotonic()
             if isinstance(model_event, VoiceSessionReady):
-                self._state = VoiceSessionState.LISTENING
+                self._state = (
+                    VoiceSessionState.USER_SPEAKING
+                    if self._user_speaking
+                    else VoiceSessionState.LISTENING
+                )
                 self._provider_ready.set()
                 if self._started:
                     try:
@@ -344,41 +410,49 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                             exception_kind(exc),
                         )
             elif isinstance(model_event, VoiceUserSpeechStarted):
-                self._state = VoiceSessionState.USER_SPEAKING
-            elif isinstance(model_event, VoiceUserSpeechStopped):
-                self._state = VoiceSessionState.THINKING
-            elif isinstance(model_event, VoiceAssistantAudio):
-                self._state = VoiceSessionState.SPEAKING
-                chunk = model_event.chunk
-                await self._output.put(
-                    PcmChunk(
-                        chunk.pcm,
-                        chunk.format,
-                        chunk.duration_ms,
-                        self._output.generation,
+                if self._user_speaking:
+                    self._stats = replace(
+                        self._stats,
+                        duplicate_speech_started=self._stats.duplicate_speech_started + 1,
                     )
+                    continue
+                self._user_speaking = True
+                if self._active_response is None:
+                    self._state = VoiceSessionState.USER_SPEAKING
+                    continue
+                await self._interrupt_active_response(
+                    notify_provider=True,
+                    target_state=VoiceSessionState.USER_SPEAKING,
+                    count_barge_in=True,
                 )
+            elif isinstance(model_event, VoiceUserSpeechStopped):
+                self._user_speaking = False
+                self._state = VoiceSessionState.THINKING
+            elif isinstance(model_event, VoiceResponseStarted):
+                await self._start_response(model_event.response_id)
+            elif isinstance(model_event, VoiceAssistantAudio):
+                await self._stage_assistant_audio(model_event)
             elif isinstance(model_event, VoiceTranscriptFinal):
-                self._turn_sequence += 1
-                try:
-                    await self._sessions.append_final_turn(
-                        self._context.descriptor.session_id,
-                        self._turn_sequence,
-                        VoiceTurnRole(model_event.role),
-                        model_event.text,
-                        provider_item_id=model_event.provider_item_id,
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "Could not persist final voice transcript: session=%s sequence=%d error=%s",
-                        opaque_ref(str(self._context.descriptor.session_id)),
-                        self._turn_sequence,
-                        exception_kind(exc),
-                    )
+                await self._handle_final_transcript(model_event)
             elif isinstance(model_event, VoiceResponseCompleted):
-                for key, value in model_event.usage.items():
-                    self._usage[key] = self._usage.get(key, 0) + value
-                self._state = VoiceSessionState.LISTENING
+                self._accumulate_usage(model_event.usage)
+                await self._complete_response_playout(model_event.response_id)
+            elif isinstance(model_event, VoiceResponseCancelled):
+                self._accumulate_usage(model_event.usage)
+                if model_event.response_id in self._cancelled_response_set:
+                    continue
+                active = self._active_response
+                if active is None or active.response_id != model_event.response_id:
+                    continue
+                await self._interrupt_active_response(
+                    notify_provider=False,
+                    target_state=(
+                        VoiceSessionState.USER_SPEAKING
+                        if self._user_speaking
+                        else VoiceSessionState.LISTENING
+                    ),
+                    count_barge_in=False,
+                )
             elif isinstance(model_event, VoiceProviderFailed):
                 if model_event.retryable and await self._recover_provider():
                     continue
@@ -389,6 +463,278 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                 self._state = VoiceSessionState.CLOSING
                 self._complete(VoiceStopReason.RUNTIME_ENDED)
                 return
+
+    async def _start_response(self, response_id: str) -> None:
+        if response_id in self._cancelled_response_set:
+            return
+        active = self._active_response
+        if active is not None:
+            if active.response_id == response_id:
+                return
+            logger.warning(
+                "Voice Provider started overlapping response; discarding old playout: "
+                "session=%s old=%s new=%s",
+                opaque_ref(str(self._context.descriptor.session_id)),
+                opaque_ref(active.response_id),
+                opaque_ref(response_id),
+            )
+            if not await self._interrupt_active_response(
+                notify_provider=False,
+                target_state=VoiceSessionState.THINKING,
+                count_barge_in=False,
+            ):
+                return
+        generation = await self._output.start_generation()
+        self._active_response = _ActiveResponse(response_id, generation)
+        self._stats = replace(
+            self._stats,
+            responses_started=self._stats.responses_started + 1,
+        )
+        self._state = VoiceSessionState.THINKING
+
+    async def _stage_assistant_audio(self, event: VoiceAssistantAudio) -> None:
+        active = self._active_response
+        if (
+            active is None
+            or event.response_id in self._cancelled_response_set
+            or event.response_id != active.response_id
+        ):
+            self._stats = replace(
+                self._stats,
+                late_audio_dropped=self._stats.late_audio_dropped + 1,
+            )
+            return
+        if event.provider_item_id:
+            active.provider_item_id = event.provider_item_id
+        self._state = VoiceSessionState.SPEAKING
+        try:
+            self._audio_events.put_nowait(event)
+        except asyncio.QueueFull:
+            self._stats = replace(
+                self._stats,
+                output_overflows=self._stats.output_overflows + 1,
+            )
+            logger.warning(
+                "Voice output staging overflow; cancelling response: session=%s response=%s",
+                opaque_ref(str(self._context.descriptor.session_id)),
+                opaque_ref(active.response_id),
+            )
+            await self._interrupt_active_response(
+                notify_provider=True,
+                target_state=(
+                    VoiceSessionState.USER_SPEAKING
+                    if self._user_speaking
+                    else VoiceSessionState.LISTENING
+                ),
+                count_barge_in=False,
+            )
+
+    async def _handle_final_transcript(self, event: VoiceTranscriptFinal) -> None:
+        if event.role == "user":
+            await self._persist_transcript(event)
+            return
+        response_id = event.response_id
+        active = self._active_response
+        if not response_id and active is not None:
+            response_id = active.response_id
+        if response_id in self._cancelled_response_set:
+            self._stats = replace(
+                self._stats,
+                interrupted_transcripts_dropped=(self._stats.interrupted_transcripts_dropped + 1),
+            )
+            return
+        if active is None or response_id != active.response_id:
+            logger.debug(
+                "Ignoring assistant transcript without active response: session=%s response=%s",
+                opaque_ref(str(self._context.descriptor.session_id)),
+                opaque_ref(response_id),
+            )
+            return
+        active.pending_transcript = event
+
+    async def _persist_transcript(self, event: VoiceTranscriptFinal) -> None:
+        self._turn_sequence += 1
+        try:
+            await self._sessions.append_final_turn(
+                self._context.descriptor.session_id,
+                self._turn_sequence,
+                VoiceTurnRole(event.role),
+                event.text,
+                provider_item_id=event.provider_item_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Could not persist final voice transcript: session=%s sequence=%d error=%s",
+                opaque_ref(str(self._context.descriptor.session_id)),
+                self._turn_sequence,
+                exception_kind(exc),
+            )
+
+    async def _complete_response_playout(self, response_id: str) -> None:
+        if response_id in self._cancelled_response_set:
+            return
+        active = self._active_response
+        if active is None or active.response_id != response_id:
+            return
+        if active.provider_done:
+            return
+        active.provider_done = True
+        await self._cancel_response_drain()
+        task = self._spawn(
+            self._drain_response(response_id, active.generation),
+            "voice-response-drain",
+        )
+        self._drain_task = task
+
+    async def _drain_response(
+        self,
+        response_id: str,
+        generation: int,
+    ) -> None:
+        try:
+            routed = asyncio.get_running_loop().create_future()
+            await self._audio_events.put(_AudioBarrier(response_id, generation, routed))
+            await routed
+            await self._output.wait_empty(generation)
+            cursor = await self._require_media().drain_output()
+            await self._control.put(_ResponseDrained(response_id, generation, cursor))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await self._control.put(_PumpFailed("oopz_output_drain", exception_kind(exc)))
+
+    async def _handle_response_drained(self, event: _ResponseDrained) -> None:
+        active = self._active_response
+        if (
+            active is None
+            or active.response_id != event.response_id
+            or active.generation != event.generation
+        ):
+            return
+        transcript = active.pending_transcript
+        self._active_response = None
+        self._drain_task = None
+        if transcript is not None:
+            await self._persist_transcript(transcript)
+        self._stats = replace(
+            self._stats,
+            responses_drained=self._stats.responses_drained + 1,
+        )
+        self._state = (
+            VoiceSessionState.USER_SPEAKING if self._user_speaking else VoiceSessionState.LISTENING
+        )
+        logger.debug(
+            "Voice response playout drained: session=%s response=%s generation=%d rendered_ms=%d",
+            opaque_ref(str(self._context.descriptor.session_id)),
+            opaque_ref(event.response_id),
+            event.generation,
+            event.cursor.rendered_ms,
+        )
+
+    async def _interrupt_active_response(
+        self,
+        *,
+        notify_provider: bool,
+        target_state: VoiceSessionState,
+        count_barge_in: bool,
+    ) -> bool:
+        active = self._active_response
+        if active is None:
+            self._state = target_state
+            return True
+        started_at = time.monotonic()
+        self._state = VoiceSessionState.INTERRUPTING
+        if count_barge_in:
+            self._stats = replace(
+                self._stats,
+                barge_in_count=self._stats.barge_in_count + 1,
+            )
+        self._discard_active_response()
+        await self._cancel_response_drain()
+        try:
+            await self._output.flush()
+            cursor = await self._require_media().flush_output()
+        except Exception as exc:
+            logger.error(
+                "Voice local playout flush failed: session=%s error=%s",
+                opaque_ref(str(self._context.descriptor.session_id)),
+                exception_kind(exc),
+            )
+            self._state = VoiceSessionState.FAILED
+            self._complete(VoiceStopReason.MEDIA_ENDED)
+            return False
+        flush_ms = (time.monotonic() - started_at) * 1000
+        if count_barge_in:
+            self._stats = replace(
+                self._stats,
+                last_barge_in_flush_ms=flush_ms,
+                max_barge_in_flush_ms=max(self._stats.max_barge_in_flush_ms, flush_ms),
+            )
+        if notify_provider and not active.provider_done:
+            session = self._provider_session
+            if session is not None:
+                try:
+                    async with asyncio.timeout(_INTERRUPT_TIMEOUT_SECONDS):
+                        await session.interrupt(cursor)
+                except Exception as exc:
+                    logger.warning(
+                        "Voice Provider interrupt failed after local flush: "
+                        "session=%s response=%s error=%s",
+                        opaque_ref(str(self._context.descriptor.session_id)),
+                        opaque_ref(active.response_id),
+                        exception_kind(exc),
+                    )
+                    if await self._recover_provider(playout_flushed=True):
+                        return True
+                    self._state = VoiceSessionState.FAILED
+                    self._complete(VoiceStopReason.PROVIDER_FAILED)
+                    return False
+        self._state = target_state
+        logger.info(
+            "Voice response interrupted: session=%s response=%s generation=%d "
+            "rendered_ms=%d flush_ms=%.1f provider_cancel=%s",
+            opaque_ref(str(self._context.descriptor.session_id)),
+            opaque_ref(active.response_id),
+            active.generation,
+            cursor.rendered_ms,
+            flush_ms,
+            notify_provider and not active.provider_done,
+        )
+        return True
+
+    async def _cancel_response_drain(self) -> None:
+        task = self._drain_task
+        self._drain_task = None
+        if task is None or task.done() or task is asyncio.current_task():
+            return
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+    def _discard_active_response(self) -> None:
+        active = self._active_response
+        if active is None:
+            return
+        self._remember_cancelled_response(active.response_id)
+        if active.pending_transcript is not None:
+            self._stats = replace(
+                self._stats,
+                interrupted_transcripts_dropped=(self._stats.interrupted_transcripts_dropped + 1),
+            )
+        self._active_response = None
+
+    def _remember_cancelled_response(self, response_id: str) -> None:
+        if response_id in self._cancelled_response_set:
+            return
+        if len(self._cancelled_response_ids) >= _CANCELLED_RESPONSE_HISTORY:
+            expired = self._cancelled_response_ids.popleft()
+            self._cancelled_response_set.discard(expired)
+        self._cancelled_response_ids.append(response_id)
+        self._cancelled_response_set.add(response_id)
+
+    def _accumulate_usage(self, usage) -> None:
+        for key, value in usage.items():
+            self._usage[key] = self._usage.get(key, 0) + value
 
     async def _oopz_input_pump(self) -> None:
         media = self._require_media()
@@ -429,6 +775,55 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                 _PumpFailed("provider_input", exception_kind(exc), retryable_provider=True)
             )
 
+    async def _provider_audio_router(self) -> None:
+        try:
+            while True:
+                event = await self._audio_events.get()
+                try:
+                    if isinstance(event, _AudioBarrier):
+                        if not event.routed.done():
+                            event.routed.set_result(None)
+                        continue
+                    active = self._active_response
+                    if (
+                        active is None
+                        or event.response_id != active.response_id
+                        or event.response_id in self._cancelled_response_set
+                    ):
+                        self._stats = replace(
+                            self._stats,
+                            late_audio_dropped=self._stats.late_audio_dropped + 1,
+                        )
+                        continue
+                    chunk = event.chunk
+                    accepted = await self._output.put(
+                        PcmChunk(
+                            chunk.pcm,
+                            chunk.format,
+                            chunk.duration_ms,
+                            active.generation,
+                        )
+                    )
+                    if not accepted:
+                        self._stats = replace(
+                            self._stats,
+                            late_audio_dropped=self._stats.late_audio_dropped + 1,
+                        )
+                finally:
+                    self._audio_events.task_done()
+        except VoiceAudioQueueClosedError:
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await self._control.put(
+                _PumpFailed(
+                    "provider_output_backpressure",
+                    exception_kind(exc),
+                    retryable_provider=True,
+                )
+            )
+
     async def _provider_event_pump(self, session: RealtimeVoiceSession) -> None:
         terminal = False
         try:
@@ -448,7 +843,21 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
         media = self._require_media()
         try:
             while True:
-                await media.write_output(await self._output.get())
+                chunk = await self._output.get()
+                if chunk.generation != self._output.generation:
+                    continue
+                try:
+                    await media.write_output(chunk)
+                except Exception:
+                    if chunk.generation != self._output.generation:
+                        logger.debug(
+                            "Ignoring output write interrupted by generation flush: "
+                            "session=%s generation=%d",
+                            opaque_ref(str(self._context.descriptor.session_id)),
+                            chunk.generation,
+                        )
+                        continue
+                    raise
         except VoiceAudioQueueClosedError:
             return
         except asyncio.CancelledError:
@@ -479,13 +888,14 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                 await self._control.put(_WatchdogExpired(VoiceStopReason.IDLE_TIMEOUT))
                 return
 
-    def _spawn(self, coroutine, label: str) -> None:
+    def _spawn(self, coroutine, label: str) -> asyncio.Task[None]:
         task = asyncio.create_task(
             coroutine,
             name=f"{label}:{self._context.descriptor.session_id}",
         )
         self._tasks.add(task)
         task.add_done_callback(self._task_done)
+        return task
 
     def _task_done(self, task: asyncio.Task[None]) -> None:
         self._tasks.discard(task)
@@ -505,7 +915,13 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
 
     def _complete(self, reason: VoiceStopReason) -> None:
         if self._result is not None and not self._result.done():
-            self._result.set_result(VoiceRuntimeResult(reason, dict(self._usage)))
+            self._result.set_result(
+                VoiceRuntimeResult(
+                    reason,
+                    dict(self._usage),
+                    self._stats.as_metrics(),
+                )
+            )
 
     def _require_media(self) -> VoiceMediaSession:
         if self._media is None:  # pragma: no cover - start ordering invariant

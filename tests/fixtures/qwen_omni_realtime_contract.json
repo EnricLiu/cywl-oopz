@@ -9,13 +9,19 @@
     "transcript": "你好"
   },
   {
+    "type": "response.created",
+    "response": {"id": "response-1", "status": "in_progress"}
+  },
+  {
     "type": "response.audio_transcript.done",
+    "response_id": "response-1",
     "item_id": "item-assistant",
     "transcript": "你好呀"
   },
   {
     "type": "response.audio.delta",
     "response_id": "response-1",
+    "item_id": "item-assistant",
     "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
   },
   {
@@ -31,5 +37,13 @@
     "error": {"code": "rate_limit_exceeded", "message": "fixture-only"}
   },
   {"type": "future.event", "payload": {"ignored": true}},
+  {
+    "type": "response.created",
+    "response": {"id": "response-2", "status": "in_progress"}
+  },
+  {
+    "type": "response.done",
+    "response": {"id": "response-2", "status": "cancelled", "usage": {}}
+  },
   {"type": "session.finished", "session": {"id": "sess-1"}}
 ]

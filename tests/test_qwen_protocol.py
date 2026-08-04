@@ -15,7 +15,9 @@ from cywl_oopz.features.voice.errors import (
 from cywl_oopz.features.voice.events import (
     VoiceAssistantAudio,
     VoiceProviderFailed,
+    VoiceResponseCancelled,
     VoiceResponseCompleted,
+    VoiceResponseStarted,
     VoiceSessionFinished,
     VoiceSessionReady,
     VoiceTranscriptFinal,
@@ -116,19 +118,24 @@ def test_qwen_recorded_fixture_maps_only_curated_domain_events() -> None:
     assert isinstance(events[2], VoiceUserSpeechStarted)
     assert isinstance(events[3], VoiceUserSpeechStopped)
     assert events[4] == VoiceTranscriptFinal("user", "你好", "item-user")
-    assert events[5] == VoiceTranscriptFinal("assistant", "你好呀", "item-assistant")
-    assert isinstance(events[6], VoiceAssistantAudio)
-    assert events[6].chunk.duration_ms == 1
-    assert isinstance(events[7], VoiceResponseCompleted)
+    assert events[5] == VoiceResponseStarted("response-1")
+    assert events[6] == VoiceTranscriptFinal("assistant", "你好呀", "item-assistant", "response-1")
+    assert isinstance(events[7], VoiceAssistantAudio)
+    assert events[7].chunk.duration_ms == 1
     assert events[7].response_id == "response-1"
-    assert events[7].usage == {
+    assert events[7].provider_item_id == "item-assistant"
+    assert isinstance(events[8], VoiceResponseCompleted)
+    assert events[8].response_id == "response-1"
+    assert events[8].usage == {
         "input_tokens": 12,
         "output_tokens": 5,
         "total_tokens": 17,
     }
-    assert events[8] == VoiceProviderFailed("rate_limit_exceeded", True)
-    assert events[9] is None
-    assert isinstance(events[10], VoiceSessionFinished)
+    assert events[9] == VoiceProviderFailed("rate_limit_exceeded", True)
+    assert events[10] is None
+    assert events[11] == VoiceResponseStarted("response-2")
+    assert events[12] == VoiceResponseCancelled("response-2", {})
+    assert isinstance(events[13], VoiceSessionFinished)
 
 
 def test_qwen_codec_rejects_malformed_json_base64_and_input_alignment() -> None:

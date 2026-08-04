@@ -16,6 +16,7 @@ from .models import (
     VoiceMediaTerminal,
     VoiceProviderCapabilities,
     VoiceRuntimeResult,
+    VoiceRuntimeStats,
     VoiceSessionDescriptor,
     VoiceSessionState,
     VoiceStopReason,
@@ -83,6 +84,8 @@ class RealtimeVoiceSession(Protocol):
 
     async def send_audio(self, chunk: PcmChunk) -> None: ...
 
+    async def interrupt(self, cursor: PlaybackCursor) -> None: ...
+
     def events(self) -> AsyncIterator[VoiceModelEvent]: ...
 
     async def finish(self) -> None: ...
@@ -115,6 +118,9 @@ class VoiceSessionRuntime(Protocol):
 
     @property
     def state(self) -> VoiceSessionState: ...
+
+    @property
+    def stats(self) -> VoiceRuntimeStats: ...
 
     async def start(self) -> None: ...
 

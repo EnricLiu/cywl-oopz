@@ -20,6 +20,7 @@ from cywl_oopz.features.voice.models import (
     VoiceMediaTerminal,
     VoiceProviderCapabilities,
     VoiceRuntimeResult,
+    VoiceRuntimeStats,
     VoiceSessionDescriptor,
     VoiceSessionState,
     VoiceStopReason,
@@ -241,6 +242,9 @@ class FakeVoiceMediaSession:
         self._input_terminal = VoiceMediaTerminal(VoiceMediaEndReason.CLOSED_BY_CALLER)
         self._cursor = PlaybackCursor(0, 0, 0, 0, sample_rate)
         self.outputs: list[PcmChunk] = []
+        self.flushes: list[PlaybackCursor] = []
+        self.drain_count = 0
+        self.drain_gate: asyncio.Event | None = None
         self.closed = False
 
     async def push_input(self, frame: RemoteAudioFrame) -> None:
@@ -288,9 +292,13 @@ class FakeVoiceMediaSession:
             0,
             self._cursor.sample_rate,
         )
+        self.flushes.append(self._cursor)
         return self._cursor
 
     async def drain_output(self) -> PlaybackCursor:
+        self.drain_count += 1
+        if self.drain_gate is not None:
+            await self.drain_gate.wait()
         return self._cursor
 
     async def current_cursor(self) -> PlaybackCursor:
@@ -324,6 +332,8 @@ class FakeRealtimeVoiceSession:
 
     def __init__(self) -> None:
         self.sent_audio: list[PcmChunk] = []
+        self.interruptions: list[PlaybackCursor] = []
+        self.interrupt_error: Exception | None = None
         self._events: asyncio.Queue[VoiceModelEvent | None] = asyncio.Queue()
         self.finished = False
         self.closed = False
@@ -335,6 +345,11 @@ class FakeRealtimeVoiceSession:
 
     async def emit(self, event: VoiceModelEvent) -> None:
         await self._events.put(event)
+
+    async def interrupt(self, cursor: PlaybackCursor) -> None:
+        if self.interrupt_error is not None:
+            raise self.interrupt_error
+        self.interruptions.append(cursor)
 
     async def events(self) -> AsyncIterator[VoiceModelEvent]:
         while True:
@@ -390,10 +405,15 @@ class FakeVoiceSessionRuntime:
         self._result = VoiceRuntimeResult(VoiceStopReason.RUNTIME_ENDED)
         self.usage: dict[str, object] = {}
         self._state = VoiceSessionState.STARTING
+        self._stats = VoiceRuntimeStats()
 
     @property
     def state(self) -> VoiceSessionState:
         return self._state
+
+    @property
+    def stats(self) -> VoiceRuntimeStats:
+        return self._stats
 
     async def start(self) -> None:
         self.started = True

@@ -199,6 +199,25 @@ async def test_output_queue_preserves_audio_and_fails_on_hard_backpressure_timeo
 
 
 @pytest.mark.asyncio
+async def test_output_wait_empty_tracks_generation_and_flush_barrier() -> None:
+    queue = VoiceOutputTransitQueue(40)
+    generation = await queue.start_generation()
+    await queue.put(output_chunk(generation, 1))
+    waiting = asyncio.create_task(queue.wait_empty(generation))
+    await asyncio.sleep(0)
+    assert waiting.done() is False
+
+    await queue.get()
+    await waiting
+    await queue.put(output_chunk(generation, 2))
+    invalidated = asyncio.create_task(queue.wait_empty(generation))
+    await asyncio.sleep(0)
+    await queue.flush()
+    await invalidated
+    await queue.aclose()
+
+
+@pytest.mark.asyncio
 async def test_output_queue_close_wakes_waiting_consumer_and_producer() -> None:
     queue = VoiceOutputTransitQueue(20)
     generation = await queue.start_generation()

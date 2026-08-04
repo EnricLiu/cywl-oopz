@@ -20,7 +20,9 @@ from cywl_oopz.features.voice.events import (
     VoiceAssistantAudio,
     VoiceModelEvent,
     VoiceProviderFailed,
+    VoiceResponseCancelled,
     VoiceResponseCompleted,
+    VoiceResponseStarted,
     VoiceSessionFinished,
     VoiceSessionReady,
     VoiceTranscriptFinal,
@@ -181,6 +183,11 @@ def parse_server_event(raw: str | bytes) -> VoiceModelEvent | None:
         return VoiceUserSpeechStarted()
     if event_type == "input_audio_buffer.speech_stopped":
         return VoiceUserSpeechStopped()
+    if event_type == "response.created":
+        response = payload.get("response")
+        if not isinstance(response, dict):
+            raise VoiceProviderProtocolError("Qwen response.created omitted the response")
+        return VoiceResponseStarted(_required_identifier(response, "id", "response"))
     if event_type == "conversation.item.input_audio_transcription.completed":
         return _transcript(payload, "user")
     if event_type == "response.audio_transcript.done":
@@ -190,15 +197,17 @@ def parse_server_event(raw: str | bytes) -> VoiceModelEvent | None:
     if event_type == "response.done":
         response = payload.get("response")
         if not isinstance(response, dict):
-            response = {}
+            raise VoiceProviderProtocolError("Qwen response.done omitted the response")
         status = response.get("status")
         if status == "failed":
             return VoiceProviderFailed("response_failed", retryable=False)
-        response_id = response.get("id", payload.get("response_id", ""))
-        return VoiceResponseCompleted(
-            str(response_id or "unknown"),
-            _usage(response.get("usage")),
-        )
+        response_id = _required_identifier(response, "id", "response")
+        usage = _usage(response.get("usage"))
+        if status == "cancelled":
+            return VoiceResponseCancelled(response_id, usage)
+        if status in {"completed", "incomplete"}:
+            return VoiceResponseCompleted(response_id, usage)
+        raise VoiceProviderProtocolError("Qwen response.done used an unknown status")
     if event_type == "error":
         error = payload.get("error")
         error = error if isinstance(error, dict) else {}
@@ -217,7 +226,13 @@ def _transcript(payload: dict[str, Any], role: str) -> VoiceTranscriptFinal | No
     if not isinstance(transcript, str) or not transcript.strip():
         return None
     item_id = payload.get("item_id", "")
-    return VoiceTranscriptFinal(role, transcript.strip(), str(item_id or "")[:256])
+    response_id = payload.get("response_id", "") if role == "assistant" else ""
+    return VoiceTranscriptFinal(
+        role,
+        transcript.strip(),
+        str(item_id or "")[:256],
+        str(response_id or "")[:256],
+    )
 
 
 def _audio_delta(payload: dict[str, Any]) -> VoiceAssistantAudio:
@@ -238,7 +253,15 @@ def _audio_delta(payload: dict[str, Any]) -> VoiceAssistantAudio:
         chunk = PcmChunk(pcm, PROVIDER_OUTPUT_FORMAT, duration_ms, generation=0)
     except ValueError as exc:
         raise VoiceProviderAudioFormatError("Qwen output PCM duration is invalid") from exc
-    return VoiceAssistantAudio(chunk)
+    return VoiceAssistantAudio(
+        chunk,
+        _required_identifier(payload, "response_id", "response"),
+        _required_identifier(payload, "item_id", "item"),
+    )
+
+
+def response_cancel_event(event_id: str) -> dict[str, str]:
+    return {"event_id": event_id, "type": "response.cancel"}
 
 
 def _usage(value: object) -> dict[str, int | float]:
@@ -250,6 +273,13 @@ def _usage(value: object) -> dict[str, int | float]:
         if isinstance(item, int | float) and not isinstance(item, bool) and item >= 0:
             usage[key] = item
     return usage
+
+
+def _required_identifier(payload: dict[str, Any], key: str, kind: str) -> str:
+    value = payload.get(key)
+    if not isinstance(value, str) or not value.strip() or len(value) > 256:
+        raise VoiceProviderProtocolError(f"Qwen {kind} identifier is invalid")
+    return value
 
 
 def _require_rate(values: Any, key: str, expected: int) -> None:

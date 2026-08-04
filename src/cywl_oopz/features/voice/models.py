@@ -220,12 +220,43 @@ class VoiceRuntimeResult:
 
     reason: VoiceStopReason
     usage: dict[str, Any] = field(default_factory=dict)
+    metrics: dict[str, int | float] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class VoiceRuntimeStats:
+    """Small in-memory counters for realtime playout and interruption health."""
+
+    responses_started: int = 0
+    responses_drained: int = 0
+    barge_in_count: int = 0
+    duplicate_speech_started: int = 0
+    late_audio_dropped: int = 0
+    interrupted_transcripts_dropped: int = 0
+    output_overflows: int = 0
+    last_barge_in_flush_ms: float = 0.0
+    max_barge_in_flush_ms: float = 0.0
+
+    def as_metrics(self) -> dict[str, int | float]:
+        return {
+            "voice_responses_started": self.responses_started,
+            "voice_responses_drained": self.responses_drained,
+            "voice_barge_in_count": self.barge_in_count,
+            "voice_duplicate_speech_started": self.duplicate_speech_started,
+            "voice_late_audio_dropped": self.late_audio_dropped,
+            "voice_interrupted_transcripts_dropped": self.interrupted_transcripts_dropped,
+            "voice_output_overflows": self.output_overflows,
+            "voice_last_barge_in_flush_ms": self.last_barge_in_flush_ms,
+            "voice_max_barge_in_flush_ms": self.max_barge_in_flush_ms,
+        }
 
 
 @dataclass(frozen=True, slots=True)
 class VoiceProviderCapabilities:
     """Explicit optional operations supported by a realtime Provider."""
 
+    response_cancel: bool = False
+    context_truncate_to_playout: bool = False
     tool_calls: bool = False
     context_injection: bool = False
     proactive_response: bool = False

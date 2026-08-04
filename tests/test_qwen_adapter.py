@@ -9,11 +9,13 @@ import pytest
 from cywl_oopz.features.voice.audio import PROVIDER_INPUT_FORMAT
 from cywl_oopz.features.voice.events import (
     VoiceProviderFailed,
+    VoiceResponseCancelled,
     VoiceSessionFinished,
     VoiceSessionReady,
 )
 from cywl_oopz.features.voice.models import (
     PcmChunk,
+    PlaybackCursor,
     VoiceChannelKey,
     VoiceSessionDescriptor,
     VoiceTextAddress,
@@ -137,4 +139,40 @@ async def test_qwen_adapter_sanitizes_malformed_wire_event() -> None:
     events = [event async for event in session.events()]
 
     assert events == [VoiceProviderFailed("VoiceProviderProtocolError", False)]
+    await provider.aclose()
+
+
+@pytest.mark.asyncio
+async def test_qwen_adapter_cancels_only_an_active_response() -> None:
+    websocket = FakeWebSocket()
+    provider = QwenOmniRealtimeProvider(
+        QwenOmniConfig("wss://workspace.example/realtime", "secret", "model"),
+        "prompt",
+        connector=FakeConnector(websocket),
+    )
+    session = await provider.connect(descriptor())
+    events = session.events().__aiter__()
+    await websocket.emit(
+        {
+            "type": "response.created",
+            "response": {"id": "response-1", "status": "in_progress"},
+        }
+    )
+    await anext(events)
+
+    cursor = PlaybackCursor(1, 480, 240, 240, 24_000)
+    await session.interrupt(cursor)
+    assert [json.loads(payload)["type"] for payload in websocket.sent][-1] == "response.cancel"
+
+    await websocket.emit(
+        {
+            "type": "response.done",
+            "response": {"id": "response-1", "status": "cancelled"},
+        }
+    )
+    assert isinstance(await anext(events), VoiceResponseCancelled)
+    sent_count = len(websocket.sent)
+    await session.interrupt(cursor)
+    assert len(websocket.sent) == sent_count
+
     await provider.aclose()
