@@ -706,16 +706,16 @@ class BotApplication:
                     raise ConfigurationError(
                         "Agent or voice mode requires an enabled application-default LLM model"
                     )
-                now = datetime.now(UTC)
-                abandoned = await self.agent_runs.abandon_stale(
-                    now - timedelta(seconds=self.settings.agent.stale_run_after_seconds),
-                    now,
-                )
-                if abandoned:
-                    logger.warning("Marked stale Agent runs abandoned: count=%s", abandoned)
-            if agent_runtime_enabled:
-                await self.delegated_task_scheduler.start()
-                await self.delegated_task_text_fallback.start()
+            now = datetime.now(UTC)
+            abandoned = await self.agent_runs.abandon_stale(
+                now - timedelta(seconds=self.settings.agent.stale_run_after_seconds),
+                now,
+            )
+            if abandoned:
+                logger.warning("Marked stale Agent runs abandoned: count=%s", abandoned)
+            # Accepted voice tasks outlive the feature flag that created them.
+            await self.delegated_task_scheduler.start()
+            await self.delegated_task_text_fallback.start()
             logger.info("Starting OOPZ client")
             await self.bot.run()
         finally:

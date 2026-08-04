@@ -292,7 +292,9 @@ async def test_delegated_task_migration_repository_and_state_machine_on_postgres
                 await connection.scalar(
                     text(
                         "SELECT EXISTS (SELECT 1 FROM pg_type "
-                        "WHERE typname='delegated_task_status')"
+                        "JOIN pg_namespace ON pg_namespace.oid = pg_type.typnamespace "
+                        "WHERE pg_type.typname='delegated_task_status' "
+                        "AND pg_namespace.nspname=current_schema())"
                     )
                 )
                 is False

@@ -327,9 +327,16 @@ async def test_browser_startup_failure_degrades_health_without_stopping_bot(
     async def unavailable() -> None:
         raise BrowserUnavailableError
 
+    async def no_stale_agent_runs(before, now) -> int:
+        del before, now
+        return 0
+
     monkeypatch.setattr(application.database, "start", no_op)
     monkeypatch.setattr(application.database, "close", no_op)
     monkeypatch.setattr(application.voice_sessions, "recover_stale", no_stale_voice_sessions)
+    monkeypatch.setattr(application.agent_runs, "abandon_stale", no_stale_agent_runs)
+    monkeypatch.setattr(application.delegated_task_scheduler, "start", no_op)
+    monkeypatch.setattr(application.delegated_task_text_fallback, "start", no_op)
     assert application.browser is not None
     monkeypatch.setattr(application.browser, "start", unavailable)
 
@@ -342,7 +349,7 @@ async def test_browser_startup_failure_degrades_health_without_stopping_bot(
 
 
 @pytest.mark.asyncio
-async def test_application_recovers_stale_voice_sessions_before_oopz_even_when_disabled(
+async def test_application_keeps_delegated_runtime_active_when_agent_and_voice_are_disabled(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(application_module, "OopzBot", FakeOopzBot)
@@ -357,6 +364,20 @@ async def test_application_recovers_stale_voice_sessions_before_oopz_even_when_d
         events.append("recover_voice")
         return 2
 
+    async def abandon_runs(before, now) -> int:
+        assert before < now
+        events.append("abandon_runs")
+        return 1
+
+    async def start_scheduler() -> None:
+        events.append("start_scheduler")
+
+    async def start_fallback() -> None:
+        events.append("start_fallback")
+
+    async def unexpected_catalog_reload() -> None:
+        events.append("reload_catalog")
+
     async def run_bot() -> None:
         events.append("run_oopz")
         application.bot.did_run = True
@@ -364,11 +385,21 @@ async def test_application_recovers_stale_voice_sessions_before_oopz_even_when_d
     monkeypatch.setattr(application.database, "start", no_op)
     monkeypatch.setattr(application.database, "close", no_op)
     monkeypatch.setattr(application.voice_sessions, "recover_stale", recover_stale)
+    monkeypatch.setattr(application.agent_models, "reload", unexpected_catalog_reload)
+    monkeypatch.setattr(application.agent_runs, "abandon_stale", abandon_runs)
+    monkeypatch.setattr(application.delegated_task_scheduler, "start", start_scheduler)
+    monkeypatch.setattr(application.delegated_task_text_fallback, "start", start_fallback)
     monkeypatch.setattr(application.bot, "run", run_bot)
 
     await application.run()
 
-    assert events == ["recover_voice", "run_oopz"]
+    assert events == [
+        "recover_voice",
+        "abandon_runs",
+        "start_scheduler",
+        "start_fallback",
+        "run_oopz",
+    ]
     assert application.bot.did_run is True
 
 
