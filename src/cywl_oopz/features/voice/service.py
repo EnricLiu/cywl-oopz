@@ -53,6 +53,9 @@ logger = logging.getLogger(__name__)
 
 _LEASE_RELEASE_RETRY_DELAYS = (0.1, 0.25, 0.5)
 _LEASE_RELEASE_RETRY_TIMEOUT_SECONDS = 0.5
+_SESSION_FINISH_RETRY_DELAYS = (0.05, 0.15, 0.3)
+_SESSION_FINISH_RETRY_TIMEOUT_SECONDS = 0.25
+_SESSION_FINISH_SHUTDOWN_DRAIN_SECONDS = 0.4
 
 
 @dataclass(slots=True)
@@ -66,6 +69,7 @@ class _ActiveVoiceSession:
     runtime: VoiceSessionRuntime | None = None
     configuration: VoiceStartConfiguration | None = None
     persisted: bool = False
+    persisted_finished: bool = False
     usage: dict[str, Any] = field(default_factory=dict)
     runtime_stats: VoiceRuntimeStats = field(default_factory=VoiceRuntimeStats)
     status_sink: VoiceSessionStatusSink = field(default_factory=NoopVoiceSessionStatusSink)
@@ -75,6 +79,7 @@ class _ActiveVoiceSession:
     cleanup_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     done: asyncio.Event = field(default_factory=asyncio.Event)
     lease_release_task: asyncio.Task[None] | None = None
+    session_finish_task: asyncio.Task[None] | None = None
 
 
 class VoiceConversationService:
@@ -98,6 +103,7 @@ class VoiceConversationService:
         self._lock = asyncio.Lock()
         self._close_lock = asyncio.Lock()
         self._lease_release_tasks: set[asyncio.Task[None]] = set()
+        self._session_finish_tasks: set[asyncio.Task[None]] = set()
         self._active: _ActiveVoiceSession | None = None
         self._closed = False
 
@@ -269,6 +275,7 @@ class VoiceConversationService:
             if slot is not None:
                 await self._request_stop(slot, VoiceStopReason.SHUTDOWN)
                 await self._await_done_or_force(slot, VoiceStopReason.SHUTDOWN)
+            await self._drain_session_finish_tasks()
             await self._cancel_lease_release_tasks()
 
     async def _await_done_or_force(
@@ -415,7 +422,7 @@ class VoiceConversationService:
         state: VoiceSessionState,
         reason: VoiceStopReason,
     ) -> None:
-        if not slot.persisted:
+        if not slot.persisted or slot.persisted_finished:
             return
         persisted_status = (
             PersistedVoiceSessionStatus.FAILED
@@ -441,6 +448,112 @@ class VoiceConversationService:
                 opaque_ref(str(slot.session_id)),
                 exception_kind(exc),
             )
+        else:
+            slot.persisted_finished = True
+            return
+        self._schedule_session_finish_retry(slot, persisted_status, reason)
+
+    def _schedule_session_finish_retry(
+        self,
+        slot: _ActiveVoiceSession,
+        status: PersistedVoiceSessionStatus,
+        reason: VoiceStopReason,
+    ) -> None:
+        current = slot.session_finish_task
+        if current is not None and not current.done():
+            return
+        task = asyncio.create_task(
+            self._retry_finish_session(slot, status, reason),
+            name=f"voice-session-finish:{slot.session_id}",
+        )
+        slot.session_finish_task = task
+        self._session_finish_tasks.add(task)
+        task.add_done_callback(lambda completed: self._session_finish_done(slot, completed))
+
+    async def _retry_finish_session(
+        self,
+        slot: _ActiveVoiceSession,
+        status: PersistedVoiceSessionStatus,
+        reason: VoiceStopReason,
+    ) -> None:
+        for attempt, delay in enumerate(_SESSION_FINISH_RETRY_DELAYS, start=1):
+            await asyncio.sleep(delay)
+            if slot.persisted_finished:
+                return
+            try:
+                async with asyncio.timeout(_SESSION_FINISH_RETRY_TIMEOUT_SECONDS):
+                    await self._sessions.finish(
+                        slot.session_id,
+                        status,
+                        reason.value,
+                        usage=slot.usage,
+                    )
+            except TimeoutError:
+                logger.warning(
+                    "Voice session finish retry timed out: session=%s attempt=%s",
+                    opaque_ref(str(slot.session_id)),
+                    attempt,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "Voice session finish retry failed: session=%s attempt=%s error=%s",
+                    opaque_ref(str(slot.session_id)),
+                    attempt,
+                    exception_kind(exc),
+                )
+            else:
+                slot.persisted_finished = True
+                logger.info(
+                    "Voice session terminal state persisted after retry: session=%s attempt=%s",
+                    opaque_ref(str(slot.session_id)),
+                    attempt,
+                )
+                return
+        logger.error(
+            "Voice session finish retries exhausted: session=%s",
+            opaque_ref(str(slot.session_id)),
+        )
+
+    def _session_finish_done(
+        self,
+        slot: _ActiveVoiceSession,
+        task: asyncio.Task[None],
+    ) -> None:
+        self._session_finish_tasks.discard(task)
+        if slot.session_finish_task is task:
+            slot.session_finish_task = None
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            logger.error(
+                "Voice session finish task failed unexpectedly: session=%s error=%s",
+                opaque_ref(str(slot.session_id)),
+                exception_kind(error),
+            )
+
+    async def _drain_session_finish_tasks(self) -> None:
+        tasks = tuple(self._session_finish_tasks)
+        if not tasks:
+            return
+        _, pending = await asyncio.wait(
+            tasks,
+            timeout=min(
+                _SESSION_FINISH_SHUTDOWN_DRAIN_SECONDS,
+                self._settings.stop_timeout_seconds * 0.25,
+            ),
+        )
+        for task in pending:
+            task.cancel()
+        if pending:
+            _, still_pending = await asyncio.wait(pending, timeout=0.1)
+            if still_pending:
+                logger.warning(
+                    "Voice session finish tasks exceeded shutdown budget: count=%s",
+                    len(still_pending),
+                )
 
     async def _release_lease(self, slot: _ActiveVoiceSession) -> None:
         lease = slot.lease

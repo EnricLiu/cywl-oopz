@@ -600,3 +600,86 @@ async def test_voice_service_close_cancels_pending_lease_release_retry() -> None
 
     assert lease.attempts == 1
     assert not conversations._lease_release_tasks
+
+
+@pytest.mark.asyncio
+async def test_voice_service_retries_timed_out_terminal_persistence() -> None:
+    access = FakeVoiceAccessGateway()
+    access.channels[("area", "person")] = "voice"
+    runtimes = FakeVoiceSessionRuntimeFactory()
+
+    class RetryableSessionRepository(FakeVoiceSessionRepository):
+        def __init__(self) -> None:
+            super().__init__()
+            self.finish_attempts = 0
+            self.first_finish_cancelled = asyncio.Event()
+
+        async def finish(self, *args, **kwargs) -> None:
+            self.finish_attempts += 1
+            if self.finish_attempts == 1:
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    self.first_finish_cancelled.set()
+            await super().finish(*args, **kwargs)
+
+    sessions = RetryableSessionRepository()
+    conversations = VoiceConversationService(
+        settings(),
+        access,
+        runtimes,
+        FakeVoiceConfigurationRepository(),
+        sessions,
+    )
+    active = await conversations.start(request())
+    runtimes.runtimes[0].usage = {"input_tokens": 7, "output_tokens": 3}
+
+    stopped = await conversations.stop("person")
+
+    assert stopped.active is False
+    assert sessions.first_finish_cancelled.is_set()
+    assert sessions.finished == []
+    async with asyncio.timeout(1):
+        while not sessions.finished:
+            await asyncio.sleep(0.01)
+    assert sessions.finish_attempts == 2
+    assert sessions.finished == [(active.session_id, PersistedVoiceSessionStatus.ENDED, "command")]
+    assert sessions.finished_usage == [{"input_tokens": 7, "output_tokens": 3}]
+    await conversations.aclose()
+    assert not conversations._session_finish_tasks
+
+
+@pytest.mark.asyncio
+async def test_voice_service_shutdown_drains_terminal_persistence_retry() -> None:
+    access = FakeVoiceAccessGateway()
+    access.channels[("area", "person")] = "voice"
+    runtimes = FakeVoiceSessionRuntimeFactory()
+
+    class TransientSessionRepository(FakeVoiceSessionRepository):
+        def __init__(self) -> None:
+            super().__init__()
+            self.finish_attempts = 0
+
+        async def finish(self, *args, **kwargs) -> None:
+            self.finish_attempts += 1
+            if self.finish_attempts == 1:
+                raise RuntimeError("fixture transient database failure")
+            await super().finish(*args, **kwargs)
+
+    sessions = TransientSessionRepository()
+    conversations = VoiceConversationService(
+        settings(),
+        access,
+        runtimes,
+        FakeVoiceConfigurationRepository(),
+        sessions,
+    )
+    active = await conversations.start(request())
+    runtimes.runtimes[0].usage = {"total_tokens": 11}
+
+    await conversations.aclose()
+
+    assert sessions.finish_attempts == 2
+    assert sessions.finished == [(active.session_id, PersistedVoiceSessionStatus.ENDED, "shutdown")]
+    assert sessions.finished_usage == [{"total_tokens": 11}]
+    assert not conversations._session_finish_tasks
