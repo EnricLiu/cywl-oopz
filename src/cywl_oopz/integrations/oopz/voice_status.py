@@ -47,6 +47,7 @@ class OopzVoiceStatusRenderer:
         turns = _metric(status, "voice_responses_drained")
         task_calls = _metric(status, "voice_task_control_calls")
         notifications = _metric(status, "voice_task_notifications_presented")
+        reconnects = _metric(status, "voice_provider_reconnects")
         if status.active:
             title = f"🎙️ **初音未来语音** · {model} · {state}"
         elif status.error_message:
@@ -60,6 +61,8 @@ class OopzVoiceStatusRenderer:
             facts.append(f"后台调用 {task_calls}")
         if notifications:
             facts.append(f"通知 {notifications}")
+        if reconnects:
+            facts.append(f"重连 {reconnects}")
         total_tokens = _usage_total(status)
         if total_tokens:
             facts.append(f"{_compact_number(total_tokens)} tokens")

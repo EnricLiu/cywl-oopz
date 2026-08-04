@@ -235,6 +235,8 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
         self._stats = VoiceRuntimeStats()
         self._last_activity = time.monotonic()
         self._started_at = self._last_activity
+        self._provider_connect_started_at = self._last_activity
+        self._recovery_started_at: float | None = None
         self._last_user_speech_stopped = self._last_activity - _NOTIFICATION_SILENCE_SECONDS
         self._last_notification_attempt = self._last_activity - _NOTIFICATION_COOLDOWN_SECONDS
         self._mailbox_available_pending = False
@@ -360,6 +362,11 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
     async def _connect_provider(self) -> None:
         last_error: Exception | None = None
         for attempt in range(1, self._settings.provider_connect_attempts + 1):
+            self._provider_connect_started_at = time.monotonic()
+            self._stats = replace(
+                self._stats,
+                provider_connect_attempts=self._stats.provider_connect_attempts + 1,
+            )
             provider_context = replace(
                 self._context,
                 recovery_context=VoiceRecoveryContext(
@@ -398,12 +405,22 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
             else:
                 self._provider = provider
                 self._provider_session = session
+                self._stats = replace(
+                    self._stats,
+                    provider_connections=self._stats.provider_connections + 1,
+                )
                 return
         raise VoiceProviderDisconnectedError(
             "Voice Provider connection attempts exhausted"
         ) from last_error
 
     async def _recover_provider(self, *, playout_flushed: bool = False) -> bool:
+        if self._recovery_started_at is not None:
+            self._stats = replace(
+                self._stats,
+                provider_recovery_failures=self._stats.provider_recovery_failures + 1,
+            )
+        self._recovery_started_at = time.monotonic()
         self._set_state(VoiceSessionState.RECOVERING)
         if self._proactive_task_notices:
             await self._defer_pending_proactive_notifications()
@@ -433,6 +450,11 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
         try:
             await self._connect_provider()
         except Exception as exc:
+            self._stats = replace(
+                self._stats,
+                provider_recovery_failures=self._stats.provider_recovery_failures + 1,
+            )
+            self._recovery_started_at = None
             logger.warning(
                 "Voice Provider recovery exhausted: session=%s error=%s",
                 opaque_ref(str(self._context.descriptor.session_id)),
@@ -510,6 +532,39 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
             model_event = event.event
             self._last_activity = time.monotonic()
             if isinstance(model_event, VoiceSessionReady):
+                now = time.monotonic()
+                ready_ms = (now - self._provider_connect_started_at) * 1000
+                recovery_started_at = self._recovery_started_at
+                recovery_ms = (
+                    (now - recovery_started_at) * 1000 if recovery_started_at is not None else 0.0
+                )
+                self._stats = replace(
+                    self._stats,
+                    initial_provider_ready_ms=(self._stats.initial_provider_ready_ms or ready_ms),
+                    last_provider_ready_ms=ready_ms,
+                    provider_reconnects=(
+                        self._stats.provider_reconnects + int(recovery_started_at is not None)
+                    ),
+                    last_provider_recovery_ms=(
+                        recovery_ms
+                        if recovery_started_at is not None
+                        else self._stats.last_provider_recovery_ms
+                    ),
+                    max_provider_recovery_ms=max(
+                        self._stats.max_provider_recovery_ms,
+                        recovery_ms,
+                    ),
+                )
+                self._recovery_started_at = None
+                logger.info(
+                    "Voice Provider ready: session=%s model=%s reconnect=%s "
+                    "ready_ms=%.1f recovery_ms=%.1f",
+                    opaque_ref(str(self._context.descriptor.session_id)),
+                    self._context.configuration.model.alias,
+                    recovery_started_at is not None,
+                    ready_ms,
+                    recovery_ms,
+                )
                 self._set_state(
                     VoiceSessionState.USER_SPEAKING
                     if self._user_speaking
@@ -1043,6 +1098,11 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
             return
         if event.provider_item_id:
             active.provider_item_id = event.provider_item_id
+        if self._stats.first_provider_audio_ms == 0:
+            self._stats = replace(
+                self._stats,
+                first_provider_audio_ms=(time.monotonic() - self._started_at) * 1000,
+            )
         self._set_state(VoiceSessionState.SPEAKING)
         try:
             self._audio_events.put_nowait(event)
@@ -1067,6 +1127,12 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
             )
 
     async def _handle_final_transcript(self, event: VoiceTranscriptFinal) -> None:
+        if self._stats.first_final_transcript_ms == 0:
+            self._stats = replace(
+                self._stats,
+                first_final_transcript_ms=(time.monotonic() - self._started_at) * 1000,
+            )
+            self._publish_status()
         if event.role == "user":
             await self._persist_transcript(event)
             return
@@ -1288,8 +1354,23 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
         try:
             async for frame in media.input_frames():
                 self._last_activity = time.monotonic()
+                if frame.source_dropped_frames:
+                    self._stats = replace(
+                        self._stats,
+                        source_audio_frames_dropped=(
+                            self._stats.source_audio_frames_dropped + frame.source_dropped_frames
+                        ),
+                    )
                 for packet in ingress.push(frame):
                     dropped = self._input.put(packet)
+                    self._stats = replace(
+                        self._stats,
+                        input_packets_dropped=(self._stats.input_packets_dropped + int(dropped)),
+                        max_input_queue_depth=max(
+                            self._stats.max_input_queue_depth,
+                            self._input.qsize,
+                        ),
+                    )
                     if dropped:
                         logger.warning(
                             "Voice Provider input queue dropped oldest packet: session=%s depth=%d",
@@ -1355,6 +1436,14 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                             self._stats,
                             late_audio_dropped=self._stats.late_audio_dropped + 1,
                         )
+                    else:
+                        self._stats = replace(
+                            self._stats,
+                            max_output_queue_depth=max(
+                                self._stats.max_output_queue_depth,
+                                self._output.qsize,
+                            ),
+                        )
                 finally:
                     self._audio_events.task_done()
         except VoiceAudioQueueClosedError:
@@ -1394,6 +1483,12 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                     continue
                 try:
                     await media.write_output(chunk)
+                    if self._stats.first_oopz_output_ms == 0:
+                        self._stats = replace(
+                            self._stats,
+                            first_oopz_output_ms=(time.monotonic() - self._started_at) * 1000,
+                        )
+                        self._publish_status()
                 except Exception:
                     if chunk.generation != self._output.generation:
                         logger.debug(
@@ -1478,6 +1573,17 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
 
     def _complete(self, reason: VoiceStopReason) -> None:
         if self._result is not None and not self._result.done():
+            logger.info(
+                "Voice runtime completed: session=%s reason=%s responses=%d reconnects=%d "
+                "first_oopz_output_ms=%.1f input_dropped=%d output_overflows=%d",
+                opaque_ref(str(self._context.descriptor.session_id)),
+                reason.value,
+                self._stats.responses_drained,
+                self._stats.provider_reconnects,
+                self._stats.first_oopz_output_ms,
+                self._stats.input_packets_dropped,
+                self._stats.output_overflows,
+            )
             self._result.set_result(
                 VoiceRuntimeResult(
                     reason,

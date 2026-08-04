@@ -257,6 +257,21 @@ class VoiceRuntimeStats:
     task_notifications_presented: int = 0
     task_notifications_deferred: int = 0
     task_notifications_text_fallback: int = 0
+    provider_connect_attempts: int = 0
+    provider_connections: int = 0
+    provider_reconnects: int = 0
+    provider_recovery_failures: int = 0
+    initial_provider_ready_ms: float = 0.0
+    last_provider_ready_ms: float = 0.0
+    last_provider_recovery_ms: float = 0.0
+    max_provider_recovery_ms: float = 0.0
+    first_final_transcript_ms: float = 0.0
+    first_provider_audio_ms: float = 0.0
+    first_oopz_output_ms: float = 0.0
+    input_packets_dropped: int = 0
+    source_audio_frames_dropped: int = 0
+    max_input_queue_depth: int = 0
+    max_output_queue_depth: int = 0
 
     def as_metrics(self) -> dict[str, int | float]:
         return {
@@ -277,6 +292,21 @@ class VoiceRuntimeStats:
             "voice_task_notifications_presented": self.task_notifications_presented,
             "voice_task_notifications_deferred": self.task_notifications_deferred,
             "voice_task_notifications_text_fallback": self.task_notifications_text_fallback,
+            "voice_provider_connect_attempts": self.provider_connect_attempts,
+            "voice_provider_connections": self.provider_connections,
+            "voice_provider_reconnects": self.provider_reconnects,
+            "voice_provider_recovery_failures": self.provider_recovery_failures,
+            "voice_initial_provider_ready_ms": self.initial_provider_ready_ms,
+            "voice_last_provider_ready_ms": self.last_provider_ready_ms,
+            "voice_last_provider_recovery_ms": self.last_provider_recovery_ms,
+            "voice_max_provider_recovery_ms": self.max_provider_recovery_ms,
+            "voice_first_final_transcript_ms": self.first_final_transcript_ms,
+            "voice_first_provider_audio_ms": self.first_provider_audio_ms,
+            "voice_first_oopz_output_ms": self.first_oopz_output_ms,
+            "voice_input_packets_dropped": self.input_packets_dropped,
+            "voice_source_audio_frames_dropped": self.source_audio_frames_dropped,
+            "voice_max_input_queue_depth": self.max_input_queue_depth,
+            "voice_max_output_queue_depth": self.max_output_queue_depth,
         }
 
 

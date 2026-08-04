@@ -210,14 +210,55 @@ async def test_realtime_runtime_streams_audio_and_persists_final_turns() -> None
         (runtime._context.descriptor.session_id, 2, VoiceTurnRole.ASSISTANT, "你好呀"),
     ]
     assert runtime.state is VoiceSessionState.LISTENING
+    assert runtime.stats.provider_connect_attempts == 1
+    assert runtime.stats.provider_connections == 1
+    assert runtime.stats.initial_provider_ready_ms > 0
+    assert runtime.stats.first_final_transcript_ms > 0
+    assert runtime.stats.first_provider_audio_ms > 0
+    assert runtime.stats.first_oopz_output_ms > 0
+    assert runtime.stats.max_input_queue_depth >= 1
+    assert runtime.stats.max_output_queue_depth >= 1
 
     await runtime.request_stop(VoiceStopReason.COMMAND)
     result = await runtime.wait_finished()
     assert result.reason is VoiceStopReason.COMMAND
     assert result.usage == {"input_tokens": 3, "output_tokens": 2}
+    assert result.metrics["voice_first_oopz_output_ms"] > 0
     await runtime.aclose()
     assert media.closed is True
     assert providers[0].closed is True
+
+
+@pytest.mark.asyncio
+async def test_realtime_runtime_reports_bounded_input_queue_pressure() -> None:
+    runtime, media_gateway, _, providers = await runtime_fixture()
+    starting = asyncio.create_task(runtime.start())
+    await wait_until(lambda: bool(providers and providers[0].sessions))
+    media = media_gateway.sessions[0]
+    source = VoiceAudioFormat(48_000, 2, "f32le")
+    frame_pcm = np.zeros((1_024, 2), dtype="<f4").tobytes()
+
+    for sequence in range(30):
+        await media.push_input(
+            RemoteAudioFrame(
+                frame_pcm,
+                source,
+                sequence,
+                1.0 + sequence * 0.02,
+                source_dropped_frames=2 if sequence == 0 else 0,
+            )
+        )
+    await wait_until(lambda: runtime.stats.input_packets_dropped > 0)
+
+    assert runtime.stats.max_input_queue_depth == runtime._input.max_chunks
+    assert runtime.stats.source_audio_frames_dropped == 2
+    await providers[0].sessions[0].emit(VoiceSessionReady())
+    await starting
+    await runtime.request_stop(VoiceStopReason.COMMAND)
+    result = await runtime.wait_finished()
+    assert result.metrics["voice_input_packets_dropped"] > 0
+    assert result.metrics["voice_max_input_queue_depth"] == runtime._input.max_chunks
+    await runtime.aclose()
 
 
 @pytest.mark.asyncio
@@ -833,9 +874,67 @@ async def test_realtime_runtime_recovers_retryable_provider_disconnect() -> None
     assert sessions.recovering == [runtime._context.descriptor.session_id]
     assert sessions.active == [runtime._context.descriptor.session_id]
     assert providers[0].closed is True
+    assert runtime.stats.provider_connections == 2
+    assert runtime.stats.provider_reconnects == 1
+    assert runtime.stats.provider_recovery_failures == 0
+    assert runtime.stats.last_provider_recovery_ms > 0
+    assert runtime.stats.max_provider_recovery_ms >= runtime.stats.last_provider_recovery_ms
 
     await runtime.request_stop(VoiceStopReason.COMMAND)
     await runtime.wait_finished()
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_realtime_runtime_recovery_metrics_ignore_persistence_warning() -> None:
+    runtime, _, sessions, providers = await runtime_fixture()
+
+    async def fail_mark_recovering(session_id):
+        del session_id
+        raise RuntimeError("fixture persistence failure")
+
+    sessions.mark_recovering = fail_mark_recovering
+    starting = asyncio.create_task(runtime.start())
+    await wait_until(lambda: bool(providers and providers[0].sessions))
+    await providers[0].sessions[0].emit(VoiceSessionReady())
+    await starting
+
+    await providers[0].sessions[0].emit(VoiceProviderFailed("connection_closed", True))
+    await wait_until(lambda: len(providers) == 2 and bool(providers[1].sessions))
+    await providers[1].sessions[0].emit(VoiceSessionReady())
+    await wait_until(lambda: runtime.state is VoiceSessionState.LISTENING)
+
+    assert runtime.stats.provider_reconnects == 1
+    assert runtime.stats.provider_recovery_failures == 0
+    assert runtime.stats.last_provider_recovery_ms > 0
+    await runtime.request_stop(VoiceStopReason.COMMAND)
+    await runtime.wait_finished()
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_realtime_runtime_counts_exhausted_provider_recovery() -> None:
+    runtime, _, _, providers = await runtime_fixture()
+    starting = asyncio.create_task(runtime.start())
+    await wait_until(lambda: bool(providers and providers[0].sessions))
+    first_session = providers[0].sessions[0]
+    await first_session.emit(VoiceSessionReady())
+    await starting
+
+    class FailingProvider(FakeRealtimeVoiceProvider):
+        async def connect(self, descriptor):
+            del descriptor
+            raise VoiceProviderDisconnectedError("fixture reconnect failure")
+
+    runtime._settings = settings(CYWL_VOICE_PROVIDER_CONNECT_ATTEMPTS="1")
+    runtime._provider_builder = lambda context: FailingProvider()
+    await first_session.emit(VoiceProviderFailed("connection_closed", True))
+    result = await runtime.wait_finished()
+
+    assert result.reason is VoiceStopReason.PROVIDER_FAILED
+    assert runtime.stats.provider_reconnects == 0
+    assert runtime.stats.provider_recovery_failures == 1
+    assert runtime.stats.provider_connect_attempts == 2
     await runtime.aclose()
 
 
