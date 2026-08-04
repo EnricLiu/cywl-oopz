@@ -72,14 +72,27 @@ class InProcessDelegatedTaskWakeup:
 
     def __init__(self) -> None:
         self._event = asyncio.Event()
+        self._task_ids: set[UUID] = set()
+        self._lock = asyncio.Lock()
 
     async def wake(self, task_id: UUID) -> None:
-        del task_id
-        self._event.set()
+        async with self._lock:
+            self._task_ids.add(task_id)
+            self._event.set()
 
-    async def wait(self) -> None:
-        await self._event.wait()
-        self._event.clear()
+    async def wait(self, timeout_seconds: float) -> tuple[UUID, ...]:
+        if timeout_seconds <= 0:
+            raise ValueError("Delegated task wake timeout must be positive")
+        try:
+            async with asyncio.timeout(timeout_seconds):
+                await self._event.wait()
+        except TimeoutError:
+            return ()
+        async with self._lock:
+            task_ids = tuple(self._task_ids)
+            self._task_ids.clear()
+            self._event.clear()
+            return task_ids
 
 
 class VoiceDelegatedTaskService:

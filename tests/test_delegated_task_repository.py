@@ -154,6 +154,16 @@ async def test_delegated_task_migration_repository_and_state_machine_on_postgres
         )
         assert [task.alias for task in listed] == ["T3", "T2", "T1"]
 
+        assert await repository.get(listed[0].id) == listed[0]
+        assert (
+            await repository.claim_next(
+                "worker-excluded",
+                frozenset({DelegatedTaskLane.READ_PARALLEL}),
+                excluded_owner_person_ids=frozenset({"owner"}),
+            )
+            is None
+        )
+
         claimed = await repository.claim_next(
             "worker-1",
             frozenset({DelegatedTaskLane.READ_PARALLEL}),

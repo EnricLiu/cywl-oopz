@@ -28,6 +28,8 @@ from .features.agent.commands import (
 )
 from .features.agent.context import AgentContextBuilder
 from .features.agent.delegation.repository import SqlAlchemyDelegatedTaskRepository
+from .features.agent.delegation.runner import DelegatedAgentTaskRunner
+from .features.agent.delegation.scheduler import DelegatedTaskScheduler
 from .features.agent.delegation.service import (
     InProcessDelegatedTaskWakeup,
     VoiceDelegatedTaskService,
@@ -477,6 +479,31 @@ class BotApplication:
             self.delegated_task_repository,
             self.delegated_task_wakeup,
         )
+        self.delegated_task_runner = DelegatedAgentTaskRunner(
+            settings.agent,
+            self.delegated_task_repository,
+            self.delegated_task_wakeup,
+            self.agent_run_service,
+            self.agent_catalog,
+            self.agent_threads,
+            self.agent_context,
+            self.agent_tool_registry,
+            self.agent_skill_repository if settings.agent.skills_enabled else None,
+            self.agent_skill_availability if settings.agent.skills_enabled else None,
+            max_task_retries=settings.agent.provider_max_retries,
+            heartbeat_interval_seconds=max(
+                1.0,
+                min(10.0, settings.agent.stale_run_after_seconds / 3),
+            ),
+        )
+        self.delegated_task_scheduler = DelegatedTaskScheduler(
+            self.delegated_task_repository,
+            self.delegated_task_wakeup,
+            self.delegated_task_runner,
+            read_concurrency=settings.voice.read_task_concurrency,
+            per_user_concurrency=settings.voice.per_user_task_concurrency,
+            reconcile_seconds=settings.voice.mailbox_poll_seconds,
+        )
         self.voice_task_tools = VoiceTaskControlTools(self.voice_delegated_tasks)
         self.voice_runtimes = RealtimeVoiceSessionRuntimeFactoryImpl(
             settings.voice,
@@ -655,6 +682,8 @@ class BotApplication:
                 )
                 if abandoned:
                     logger.warning("Marked stale Agent runs abandoned: count=%s", abandoned)
+            if self.settings.agent.enabled or self.settings.voice.enabled:
+                await self.delegated_task_scheduler.start()
             logger.info("Starting OOPZ client")
             await self.bot.run()
         finally:
@@ -662,6 +691,7 @@ class BotApplication:
             await self.chat_tasks.close()
             await self.agent_summary_tasks.close()
             await self.voice_conversations.aclose()
+            await self.delegated_task_scheduler.aclose()
             if self.music is not None:
                 await self.music.aclose()
             await self.voice_leases.aclose()

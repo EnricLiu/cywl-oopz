@@ -171,6 +171,14 @@ class SqlAlchemyDelegatedTaskRepository:
         except SQLAlchemyError as exc:
             raise _database_error("read delegated task", exc) from exc
 
+    async def get(self, task_id: UUID) -> DelegatedAgentTask | None:
+        try:
+            async with self._sessions() as session:
+                record = await session.get(DelegatedAgentTaskRecord, task_id)
+                return _task(record) if record is not None else None
+        except SQLAlchemyError as exc:
+            raise _database_error("read delegated task for scheduler", exc) from exc
+
     async def list_for_owner(
         self,
         owner_person_id: str,
@@ -237,6 +245,8 @@ class SqlAlchemyDelegatedTaskRepository:
         self,
         worker_id: str,
         lanes: frozenset[DelegatedTaskLane],
+        *,
+        excluded_owner_person_ids: frozenset[str] = frozenset(),
     ) -> DelegatedAgentTask | None:
         normalized_worker = worker_id.strip()
         if not normalized_worker or len(normalized_worker) > 128 or not lanes:
@@ -245,7 +255,7 @@ class SqlAlchemyDelegatedTaskRepository:
         try:
             async with self._sessions() as session:
                 async with session.begin():
-                    record = await session.scalar(
+                    statement = (
                         select(DelegatedAgentTaskRecord)
                         .where(
                             DelegatedAgentTaskRecord.status.in_(
@@ -264,6 +274,13 @@ class SqlAlchemyDelegatedTaskRepository:
                         .with_for_update(skip_locked=True)
                         .limit(1)
                     )
+                    if excluded_owner_person_ids:
+                        statement = statement.where(
+                            DelegatedAgentTaskRecord.owner_person_id.not_in(
+                                excluded_owner_person_ids
+                            )
+                        )
+                    record = await session.scalar(statement)
                     if record is None:
                         return None
                     record.status = DelegatedTaskStatus.RUNNING

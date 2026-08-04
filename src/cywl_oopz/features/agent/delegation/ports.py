@@ -33,6 +33,9 @@ class DelegatedTaskRepository(Protocol):
         owner_person_id: str,
     ) -> DelegatedAgentTask | None: ...
 
+    async def get(self, task_id: UUID) -> DelegatedAgentTask | None:
+        """Load one task for trusted scheduler coordination."""
+
     async def list_for_owner(
         self,
         owner_person_id: str,
@@ -49,6 +52,8 @@ class DelegatedTaskRepository(Protocol):
         self,
         worker_id: str,
         lanes: frozenset[DelegatedTaskLane],
+        *,
+        excluded_owner_person_ids: frozenset[str] = frozenset(),
     ) -> DelegatedAgentTask | None: ...
 
     async def heartbeat(self, task_id: UUID, worker_id: str) -> bool: ...
@@ -104,3 +109,5 @@ class DelegatedTaskRepository(Protocol):
 
 class DelegatedTaskWakeup(Protocol):
     async def wake(self, task_id: UUID) -> None: ...
+
+    async def wait(self, timeout_seconds: float) -> tuple[UUID, ...]: ...
