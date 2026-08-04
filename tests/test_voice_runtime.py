@@ -628,7 +628,7 @@ async def test_realtime_task_control_does_not_block_audio_or_duplicate_calls() -
             return {"ok": True, "accepted": True, "task": "T1"}
 
     controls = GatedTaskControls()
-    runtime, media_gateway, _, providers = await runtime_fixture(controls)
+    runtime, media_gateway, sessions, providers = await runtime_fixture(controls)
     starting = asyncio.create_task(runtime.start())
     await wait_until(lambda: bool(providers and providers[0].sessions))
     provider_session = providers[0].sessions[0]
@@ -655,9 +655,38 @@ async def test_realtime_task_control_does_not_block_audio_or_duplicate_calls() -
     ]
     assert runtime.stats.task_control_calls == 1
     assert runtime.stats.task_control_failures == 0
-    await provider_session.emit(VoiceUserSpeechStarted())
-    await provider_session.emit(VoiceUserSpeechStopped())
-    await wait_until(lambda: runtime.state is VoiceSessionState.THINKING)
+
+    for index in range(3):
+        response_id = f"response-after-task-{index}"
+        item_id = f"item-after-task-{index}"
+        await provider_session.emit(VoiceUserSpeechStarted())
+        await provider_session.emit(VoiceUserSpeechStopped())
+        await provider_session.emit(VoiceResponseStarted(response_id))
+        await provider_session.emit(
+            VoiceAssistantAudio(
+                PcmChunk(b"\x00" * 960, PROVIDER_OUTPUT_FORMAT, 20, generation=0),
+                response_id,
+                item_id,
+            )
+        )
+        await provider_session.emit(
+            VoiceTranscriptFinal(
+                "assistant",
+                f"后台任务执行期间的回答 {index + 1}",
+                item_id,
+                response_id,
+            )
+        )
+        await provider_session.emit(VoiceResponseCompleted(response_id))
+        await wait_until(lambda: runtime.stats.responses_drained == index + 1)
+
+    assert runtime.state is VoiceSessionState.LISTENING
+    assert runtime.stats.responses_drained == 3
+    assert [turn[3] for turn in sessions.turns] == [
+        "后台任务执行期间的回答 1",
+        "后台任务执行期间的回答 2",
+        "后台任务执行期间的回答 3",
+    ]
 
     await runtime.request_stop(VoiceStopReason.COMMAND)
     await runtime.wait_finished()
