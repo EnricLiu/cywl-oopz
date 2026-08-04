@@ -7,9 +7,12 @@ the channel and emits a short 440 Hz tone; it never records remote PCM.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import math
 import os
 import struct
+import time
 from uuid import uuid4
 
 import pytest
@@ -31,6 +34,8 @@ from cywl_oopz.integrations.oopz.voice_lease import (
 from cywl_oopz.integrations.oopz.voice_media import OopzVoiceMediaGateway
 from cywl_oopz.settings import VoiceSettings
 
+logger = logging.getLogger(__name__)
+
 
 def _live_enabled() -> bool:
     return os.environ.get("CYWL_RUN_LIVE_VOICE_TESTS", "").strip().casefold() in {
@@ -48,6 +53,17 @@ def _required(name: str) -> str:
     return value
 
 
+def _bounded_integer(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    raw = os.environ.get(name, str(default)).strip()
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+    if not minimum <= value <= maximum:
+        raise ValueError(f"{name} must be between {minimum} and {maximum}")
+    return value
+
+
 def _tone(duration_ms: int = 100) -> PcmChunk:
     sample_count = PROVIDER_OUTPUT_FORMAT.sample_rate * duration_ms // 1000
     samples = (
@@ -62,6 +78,16 @@ def _tone(duration_ms: int = 100) -> PcmChunk:
     )
 
 
+def test_live_voice_flush_count_is_bounded(monkeypatch) -> None:
+    monkeypatch.setenv("CYWL_OOPZ_LIVE_FLUSH_COUNT", "100")
+
+    assert _bounded_integer("CYWL_OOPZ_LIVE_FLUSH_COUNT", 100, minimum=1, maximum=100) == 100
+
+    monkeypatch.setenv("CYWL_OOPZ_LIVE_FLUSH_COUNT", "101")
+    with pytest.raises(ValueError, match="between 1 and 100"):
+        _bounded_integer("CYWL_OOPZ_LIVE_FLUSH_COUNT", 100, minimum=1, maximum=100)
+
+
 @pytest.mark.asyncio
 async def test_live_project_voice_media_receives_owner_and_plays_fixed_pcm() -> None:
     load_dotenv(find_dotenv(usecwd=True), override=False)
@@ -70,6 +96,12 @@ async def test_live_project_voice_media_receives_owner_and_plays_fixed_pcm() -> 
     area_id = _required("OOPZ_AREA_ID")
     channel_id = _required("OOPZ_CHANNEL_ID")
     target_person_id = _required("OOPZ_TARGET_PERSON_UID")
+    flush_count = _bounded_integer(
+        "CYWL_OOPZ_LIVE_FLUSH_COUNT",
+        100,
+        minimum=1,
+        maximum=100,
+    )
     config = await OopzConfig.from_env_async()
     bot = OopzBot(config)
     leases = OopzVoiceLeaseManager(bot)
@@ -106,15 +138,33 @@ async def test_live_project_voice_media_receives_owner_and_plays_fixed_pcm() -> 
         )
 
         input_iterator = media.input_frames()
-        frame = await anext(input_iterator)
+        async with asyncio.timeout(settings.start_timeout_seconds):
+            frame = await anext(input_iterator)
         ingress = VoiceAudioIngress()
         ingress.push(frame)
         assert ingress.stats.frames_received == 1
         assert frame.format.sample_format == "f32le"
 
-        await media.write_output(_tone())
-        flushed = await media.flush_output()
-        assert flushed.buffered_samples == 0
+        flush_latencies: list[float] = []
+        previous_generation = -1
+        for _ in range(flush_count):
+            await media.write_output(_tone(20))
+            started_at = time.monotonic()
+            flushed = await media.flush_output()
+            flush_latencies.append(time.monotonic() - started_at)
+            assert flushed.generation > previous_generation
+            assert flushed.buffered_samples == 0
+            previous_generation = flushed.generation
+        p95_index = max(0, math.ceil(len(flush_latencies) * 0.95) - 1)
+        flush_p95_seconds = sorted(flush_latencies)[p95_index]
+        logger.info(
+            "OOPZ project media live flush gate: count=%s p95_ms=%.1f max_ms=%.1f",
+            flush_count,
+            flush_p95_seconds * 1000,
+            max(flush_latencies) * 1000,
+        )
+        assert flush_p95_seconds < 0.2
+
         await media.write_output(_tone())
         drained = await media.drain_output()
         assert drained.accepted_samples == drained.rendered_samples
