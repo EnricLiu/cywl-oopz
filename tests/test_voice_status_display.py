@@ -18,11 +18,20 @@ class FakeEditableGateway:
         self.created: list[str] = []
         self.replaced: list[str] = []
         self.replace_error: Exception | None = None
+        self.fallback_error: Exception | None = None
+        self.fallback_started: asyncio.Event | None = None
+        self.fallback_release: asyncio.Event | None = None
         self.replace_started: asyncio.Event | None = None
         self.replace_release: asyncio.Event | None = None
 
     async def create_reply(self, address, text):
         del address
+        if self.created and self.fallback_started is not None:
+            self.fallback_started.set()
+        if self.created and self.fallback_release is not None:
+            await self.fallback_release.wait()
+        if self.created and self.fallback_error is not None:
+            raise self.fallback_error
         self.created.append(text)
         return EditableMessageRef("message", "timestamp", "channel", "area", "text", "", "ref")
 
@@ -156,7 +165,7 @@ async def test_voice_status_message_sends_terminal_fallback_after_edit_failure()
 
 
 @pytest.mark.asyncio
-async def test_voice_status_close_can_resume_after_caller_cancellation() -> None:
+async def test_voice_status_close_continues_after_caller_cancellation() -> None:
     gateway = FakeEditableGateway()
     gateway.replace_started = asyncio.Event()
     gateway.replace_release = asyncio.Event()
@@ -177,9 +186,71 @@ async def test_voice_status_close_can_resume_after_caller_cancellation() -> None
 
     assert display._worker is not None
     assert display._worker.cancelled() is False
+    assert display._close_task is not None
+    assert display._close_task.cancelled() is False
     gateway.replace_release.set()
-    await display.aclose()
+    await asyncio.wait_for(display._close_task, timeout=0.1)
 
     assert display._worker is None
     assert len(gateway.replaced) == 1
     assert "语音会话结束" in gateway.replaced[0]
+    await display.aclose()
+
+
+@pytest.mark.asyncio
+async def test_voice_status_fallback_continues_after_caller_cancellation() -> None:
+    gateway = FakeEditableGateway()
+    gateway.replace_error = ValueError("fixture deterministic edit rejection")
+    gateway.fallback_started = asyncio.Event()
+    gateway.fallback_release = asyncio.Event()
+    display = OopzVoiceStatusMessage(
+        gateway,
+        address(),
+        edit_interval_seconds=0.001,
+        heartbeat_seconds=0.05,
+    )
+    await display.open()
+    display.emit(status(VoiceSessionState.FAILED, active=False, error_message="连接失败"))
+
+    closing = asyncio.create_task(display.aclose())
+    await gateway.fallback_started.wait()
+    closing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await closing
+
+    assert display._close_task is not None
+    assert display._close_task.cancelled() is False
+    gateway.fallback_release.set()
+    await asyncio.wait_for(display._close_task, timeout=0.1)
+
+    assert display._fallback_sent is True
+    assert len(gateway.created) == 2
+    assert "连接失败" in gateway.created[-1]
+
+
+@pytest.mark.asyncio
+async def test_voice_status_close_retries_failed_terminal_fallback() -> None:
+    gateway = FakeEditableGateway()
+    gateway.replace_error = ValueError("fixture deterministic edit rejection")
+    gateway.fallback_error = RuntimeError("fixture fallback failure")
+    display = OopzVoiceStatusMessage(
+        gateway,
+        address(),
+        edit_interval_seconds=0.001,
+        heartbeat_seconds=0.05,
+    )
+    await display.open()
+    display.emit(status(VoiceSessionState.FAILED, active=False, error_message="连接失败"))
+
+    await display.aclose()
+
+    assert display._fallback_sent is False
+    assert display._close_complete is False
+    first_close_task = display._close_task
+    gateway.fallback_error = None
+    await display.aclose()
+
+    assert display._close_task is not first_close_task
+    assert display._fallback_sent is True
+    assert display._close_complete is True
+    assert len(gateway.created) == 2

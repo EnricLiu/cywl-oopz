@@ -101,6 +101,7 @@ class OopzVoiceStatusMessage:
         self._status_observed_at = 0.0
         self._worker: asyncio.Task[None] | None = None
         self._close_lock = asyncio.Lock()
+        self._close_task: asyncio.Task[None] | None = None
         self._wake = asyncio.Event()
         self._revision = 0
         self._flushed_revision = 0
@@ -110,6 +111,7 @@ class OopzVoiceStatusMessage:
         self._closing = False
         self._disabled = False
         self._fallback_sent = False
+        self._close_complete = False
 
     @property
     def owns_message(self) -> bool:
@@ -136,7 +138,14 @@ class OopzVoiceStatusMessage:
 
     async def aclose(self) -> None:
         async with self._close_lock:
-            await self._close_once()
+            close_task = self._close_task
+            if close_task is None or (close_task.done() and not self._close_complete):
+                close_task = asyncio.create_task(
+                    self._close_once(),
+                    name="oopz-voice-status-close",
+                )
+                self._close_task = close_task
+        await asyncio.shield(close_task)
 
     async def _close_once(self) -> None:
         if not self._closing:
@@ -144,14 +153,15 @@ class OopzVoiceStatusMessage:
             self._wake.set()
         worker = self._worker
         if worker is not None:
-            await asyncio.shield(worker)
+            await worker
             self._worker = None
-        if (
+        fallback_required = (
             not self._fallback_sent
             and self._disabled
             and self._status is not None
             and not self._status.active
-        ):
+        )
+        if fallback_required:
             try:
                 await self._gateway.create_reply(
                     self._address,
@@ -167,6 +177,7 @@ class OopzVoiceStatusMessage:
                 )
             else:
                 self._fallback_sent = True
+        self._close_complete = not fallback_required or self._fallback_sent
 
     async def _run_worker(self) -> None:
         while not self._disabled:
