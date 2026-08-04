@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from uuid import UUID
 
-from cywl_oopz.core.observability import opaque_ref
+from cywl_oopz.core.observability import exception_kind, opaque_ref
 from cywl_oopz.features.voice.models import VoiceSessionDescriptor
 
 from .models import (
@@ -21,7 +21,11 @@ from .models import (
     TaskListQuery,
     TaskRef,
 )
-from .ports import DelegatedTaskRepository, DelegatedTaskWakeup
+from .ports import (
+    DelegatedTaskCompletionNotifier,
+    DelegatedTaskRepository,
+    DelegatedTaskWakeup,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -103,10 +107,12 @@ class VoiceDelegatedTaskService:
         repository: DelegatedTaskRepository,
         wakeup: DelegatedTaskWakeup,
         profiles: DelegatedTaskProfileCatalog | None = None,
+        completion_notifier: DelegatedTaskCompletionNotifier | None = None,
     ) -> None:
         self._repository = repository
         self._wakeup = wakeup
         self._profiles = profiles or DelegatedTaskProfileCatalog()
+        self._completion_notifier = completion_notifier
 
     async def delegate(
         self,
@@ -185,4 +191,17 @@ class VoiceDelegatedTaskService:
         outcome = await self._repository.request_cancel(found.id, descriptor.owner_person_id)
         if outcome.cancel_requested:
             await self._wakeup.wake(found.id)
+            if (
+                outcome.task is not None
+                and outcome.task.status.terminal
+                and self._completion_notifier is not None
+            ):
+                try:
+                    await self._completion_notifier.wake(outcome.task.owner_person_id)
+                except Exception as exc:
+                    logger.warning(
+                        "Could not signal immediately cancelled delegated task: task=%s error=%s",
+                        opaque_ref(str(outcome.task.id)),
+                        exception_kind(exc),
+                    )
         return outcome

@@ -115,6 +115,14 @@ class RecordingWakeup:
         self.ids.append(task_id)
 
 
+class RecordingCompletionNotifier:
+    def __init__(self) -> None:
+        self.owners: list[str] = []
+
+    async def wake(self, owner_person_id: str) -> None:
+        self.owners.append(owner_person_id)
+
+
 class FakeCatalog:
     def __init__(self, catalog: ProviderCatalog) -> None:
         self.snapshot = catalog
@@ -290,6 +298,7 @@ async def test_runner_uses_isolated_context_and_never_exposes_recursive_tools() 
     run_service = SuccessfulRunService()
     context = RecordingContextBuilder()
     skills = AccessibleSkills()
+    completion_notifier = RecordingCompletionNotifier()
     runner = DelegatedAgentTaskRunner(
         settings(),
         repository,
@@ -301,6 +310,7 @@ async def test_runner_uses_isolated_context_and_never_exposes_recursive_tools() 
         NamedTools(),
         skills,
         SkillAvailabilityService(),
+        completion_notifier=completion_notifier,
         max_task_retries=2,
         heartbeat_interval_seconds=10,
     )
@@ -327,6 +337,7 @@ async def test_runner_uses_isolated_context_and_never_exposes_recursive_tools() 
     assert context.calls[0][2]["available_skills"] == (skills.discovery,)
     assert repository.progress == [("thinking", "正在分析任务")]
     assert wakeup.ids == [envelope.id]
+    assert completion_notifier.owners == ["person"]
 
 
 @pytest.mark.asyncio

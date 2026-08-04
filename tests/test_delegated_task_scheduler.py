@@ -129,6 +129,14 @@ class BlockingRunner:
         self._releases[task_id].set()
 
 
+class RecordingCompletionNotifier:
+    def __init__(self) -> None:
+        self.owners: list[str] = []
+
+    async def wake(self, owner_person_id: str) -> None:
+        self.owners.append(owner_person_id)
+
+
 def task(owner: str, *, status=DelegatedTaskStatus.QUEUED) -> DelegatedAgentTask:
     now = datetime.now(UTC)
     return DelegatedAgentTask(
@@ -198,10 +206,12 @@ async def test_scheduler_recovers_restart_and_cancels_a_running_task() -> None:
     repository = MemorySchedulerRepository([recovered])
     wakeup = InProcessDelegatedTaskWakeup()
     runner = BlockingRunner()
+    completion_notifier = RecordingCompletionNotifier()
     scheduler = DelegatedTaskScheduler(
         repository,
         wakeup,
         runner,
+        completion_notifier=completion_notifier,
         reconcile_seconds=0.02,
         worker_id="test-worker",
     )
@@ -215,6 +225,7 @@ async def test_scheduler_recovers_restart_and_cancels_a_running_task() -> None:
     await wakeup.wake(recovered.id)
     await eventually(lambda: repository.tasks[recovered.id].status is DelegatedTaskStatus.CANCELLED)
     assert recovered.id in runner.cancelled
+    assert completion_notifier.owners == ["owner"]
 
     await scheduler.aclose()
     assert repository.tasks[recovered.id].status is DelegatedTaskStatus.CANCELLED

@@ -190,6 +190,10 @@ async def test_delegated_task_migration_repository_and_state_machine_on_postgres
         notifications = await repository.claim_notifications(voice_session_id, 5)
         assert [task.id for task in notifications] == [claimed.id]
         assert notifications[0].notification_state is DelegatedTaskNotificationState.CLAIMED
+        await repository.defer_notifications((claimed.id,))
+        notifications = await repository.claim_notifications(voice_session_id, 5)
+        assert [task.id for task in notifications] == [claimed.id]
+        assert await repository.claim_text_notifications(5) == ()
         await repository.mark_presented((claimed.id,))
         presented = await repository.get_for_owner(TaskRef(task_id=claimed.id), "owner")
         assert presented is not None
@@ -200,6 +204,25 @@ async def test_delegated_task_migration_repository_and_state_machine_on_postgres
         assert cancelled.cancel_requested is True
         assert cancelled.task is not None
         assert cancelled.task.status is DelegatedTaskStatus.CANCELLED
+        assert await repository.claim_text_notifications(5) == ()
+
+        async with test_engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """
+                    UPDATE voice_sessions
+                    SET status = 'ended', ended_at = now()
+                    WHERE id = :session_id
+                    """
+                ),
+                {"session_id": voice_session_id},
+            )
+        text_notifications = await repository.claim_text_notifications(5)
+        assert [task.id for task in text_notifications] == [queued.id]
+        assert await repository.recover_claimed_notifications() == 1
+        text_notifications = await repository.claim_text_notifications(5)
+        assert [task.id for task in text_notifications] == [queued.id]
+        await repository.mark_presented((queued.id,))
 
         running = await repository.claim_next(
             "worker-2",

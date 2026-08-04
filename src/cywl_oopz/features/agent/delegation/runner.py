@@ -47,7 +47,11 @@ from .models import (
     DelegatedTaskLane,
     DelegatedTaskStatus,
 )
-from .ports import DelegatedTaskRepository, DelegatedTaskWakeup
+from .ports import (
+    DelegatedTaskCompletionNotifier,
+    DelegatedTaskRepository,
+    DelegatedTaskWakeup,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +150,7 @@ class DelegatedAgentTaskRunner:
         skill_repository: AgentSkillReadRepository | None = None,
         skill_availability: SkillAvailabilityService | None = None,
         *,
+        completion_notifier: DelegatedTaskCompletionNotifier | None = None,
         max_task_retries: int = 2,
         heartbeat_interval_seconds: float = 10.0,
         jitter: Callable[[float, float], float] = random.uniform,
@@ -164,6 +169,7 @@ class DelegatedAgentTaskRunner:
         self._tools = tools
         self._skill_repository = skill_repository
         self._skill_availability = skill_availability
+        self._completion_notifier = completion_notifier
         self._max_task_retries = max_task_retries
         self._heartbeat_interval_seconds = heartbeat_interval_seconds
         self._jitter = jitter
@@ -311,6 +317,7 @@ class DelegatedAgentTaskRunner:
             outcome.elapsed_seconds,
             outcome.result.tool_calls,
         )
+        await self._notify_terminal(task)
         await self._wakeup.wake(task.id)
 
     def _enabled_tools(self, task: DelegatedAgentTask) -> tuple[str, ...]:
@@ -416,13 +423,29 @@ class DelegatedAgentTaskRunner:
             error_code,
             exception_kind(error),
         )
+        await self._notify_terminal(task)
         await self._wakeup.wake(task.id)
 
     async def _finish_cancel_race(self, task_id, worker_id: str) -> None:
         current = await self._repository.get(task_id)
         if current is not None and current.status is DelegatedTaskStatus.CANCEL_REQUESTED:
-            await self._repository.mark_cancelled(task_id, worker_id)
+            cancelled = await self._repository.mark_cancelled(task_id, worker_id)
+            if cancelled:
+                await self._notify_terminal(current)
             await self._wakeup.wake(task_id)
+
+    async def _notify_terminal(self, task: DelegatedAgentTask) -> None:
+        notifier = self._completion_notifier
+        if notifier is None:
+            return
+        try:
+            await notifier.wake(task.owner_person_id)
+        except Exception as exc:
+            logger.warning(
+                "Could not signal delegated task completion: task=%s error=%s",
+                opaque_ref(str(task.id)),
+                exception_kind(exc),
+            )
 
     async def _heartbeat(
         self,

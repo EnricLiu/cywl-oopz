@@ -129,6 +129,14 @@ class DeterministicFakeRunner:
         await asyncio.gather(*self.tasks)
 
 
+class RecordingCompletionNotifier:
+    def __init__(self) -> None:
+        self.owners: list[str] = []
+
+    async def wake(self, owner_person_id: str) -> None:
+        self.owners.append(owner_person_id)
+
+
 def descriptor(owner: str = "person") -> VoiceSessionDescriptor:
     return VoiceSessionDescriptor(
         uuid4(),
@@ -164,7 +172,14 @@ def test_voice_task_schemas_are_short_and_do_not_expose_server_policy() -> None:
 async def test_delegate_is_durable_idempotent_owner_scoped_and_nonblocking() -> None:
     repository = MemoryTaskRepository()
     runner = DeterministicFakeRunner()
-    tools = VoiceTaskControlTools(VoiceDelegatedTaskService(repository, runner))
+    completion_notifier = RecordingCompletionNotifier()
+    tools = VoiceTaskControlTools(
+        VoiceDelegatedTaskService(
+            repository,
+            runner,
+            completion_notifier=completion_notifier,
+        )
+    )
     session = descriptor()
 
     started = monotonic()
@@ -206,6 +221,7 @@ async def test_delegate_is_durable_idempotent_owner_scoped_and_nonblocking() -> 
     assert listed["tasks"][0]["task"] == "T1"
     cancelled = await tools.execute(session, "cancel-1", "cancel_agent_task", {"task": "T1"})
     assert cancelled["cancel_requested"] is True
+    assert completion_notifier.owners == ["person"]
 
     runner.release.set()
     await runner.aclose()

@@ -27,6 +27,11 @@ from .features.agent.commands import (
     ToolsCommand,
 )
 from .features.agent.context import AgentContextBuilder
+from .features.agent.delegation.mailbox import (
+    DelegatedTaskTextFallbackReconciler,
+    InProcessVoiceTaskCompletionNotifier,
+    VoiceTaskMailboxService,
+)
 from .features.agent.delegation.repository import SqlAlchemyDelegatedTaskRepository
 from .features.agent.delegation.runner import DelegatedAgentTaskRunner
 from .features.agent.delegation.scheduler import DelegatedTaskScheduler
@@ -145,6 +150,7 @@ from .integrations.oopz.voice_conversation import (
 )
 from .integrations.oopz.voice_lease import OopzVoiceLeaseManager
 from .integrations.oopz.voice_media import OopzVoiceMediaGateway
+from .integrations.oopz.voice_task_notifications import OopzVoiceTaskTextGateway
 from .integrations.voice.qwen_omni import QwenOmniProviderBuilder
 from .integrations.web.agent_browser_mcp import AgentBrowserMcpGateway
 from .integrations.web.duckduckgo import DuckDuckGoSearchGateway
@@ -475,9 +481,22 @@ class BotApplication:
             self.database.session_factory
         )
         self.delegated_task_wakeup = InProcessDelegatedTaskWakeup()
+        self.voice_task_completion_notifier = InProcessVoiceTaskCompletionNotifier()
         self.voice_delegated_tasks = VoiceDelegatedTaskService(
             self.delegated_task_repository,
             self.delegated_task_wakeup,
+            completion_notifier=self.voice_task_completion_notifier,
+        )
+        self.voice_task_mailbox = VoiceTaskMailboxService(
+            self.delegated_task_repository,
+            self.voice_task_completion_notifier,
+            OopzVoiceTaskTextGateway(self.bot),
+        )
+        self.delegated_task_text_fallback = DelegatedTaskTextFallbackReconciler(
+            self.delegated_task_repository,
+            self.voice_task_completion_notifier,
+            self.voice_task_mailbox,
+            poll_seconds=settings.voice.mailbox_poll_seconds,
         )
         self.delegated_task_runner = DelegatedAgentTaskRunner(
             settings.agent,
@@ -490,6 +509,7 @@ class BotApplication:
             self.agent_tool_registry,
             self.agent_skill_repository if settings.agent.skills_enabled else None,
             self.agent_skill_availability if settings.agent.skills_enabled else None,
+            completion_notifier=self.voice_task_completion_notifier,
             max_task_retries=settings.agent.provider_max_retries,
             heartbeat_interval_seconds=max(
                 1.0,
@@ -500,6 +520,7 @@ class BotApplication:
             self.delegated_task_repository,
             self.delegated_task_wakeup,
             self.delegated_task_runner,
+            completion_notifier=self.voice_task_completion_notifier,
             read_concurrency=settings.voice.read_task_concurrency,
             per_user_concurrency=settings.voice.per_user_task_concurrency,
             reconcile_seconds=settings.voice.mailbox_poll_seconds,
@@ -511,6 +532,7 @@ class BotApplication:
             self.voice_sessions,
             QwenOmniProviderBuilder(tool_schemas=self.voice_task_tools.schemas()),
             self.voice_task_tools,
+            self.voice_task_mailbox,
         )
         self.voice_conversations = VoiceConversationService(
             settings.voice,
@@ -684,6 +706,7 @@ class BotApplication:
                     logger.warning("Marked stale Agent runs abandoned: count=%s", abandoned)
             if self.settings.agent.enabled or self.settings.voice.enabled:
                 await self.delegated_task_scheduler.start()
+                await self.delegated_task_text_fallback.start()
             logger.info("Starting OOPZ client")
             await self.bot.run()
         finally:
@@ -692,6 +715,7 @@ class BotApplication:
             await self.agent_summary_tasks.close()
             await self.voice_conversations.aclose()
             await self.delegated_task_scheduler.aclose()
+            await self.delegated_task_text_fallback.aclose()
             if self.music is not None:
                 await self.music.aclose()
             await self.voice_leases.aclose()

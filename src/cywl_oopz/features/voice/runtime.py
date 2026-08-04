@@ -10,6 +10,7 @@ from collections import deque
 from collections.abc import Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass, replace
+from uuid import UUID
 
 from cywl_oopz.core.observability import exception_kind, opaque_ref
 from cywl_oopz.settings import VoiceSettings
@@ -39,11 +40,14 @@ from .models import (
     PcmChunk,
     PlaybackCursor,
     VoiceMediaEndReason,
+    VoiceProviderCapabilities,
     VoiceRuntimeResult,
     VoiceRuntimeStats,
     VoiceSessionState,
     VoiceStopReason,
+    VoiceTaskNotification,
 )
+from .notifications import VoiceTaskNotificationStrategy, select_task_notification_strategy
 from .ports import (
     RealtimeVoiceProvider,
     RealtimeVoiceSession,
@@ -54,6 +58,7 @@ from .ports import (
     VoiceSessionRuntimeContext,
     VoiceSessionRuntimeFactory,
     VoiceTaskControlHandler,
+    VoiceTaskMailbox,
 )
 from .settings import VoiceTurnRole
 
@@ -66,6 +71,10 @@ _COMPLETED_TOOL_CALL_HISTORY = 128
 _INTERRUPT_TIMEOUT_SECONDS = 1.5
 _TASK_SUBMIT_TIMEOUT_SECONDS = 0.25
 _TASK_READ_TIMEOUT_SECONDS = 0.15
+_NOTIFICATION_SILENCE_SECONDS = 0.7
+_NOTIFICATION_COALESCE_SECONDS = 0.4
+_NOTIFICATION_COOLDOWN_SECONDS = 5.0
+_NOTIFICATION_BATCH_LIMIT = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,6 +129,24 @@ class _AudioBarrier:
     routed: asyncio.Future[None]
 
 
+@dataclass(frozen=True, slots=True)
+class _MailboxAvailable:
+    """A lossy completion signal or periodic reconciliation tick."""
+
+
+@dataclass(frozen=True, slots=True)
+class _MailboxClaimed:
+    notices: tuple[VoiceTaskNotification, ...]
+    error_kind: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class _MailboxPresented:
+    count: int
+    strategy: VoiceTaskNotificationStrategy
+    succeeded: bool
+
+
 @dataclass(slots=True)
 class _ActiveResponse:
     response_id: str
@@ -138,6 +165,9 @@ _ControlEvent = (
     | _WatchdogExpired
     | _ResponseDrained
     | _ToolCallFinished
+    | _MailboxAvailable
+    | _MailboxClaimed
+    | _MailboxPresented
 )
 
 
@@ -152,6 +182,7 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
         sessions: VoiceSessionRepository,
         provider_builder: ProviderBuilder,
         task_controls: VoiceTaskControlHandler | None = None,
+        task_mailbox: VoiceTaskMailbox | None = None,
     ) -> None:
         self._context = context
         self._settings = settings
@@ -159,6 +190,7 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
         self._sessions = sessions
         self._provider_builder = provider_builder
         self._task_controls = task_controls
+        self._task_mailbox = task_mailbox
         self._control: asyncio.Queue[_ControlEvent] = asyncio.Queue(settings.event_queue_size)
         self._audio_events: asyncio.Queue[_AudioEvent] = asyncio.Queue(_AUDIO_STAGING_CHUNKS)
         self._input = VoiceInputQueue(settings.input_queue_ms)
@@ -183,6 +215,11 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
         self._stats = VoiceRuntimeStats()
         self._last_activity = time.monotonic()
         self._started_at = self._last_activity
+        self._last_user_speech_stopped = self._last_activity - _NOTIFICATION_SILENCE_SECONDS
+        self._last_notification_attempt = self._last_activity - _NOTIFICATION_COOLDOWN_SECONDS
+        self._mailbox_available_pending = False
+        self._mailbox_claim_in_flight = False
+        self._notification_in_flight = False
         self._start_lock = asyncio.Lock()
         self._close_lock = asyncio.Lock()
         self._started = False
@@ -215,6 +252,8 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
             self._spawn(self._oopz_output_pump(), "voice-oopz-output")
             self._spawn(self._media_terminal_watcher(), "voice-media-terminal")
             self._spawn(self._watchdog(), "voice-watchdog")
+            if self._task_mailbox is not None:
+                self._spawn(self._mailbox_listener(), "voice-task-mailbox")
             session = self._provider_session
             if session is None:  # pragma: no cover - guarded by _connect_provider
                 raise RuntimeError("Voice Provider session was not connected")
@@ -412,6 +451,15 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
             if isinstance(event, _ToolCallFinished):
                 await self._handle_tool_call_finished(event)
                 continue
+            if isinstance(event, _MailboxAvailable):
+                self._handle_mailbox_available()
+                continue
+            if isinstance(event, _MailboxClaimed):
+                await self._handle_mailbox_claimed(event)
+                continue
+            if isinstance(event, _MailboxPresented):
+                self._handle_mailbox_presented(event)
+                continue
             if event.session is not self._provider_session:
                 continue
             model_event = event.event
@@ -423,6 +471,7 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                     else VoiceSessionState.LISTENING
                 )
                 self._provider_ready.set()
+                self._handle_mailbox_available()
                 if self._started:
                     try:
                         await self._sessions.mark_active(self._context.descriptor.session_id)
@@ -450,6 +499,7 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                 )
             elif isinstance(model_event, VoiceUserSpeechStopped):
                 self._user_speaking = False
+                self._last_user_speech_stopped = time.monotonic()
                 self._state = VoiceSessionState.THINKING
             elif isinstance(model_event, VoiceResponseStarted):
                 await self._start_response(model_event.response_id)
@@ -488,6 +538,186 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                 self._state = VoiceSessionState.CLOSING
                 self._complete(VoiceStopReason.RUNTIME_ENDED)
                 return
+
+    async def _mailbox_listener(self) -> None:
+        mailbox = self._task_mailbox
+        if mailbox is None:
+            return
+        await self._control.put(_MailboxAvailable())
+        while True:
+            signalled = await mailbox.wait(
+                self._context.descriptor.owner_person_id,
+                self._settings.mailbox_poll_seconds,
+            )
+            if signalled:
+                await asyncio.sleep(_NOTIFICATION_COALESCE_SECONDS)
+            await self._control.put(_MailboxAvailable())
+
+    def _handle_mailbox_available(self) -> None:
+        self._mailbox_available_pending = True
+        if (
+            self._task_mailbox is None
+            or self._mailbox_claim_in_flight
+            or self._notification_in_flight
+            or not self._notification_safe()
+        ):
+            return
+        self._mailbox_available_pending = False
+        self._mailbox_claim_in_flight = True
+        self._spawn(self._claim_mailbox(), "voice-task-mailbox-claim")
+
+    async def _claim_mailbox(self) -> None:
+        mailbox = self._task_mailbox
+        if mailbox is None:
+            return
+        notices: tuple[VoiceTaskNotification, ...] = ()
+        error_kind = ""
+        try:
+            notices = await mailbox.claim(
+                self._context.descriptor.session_id,
+                _NOTIFICATION_BATCH_LIMIT,
+            )
+            await self._control.put(_MailboxClaimed(notices))
+        except asyncio.CancelledError:
+            if notices:
+                await asyncio.shield(mailbox.defer(tuple(item.task_id for item in notices)))
+            raise
+        except Exception as exc:
+            error_kind = exception_kind(exc)
+            await self._control.put(_MailboxClaimed((), error_kind))
+
+    async def _handle_mailbox_claimed(self, event: _MailboxClaimed) -> None:
+        self._mailbox_claim_in_flight = False
+        if event.error_kind:
+            logger.warning(
+                "Voice task mailbox claim failed: session=%s error=%s",
+                opaque_ref(str(self._context.descriptor.session_id)),
+                event.error_kind,
+            )
+            return
+        if not event.notices:
+            return
+        count = len(event.notices)
+        self._stats = replace(
+            self._stats,
+            task_notifications_claimed=self._stats.task_notifications_claimed + count,
+        )
+        task_ids = tuple(item.task_id for item in event.notices)
+        if not self._notification_safe():
+            self._stats = replace(
+                self._stats,
+                task_notifications_deferred=self._stats.task_notifications_deferred + count,
+            )
+            self._spawn(self._defer_notifications(task_ids), "voice-task-mailbox-defer")
+            return
+
+        provider = self._provider
+        strategy = select_task_notification_strategy(
+            provider.capabilities if provider is not None else VoiceProviderCapabilities()
+        )
+        self._last_notification_attempt = time.monotonic()
+        if strategy is not VoiceTaskNotificationStrategy.TEXT_FALLBACK:
+            self._stats = replace(
+                self._stats,
+                task_notifications_deferred=self._stats.task_notifications_deferred + count,
+            )
+            logger.info(
+                "Voice proactive task notification deferred until Provider adapter support: "
+                "session=%s strategy=%s tasks=%s",
+                opaque_ref(str(self._context.descriptor.session_id)),
+                strategy.value,
+                count,
+            )
+            self._spawn(self._defer_notifications(task_ids), "voice-task-mailbox-capability-defer")
+            return
+
+        self._notification_in_flight = True
+        self._spawn(
+            self._present_text_notifications(event.notices),
+            "voice-task-mailbox-text",
+        )
+
+    async def _defer_notifications(self, task_ids: tuple[UUID, ...]) -> None:
+        mailbox = self._task_mailbox
+        if mailbox is None:
+            return
+        try:
+            await asyncio.shield(mailbox.defer(task_ids))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "Voice task notification defer failed: session=%s tasks=%s error=%s",
+                opaque_ref(str(self._context.descriptor.session_id)),
+                len(task_ids),
+                exception_kind(exc),
+            )
+
+    async def _present_text_notifications(
+        self,
+        notices: tuple[VoiceTaskNotification, ...],
+    ) -> None:
+        mailbox = self._task_mailbox
+        if mailbox is None:
+            return
+        succeeded = False
+        try:
+            succeeded = await mailbox.present_text(notices)
+        except asyncio.CancelledError:
+            await asyncio.shield(mailbox.defer(tuple(item.task_id for item in notices)))
+            raise
+        except Exception as exc:
+            logger.warning(
+                "Voice task text fallback failed: session=%s tasks=%s error=%s",
+                opaque_ref(str(self._context.descriptor.session_id)),
+                len(notices),
+                exception_kind(exc),
+            )
+            await self._defer_notifications(tuple(item.task_id for item in notices))
+        else:
+            if not succeeded:
+                await self._defer_notifications(tuple(item.task_id for item in notices))
+        await self._control.put(
+            _MailboxPresented(
+                len(notices),
+                VoiceTaskNotificationStrategy.TEXT_FALLBACK,
+                succeeded,
+            )
+        )
+
+    def _handle_mailbox_presented(self, event: _MailboxPresented) -> None:
+        self._notification_in_flight = False
+        self._last_notification_attempt = time.monotonic()
+        self._stats = replace(
+            self._stats,
+            task_notifications_presented=(
+                self._stats.task_notifications_presented + event.count
+                if event.succeeded
+                else self._stats.task_notifications_presented
+            ),
+            task_notifications_deferred=(
+                self._stats.task_notifications_deferred
+                if event.succeeded
+                else self._stats.task_notifications_deferred + event.count
+            ),
+            task_notifications_text_fallback=(
+                self._stats.task_notifications_text_fallback + event.count
+                if event.succeeded and event.strategy is VoiceTaskNotificationStrategy.TEXT_FALLBACK
+                else self._stats.task_notifications_text_fallback
+            ),
+        )
+        if self._mailbox_available_pending:
+            self._handle_mailbox_available()
+
+    def _notification_safe(self) -> bool:
+        now = time.monotonic()
+        return (
+            self._state is VoiceSessionState.LISTENING
+            and not self._user_speaking
+            and self._active_response is None
+            and now - self._last_user_speech_stopped >= _NOTIFICATION_SILENCE_SECONDS
+            and now - self._last_notification_attempt >= _NOTIFICATION_COOLDOWN_SECONDS
+        )
 
     def _start_tool_call(
         self,
@@ -759,6 +989,8 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
         self._state = (
             VoiceSessionState.USER_SPEAKING if self._user_speaking else VoiceSessionState.LISTENING
         )
+        if self._mailbox_available_pending:
+            self._handle_mailbox_available()
         logger.debug(
             "Voice response playout drained: session=%s response=%s generation=%d rendered_ms=%d",
             opaque_ref(str(self._context.descriptor.session_id)),
@@ -777,6 +1009,8 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
         active = self._active_response
         if active is None:
             self._state = target_state
+            if self._mailbox_available_pending and target_state is VoiceSessionState.LISTENING:
+                self._handle_mailbox_available()
             return True
         started_at = time.monotonic()
         self._state = VoiceSessionState.INTERRUPTING
@@ -826,6 +1060,8 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                     self._complete(VoiceStopReason.PROVIDER_FAILED)
                     return False
         self._state = target_state
+        if self._mailbox_available_pending and target_state is VoiceSessionState.LISTENING:
+            self._handle_mailbox_available()
         logger.info(
             "Voice response interrupted: session=%s response=%s generation=%d "
             "rendered_ms=%d flush_ms=%.1f provider_cancel=%s",
@@ -1075,12 +1311,14 @@ class RealtimeVoiceSessionRuntimeFactoryImpl(VoiceSessionRuntimeFactory):
         sessions: VoiceSessionRepository,
         provider_builder: ProviderBuilder,
         task_controls: VoiceTaskControlHandler | None = None,
+        task_mailbox: VoiceTaskMailbox | None = None,
     ) -> None:
         self._settings = settings
         self._media_gateway = media_gateway
         self._sessions = sessions
         self._provider_builder = provider_builder
         self._task_controls = task_controls
+        self._task_mailbox = task_mailbox
 
     async def create(self, context: VoiceSessionRuntimeContext) -> VoiceSessionRuntime:
         return RealtimeVoiceSessionRuntimeImpl(
@@ -1090,4 +1328,5 @@ class RealtimeVoiceSessionRuntimeFactoryImpl(VoiceSessionRuntimeFactory):
             self._sessions,
             self._provider_builder,
             self._task_controls,
+            self._task_mailbox,
         )

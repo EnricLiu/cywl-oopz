@@ -7,6 +7,7 @@ from uuid import uuid4
 import numpy as np
 import pytest
 
+from cywl_oopz.features.voice import runtime as runtime_module
 from cywl_oopz.features.voice.audio import PROVIDER_OUTPUT_FORMAT
 from cywl_oopz.features.voice.errors import VoiceProviderDisconnectedError
 from cywl_oopz.features.voice.events import (
@@ -27,9 +28,12 @@ from cywl_oopz.features.voice.models import (
     VoiceAudioFormat,
     VoiceChannelKey,
     VoiceMediaEndReason,
+    VoiceProviderCapabilities,
     VoiceSessionDescriptor,
     VoiceSessionState,
     VoiceStopReason,
+    VoiceTaskNotification,
+    VoiceTaskNotificationStatus,
     VoiceTextAddress,
 )
 from cywl_oopz.features.voice.ports import VoiceSessionRuntimeContext
@@ -58,7 +62,44 @@ def settings(**overrides: str) -> VoiceSettings:
     )
 
 
-async def runtime_fixture(task_controls=None):
+class FakeTaskMailbox:
+    def __init__(self) -> None:
+        self.pending: list[VoiceTaskNotification] = []
+        self.signal = asyncio.Event()
+        self.claim_calls = 0
+        self.presented: list[tuple[VoiceTaskNotification, ...]] = []
+        self.deferred: list[tuple] = []
+        self.delivery_succeeds = True
+
+    async def wait(self, owner_person_id: str, timeout_seconds: float) -> bool:
+        del owner_person_id
+        try:
+            async with asyncio.timeout(timeout_seconds):
+                await self.signal.wait()
+        except TimeoutError:
+            return False
+        self.signal.clear()
+        return True
+
+    async def claim(self, session_id, limit: int):
+        del session_id
+        self.claim_calls += 1
+        claimed = tuple(self.pending[:limit])
+        del self.pending[:limit]
+        return claimed
+
+    async def present_text(self, notices):
+        self.presented.append(notices)
+        return self.delivery_succeeds
+
+    async def mark_presented(self, task_ids):
+        del task_ids
+
+    async def defer(self, task_ids):
+        self.deferred.append(task_ids)
+
+
+async def runtime_fixture(task_controls=None, task_mailbox=None, capabilities=None):
     access = FakeVoiceAccessGateway()
     channel = VoiceChannelKey("area", "voice")
     lease = await access.try_acquire(channel, "conversation:test")
@@ -82,7 +123,7 @@ async def runtime_fixture(task_controls=None):
     providers: list[FakeRealtimeVoiceProvider] = []
 
     def build_provider(_context):
-        provider = FakeRealtimeVoiceProvider()
+        provider = FakeRealtimeVoiceProvider(capabilities)
         providers.append(provider)
         return provider
 
@@ -93,6 +134,7 @@ async def runtime_fixture(task_controls=None):
         sessions,
         build_provider,
         task_controls,
+        task_mailbox,
     )
     return runtime, media, sessions, providers
 
@@ -103,6 +145,18 @@ async def wait_until(predicate, attempts: int = 100) -> None:
             return
         await asyncio.sleep(0)
     raise AssertionError("condition was not reached")
+
+
+def notification(sequence: int) -> VoiceTaskNotification:
+    return VoiceTaskNotification(
+        uuid4(),
+        f"T{sequence}",
+        VoiceTaskNotificationStatus.SUCCEEDED,
+        f"查询任务 {sequence}",
+        f"结果 {sequence}",
+        "",
+        VoiceTextAddress("area", "text"),
+    )
 
 
 @pytest.mark.asyncio
@@ -154,6 +208,124 @@ async def test_realtime_runtime_streams_audio_and_persists_final_turns() -> None
     await runtime.aclose()
     assert media.closed is True
     assert providers[0].closed is True
+
+
+@pytest.mark.asyncio
+async def test_task_notification_waits_for_user_turn_then_uses_text_fallback(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(runtime_module, "_NOTIFICATION_SILENCE_SECONDS", 0)
+    monkeypatch.setattr(runtime_module, "_NOTIFICATION_COOLDOWN_SECONDS", 0)
+    monkeypatch.setattr(runtime_module, "_NOTIFICATION_COALESCE_SECONDS", 0)
+    mailbox = FakeTaskMailbox()
+    runtime, _, _, providers = await runtime_fixture(task_mailbox=mailbox)
+    starting = asyncio.create_task(runtime.start())
+    await wait_until(lambda: bool(providers and providers[0].sessions))
+    provider_session = providers[0].sessions[0]
+    await provider_session.emit(VoiceSessionReady())
+    await starting
+    await provider_session.emit(VoiceUserSpeechStarted())
+    await wait_until(lambda: runtime.state is VoiceSessionState.USER_SPEAKING)
+
+    initial_claims = mailbox.claim_calls
+    mailbox.pending.append(notification(1))
+    mailbox.signal.set()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert mailbox.claim_calls == initial_claims
+
+    await provider_session.emit(VoiceUserSpeechStopped())
+    await provider_session.emit(VoiceResponseStarted("response-turn"))
+    await provider_session.emit(VoiceResponseCompleted("response-turn"))
+    await wait_until(lambda: runtime.state is VoiceSessionState.LISTENING)
+    mailbox.signal.set()
+    await wait_until(lambda: runtime.stats.task_notifications_presented == 1)
+
+    assert [item.alias for item in mailbox.presented[0]] == ["T1"]
+    assert runtime.stats.task_notifications_claimed == 1
+    assert runtime.stats.task_notifications_presented == 1
+    assert runtime.stats.task_notifications_text_fallback == 1
+    await runtime.request_stop(VoiceStopReason.COMMAND)
+    await runtime.wait_finished()
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_task_notifications_are_bounded_to_three_per_active_session_batch(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(runtime_module, "_NOTIFICATION_COOLDOWN_SECONDS", 0)
+    monkeypatch.setattr(runtime_module, "_NOTIFICATION_COALESCE_SECONDS", 0)
+    mailbox = FakeTaskMailbox()
+    mailbox.pending.extend(notification(index) for index in range(1, 5))
+    runtime, _, _, providers = await runtime_fixture(task_mailbox=mailbox)
+    starting = asyncio.create_task(runtime.start())
+    await wait_until(lambda: bool(providers and providers[0].sessions))
+    await providers[0].sessions[0].emit(VoiceSessionReady())
+    await starting
+
+    await wait_until(lambda: bool(mailbox.presented))
+    assert len(mailbox.presented[0]) == 3
+    assert [item.alias for item in mailbox.presented[0]] == ["T1", "T2", "T3"]
+
+    mailbox.signal.set()
+    await wait_until(lambda: len(mailbox.presented) == 2)
+    assert [item.alias for item in mailbox.presented[1]] == ["T4"]
+    await runtime.request_stop(VoiceStopReason.COMMAND)
+    await runtime.wait_finished()
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_task_notification_delivery_failure_is_deferred(monkeypatch) -> None:
+    monkeypatch.setattr(runtime_module, "_NOTIFICATION_COOLDOWN_SECONDS", 30)
+    monkeypatch.setattr(runtime_module, "_NOTIFICATION_COALESCE_SECONDS", 0)
+    mailbox = FakeTaskMailbox()
+    mailbox.delivery_succeeds = False
+    notice = notification(1)
+    mailbox.pending.append(notice)
+    runtime, _, _, providers = await runtime_fixture(task_mailbox=mailbox)
+    starting = asyncio.create_task(runtime.start())
+    await wait_until(lambda: bool(providers and providers[0].sessions))
+    await providers[0].sessions[0].emit(VoiceSessionReady())
+    await starting
+
+    await wait_until(lambda: runtime.stats.task_notifications_deferred == 1)
+    assert len(mailbox.presented) == 1
+    assert runtime.stats.task_notifications_presented == 0
+    await runtime.request_stop(VoiceStopReason.COMMAND)
+    await runtime.wait_finished()
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_capability_strategy_defers_until_proactive_adapter_is_available(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(runtime_module, "_NOTIFICATION_COALESCE_SECONDS", 0)
+    mailbox = FakeTaskMailbox()
+    notice = notification(1)
+    mailbox.pending.append(notice)
+    capabilities = VoiceProviderCapabilities(
+        context_injection=True,
+        proactive_response=True,
+    )
+    runtime, _, _, providers = await runtime_fixture(
+        task_mailbox=mailbox,
+        capabilities=capabilities,
+    )
+    starting = asyncio.create_task(runtime.start())
+    await wait_until(lambda: bool(providers and providers[0].sessions))
+    await providers[0].sessions[0].emit(VoiceSessionReady())
+    await starting
+
+    await wait_until(lambda: bool(mailbox.deferred))
+    assert mailbox.deferred == [(notice.task_id,)]
+    assert mailbox.presented == []
+    assert runtime.stats.task_notifications_deferred == 1
+    await runtime.request_stop(VoiceStopReason.COMMAND)
+    await runtime.wait_finished()
+    await runtime.aclose()
 
 
 @pytest.mark.asyncio

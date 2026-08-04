@@ -20,6 +20,7 @@ from .models import (
     VoiceSessionDescriptor,
     VoiceSessionState,
     VoiceStopReason,
+    VoiceTaskNotification,
 )
 from .settings import (
     PersistedVoiceSessionStatus,
@@ -153,6 +154,24 @@ class VoiceTaskControlHandler(Protocol):
         name: str,
         arguments: Mapping[str, object],
     ) -> Mapping[str, object]: ...
+
+
+class VoiceTaskMailbox(Protocol):
+    """Claim and present terminal delegated tasks for one active voice session."""
+
+    async def wait(self, owner_person_id: str, timeout_seconds: float) -> bool: ...
+
+    async def claim(
+        self,
+        session_id: UUID,
+        limit: int,
+    ) -> tuple[VoiceTaskNotification, ...]: ...
+
+    async def present_text(self, notices: tuple[VoiceTaskNotification, ...]) -> bool: ...
+
+    async def mark_presented(self, task_ids: tuple[UUID, ...]) -> None: ...
+
+    async def defer(self, task_ids: tuple[UUID, ...]) -> None: ...
 
 
 class VoiceConfigurationRepository(Protocol):

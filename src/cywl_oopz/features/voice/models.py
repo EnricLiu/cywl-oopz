@@ -240,6 +240,10 @@ class VoiceRuntimeStats:
     max_task_control_ms: float = 0.0
     last_barge_in_flush_ms: float = 0.0
     max_barge_in_flush_ms: float = 0.0
+    task_notifications_claimed: int = 0
+    task_notifications_presented: int = 0
+    task_notifications_deferred: int = 0
+    task_notifications_text_fallback: int = 0
 
     def as_metrics(self) -> dict[str, int | float]:
         return {
@@ -256,6 +260,10 @@ class VoiceRuntimeStats:
             "voice_max_task_control_ms": self.max_task_control_ms,
             "voice_last_barge_in_flush_ms": self.last_barge_in_flush_ms,
             "voice_max_barge_in_flush_ms": self.max_barge_in_flush_ms,
+            "voice_task_notifications_claimed": self.task_notifications_claimed,
+            "voice_task_notifications_presented": self.task_notifications_presented,
+            "voice_task_notifications_deferred": self.task_notifications_deferred,
+            "voice_task_notifications_text_fallback": self.task_notifications_text_fallback,
         }
 
 
@@ -269,3 +277,33 @@ class VoiceProviderCapabilities:
     context_injection: bool = False
     proactive_response: bool = False
     external_text_speech: bool = False
+
+
+class VoiceTaskNotificationStatus(StrEnum):
+    """Terminal task states safe to expose through the voice mailbox boundary."""
+
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    INTERRUPTED = "interrupted"
+
+
+@dataclass(frozen=True, slots=True)
+class VoiceTaskNotification:
+    """Bounded terminal task projection without Agent run internals."""
+
+    task_id: UUID
+    alias: str
+    status: VoiceTaskNotificationStatus
+    objective: str
+    summary: str
+    error_message: str
+    origin: VoiceTextAddress
+
+    def __post_init__(self) -> None:
+        if not self.alias.strip() or not self.objective.strip():
+            raise ValueError("Voice task notification identity must not be empty")
+        if len(self.alias) > 16 or len(self.objective) > 4000:
+            raise ValueError("Voice task notification identity is too long")
+        if len(self.summary) > 1000 or len(self.error_message) > 1000:
+            raise ValueError("Voice task notification detail is too long")

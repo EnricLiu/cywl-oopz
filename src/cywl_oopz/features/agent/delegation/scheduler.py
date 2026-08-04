@@ -13,7 +13,11 @@ from uuid import UUID, uuid4
 from cywl_oopz.core.observability import exception_kind, opaque_ref
 
 from .models import DelegatedAgentTask, DelegatedTaskLane, DelegatedTaskStatus
-from .ports import DelegatedTaskRepository, DelegatedTaskWakeup
+from .ports import (
+    DelegatedTaskCompletionNotifier,
+    DelegatedTaskRepository,
+    DelegatedTaskWakeup,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +42,7 @@ class DelegatedTaskScheduler:
         wakeup: DelegatedTaskWakeup,
         runner: DelegatedTaskRunner,
         *,
+        completion_notifier: DelegatedTaskCompletionNotifier | None = None,
         read_concurrency: int = 2,
         per_user_concurrency: int = 1,
         reconcile_seconds: float = 2.0,
@@ -52,6 +57,7 @@ class DelegatedTaskScheduler:
         self._repository = repository
         self._wakeup = wakeup
         self._runner = runner
+        self._completion_notifier = completion_notifier
         self._read_concurrency = read_concurrency
         self._per_user_concurrency = per_user_concurrency
         self._reconcile_seconds = reconcile_seconds
@@ -207,7 +213,16 @@ class DelegatedTaskScheduler:
                 and current is not None
                 and current.status is DelegatedTaskStatus.CANCEL_REQUESTED
             ):
-                await self._repository.mark_cancelled(task.id, self._worker_id)
+                changed = await self._repository.mark_cancelled(task.id, self._worker_id)
+                if changed and self._completion_notifier is not None:
+                    try:
+                        await self._completion_notifier.wake(task.owner_person_id)
+                    except Exception as exc:
+                        logger.warning(
+                            "Could not signal cancelled delegated task: task=%s error=%s",
+                            opaque_ref(str(task.id)),
+                            exception_kind(exc),
+                        )
             raise
         except Exception as exc:
             logger.error(

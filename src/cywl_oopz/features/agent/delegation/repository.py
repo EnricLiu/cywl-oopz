@@ -10,6 +10,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from cywl_oopz.core.errors import DatabaseError
+from cywl_oopz.features.voice.settings import PersistedVoiceSessionStatus
 from cywl_oopz.storage.models import (
     DelegatedAgentTaskRecord,
     LlmModelRecord,
@@ -497,6 +498,93 @@ class SqlAlchemyDelegatedTaskRepository:
             "mark delegated task notifications presented",
             require_row=False,
         )
+
+    async def defer_notifications(self, task_ids: tuple[UUID, ...]) -> None:
+        if not task_ids:
+            return
+        await self._conditional_update(
+            update(DelegatedAgentTaskRecord)
+            .where(
+                DelegatedAgentTaskRecord.id.in_(task_ids),
+                DelegatedAgentTaskRecord.notification_state
+                == DelegatedTaskNotificationState.CLAIMED,
+            )
+            .values(notification_state=DelegatedTaskNotificationState.DEFERRED),
+            "defer delegated task notifications",
+            require_row=False,
+        )
+
+    async def claim_text_notifications(
+        self,
+        limit: int,
+    ) -> tuple[DelegatedAgentTask, ...]:
+        if not 1 <= limit <= 50:
+            raise ValueError("Text notification claim limit must be between 1 and 50")
+        try:
+            async with self._sessions() as session:
+                async with session.begin():
+                    records = (
+                        await session.scalars(
+                            select(DelegatedAgentTaskRecord)
+                            .join(
+                                VoiceSessionRecord,
+                                VoiceSessionRecord.id
+                                == DelegatedAgentTaskRecord.origin_voice_session_id,
+                            )
+                            .where(
+                                VoiceSessionRecord.status.in_(
+                                    {
+                                        PersistedVoiceSessionStatus.ENDED,
+                                        PersistedVoiceSessionStatus.FAILED,
+                                    }
+                                ),
+                                DelegatedAgentTaskRecord.status.in_(
+                                    {
+                                        DelegatedTaskStatus.SUCCEEDED,
+                                        DelegatedTaskStatus.FAILED,
+                                        DelegatedTaskStatus.CANCELLED,
+                                        DelegatedTaskStatus.INTERRUPTED,
+                                    }
+                                ),
+                                DelegatedAgentTaskRecord.notification_state.in_(
+                                    {
+                                        DelegatedTaskNotificationState.PENDING,
+                                        DelegatedTaskNotificationState.DEFERRED,
+                                    }
+                                ),
+                            )
+                            .order_by(DelegatedAgentTaskRecord.finished_at)
+                            .with_for_update(
+                                skip_locked=True,
+                                of=DelegatedAgentTaskRecord,
+                            )
+                            .limit(limit)
+                        )
+                    ).all()
+                    for record in records:
+                        record.notification_state = DelegatedTaskNotificationState.CLAIMED
+                    await session.flush()
+                    for record in records:
+                        await session.refresh(record)
+                    return tuple(_task(record) for record in records)
+        except SQLAlchemyError as exc:
+            raise _database_error("claim delegated task text notifications", exc) from exc
+
+    async def recover_claimed_notifications(self) -> int:
+        try:
+            async with self._sessions() as session:
+                async with session.begin():
+                    result = await session.execute(
+                        update(DelegatedAgentTaskRecord)
+                        .where(
+                            DelegatedAgentTaskRecord.notification_state
+                            == DelegatedTaskNotificationState.CLAIMED
+                        )
+                        .values(notification_state=DelegatedTaskNotificationState.DEFERRED)
+                    )
+                    return int(result.rowcount or 0)
+        except SQLAlchemyError as exc:
+            raise _database_error("recover claimed delegated task notifications", exc) from exc
 
     async def recover_stale(self, now: datetime) -> RecoverySummary:
         requeued: list[UUID] = []
