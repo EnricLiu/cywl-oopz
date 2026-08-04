@@ -161,6 +161,28 @@ async def test_composition_root_registers_music_tools_only_when_music_is_enabled
 
 
 @pytest.mark.asyncio
+async def test_composition_root_registers_experimental_voice_command_only_when_enabled(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(application_module, "OopzBot", FakeOopzBot)
+    disabled = BotApplication(settings("legacy"))
+    enabled = BotApplication(settings("legacy", CYWL_VOICE_ENABLED="true"))
+
+    assert "voice" not in {command.name for command in disabled.commands.commands}
+    assert "voice" in {command.name for command in enabled.commands.commands}
+    assert enabled.voice_conversations._access._leases is enabled.voice_leases
+    assert {check.name: check.state.value for check in enabled.health.snapshot()}[
+        "voice"
+    ] == "pending"
+
+    for application in (disabled, enabled):
+        await application.voice_conversations.aclose()
+        await application.agent_engine.aclose()
+        await application._provider.aclose()
+        await application.database.close()
+
+
+@pytest.mark.asyncio
 async def test_composition_root_removes_skill_tools_when_skills_are_disabled(
     monkeypatch,
 ) -> None:

@@ -112,6 +112,8 @@ from .features.music.netease import NeteaseMusicCatalog
 from .features.music.playlist_repository import SqlAlchemyMusicPlaylistRepository
 from .features.music.playlists import MusicPlaylistService
 from .features.music.service import MusicRequestService
+from .features.voice.commands import VoiceCommand
+from .features.voice.service import VoiceConversationService
 from .features.web.browser import BrowserSessionManager
 from .features.web.errors import BrowserError
 from .features.web.service import WebSearchService
@@ -123,7 +125,12 @@ from .integrations.oopz.music import OopzMusicVoiceGateway
 from .integrations.oopz.reactions import OopzReactionGateway
 from .integrations.oopz.skill_sharing import OopzSkillShareNotifier
 from .integrations.oopz.voice_capabilities import OopzVoiceCapabilityGate
+from .integrations.oopz.voice_conversation import (
+    OopzConversationVoiceAccess,
+    OopzVoiceCommandPresenter,
+)
 from .integrations.oopz.voice_lease import OopzVoiceLeaseManager
+from .integrations.voice.unavailable import UnavailableVoiceSessionRuntimeFactory
 from .integrations.web.agent_browser_mcp import AgentBrowserMcpGateway
 from .integrations.web.duckduckgo import DuckDuckGoSearchGateway
 from .settings import (
@@ -435,6 +442,11 @@ class BotApplication:
             self.agent_presenters,
             self.chat_invocations,
         )
+        self.voice_conversations = VoiceConversationService(
+            settings.voice,
+            OopzConversationVoiceAccess(self.bot, self.voice_leases),
+            UnavailableVoiceSessionRuntimeFactory(),
+        )
         self._register_commands()
         self.bot.on_ready(self._on_ready)
         self.bot.on_message(self._on_message)
@@ -455,6 +467,11 @@ class BotApplication:
             HealthState.PENDING
             if settings.agent.enabled and settings.agent.skills_enabled
             else HealthState.DISABLED,
+        )
+        self.health.mark(
+            "voice",
+            HealthState.PENDING if settings.voice.enabled else HealthState.DISABLED,
+            "experimental" if settings.voice.enabled else "feature disabled",
         )
 
     def _create_chat_provider(self) -> ChatProvider:
@@ -513,6 +530,14 @@ class BotApplication:
             self.commands.register(MemoryCommand(self.agent_chat, self.agent_memory))
             if self.settings.agent.skills_enabled:
                 self.commands.register(SkillsCommand(self.agent_chat, self.agent_skill_library))
+        if self.settings.voice.enabled:
+            self.commands.register(
+                VoiceCommand(
+                    self.voice_conversations,
+                    OopzVoiceCommandPresenter(),
+                    self.settings.command_prefix,
+                )
+            )
 
     async def run(self) -> None:
         """Start the database check before entering the long-running OOPZ client."""
@@ -590,6 +615,7 @@ class BotApplication:
             logger.info("Application shutdown started")
             await self.chat_tasks.close()
             await self.agent_summary_tasks.close()
+            await self.voice_conversations.aclose()
             if self.music is not None:
                 await self.music.aclose()
             await self.voice_leases.aclose()
