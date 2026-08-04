@@ -104,7 +104,12 @@ class FakeTaskMailbox:
         self.deferred.append(task_ids)
 
 
-async def runtime_fixture(task_controls=None, task_mailbox=None, capabilities=None):
+async def runtime_fixture(
+    task_controls=None,
+    task_mailbox=None,
+    capabilities=None,
+    status_sink=None,
+):
     access = FakeVoiceAccessGateway()
     channel = VoiceChannelKey("area", "voice")
     lease = await access.try_acquire(channel, "conversation:test")
@@ -122,7 +127,7 @@ async def runtime_fixture(task_controls=None, task_mailbox=None, capabilities=No
         channel,
         VoiceTextAddress("area", "text"),
     )
-    context = VoiceSessionRuntimeContext(descriptor, lease, configuration)
+    context = VoiceSessionRuntimeContext(descriptor, lease, configuration, status_sink)
     media = FakeVoiceMediaGateway()
     sessions = FakeVoiceSessionRepository()
     providers: list[FakeRealtimeVoiceProvider] = []
@@ -213,6 +218,48 @@ async def test_realtime_runtime_streams_audio_and_persists_final_turns() -> None
     await runtime.aclose()
     assert media.closed is True
     assert providers[0].closed is True
+
+
+@pytest.mark.asyncio
+async def test_realtime_runtime_emits_nonblocking_state_snapshots() -> None:
+    class RecordingRuntimeStatusSink:
+        def __init__(self) -> None:
+            self.statuses = []
+
+        def emit(self, status) -> None:
+            self.statuses.append(status)
+
+    sink = RecordingRuntimeStatusSink()
+    runtime, _, _, providers = await runtime_fixture(status_sink=sink)
+    starting = asyncio.create_task(runtime.start())
+    await wait_until(lambda: bool(providers and providers[0].sessions))
+    provider_session = providers[0].sessions[0]
+    await provider_session.emit(VoiceSessionReady())
+    await starting
+    await provider_session.emit(VoiceUserSpeechStarted())
+    await provider_session.emit(VoiceUserSpeechStopped())
+    await provider_session.emit(VoiceResponseStarted("response-status"))
+    await provider_session.emit(
+        VoiceAssistantAudio(
+            PcmChunk(b"\x00" * 960, PROVIDER_OUTPUT_FORMAT, 20, generation=0),
+            "response-status",
+            "item-status",
+        )
+    )
+    await wait_until(lambda: sink.statuses[-1].state is VoiceSessionState.SPEAKING)
+
+    states = [item.state for item in sink.statuses]
+    assert states[:4] == [
+        VoiceSessionState.LISTENING,
+        VoiceSessionState.USER_SPEAKING,
+        VoiceSessionState.THINKING,
+        VoiceSessionState.THINKING,
+    ]
+    assert sink.statuses[-1].stats.responses_started == 1
+    await runtime.request_stop(VoiceStopReason.COMMAND)
+    await runtime.wait_finished()
+    await runtime.aclose()
+    assert sink.statuses[-1].state is VoiceSessionState.CLOSED
 
 
 @pytest.mark.asyncio

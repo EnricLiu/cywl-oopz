@@ -181,8 +181,9 @@ class BotApplication:
         self.voice_leases = OopzVoiceLeaseManager(self.bot)
         self.voice_media = OopzVoiceMediaGateway(self.bot, settings.voice)
         self.chat_invocations = OopzChatInvocationFactory(settings.oopz.person_uid)
+        self.editable_messages = OopzEditableMessageGateway(self.bot)
         self.agent_presenters = OopzAgentPresenterFactory(
-            OopzEditableMessageGateway(self.bot),
+            self.editable_messages,
             OopzMessageRenderer(),
             enabled=settings.agent.enabled and settings.agent.live_display,
             edit_interval_seconds=settings.agent.display_edit_interval_seconds,
@@ -629,7 +630,7 @@ class BotApplication:
                 VoiceCommand(
                     self.voice_conversations,
                     self.voice_configurations,
-                    OopzVoiceCommandPresenter(),
+                    OopzVoiceCommandPresenter(self.editable_messages),
                     self.settings.command_prefix,
                 )
             )

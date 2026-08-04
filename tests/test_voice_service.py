@@ -13,6 +13,7 @@ from cywl_oopz.features.voice.errors import (
     VoiceUserNotInChannelError,
 )
 from cywl_oopz.features.voice.models import (
+    VoiceRuntimeStats,
     VoiceSessionState,
     VoiceStartRequest,
     VoiceStopReason,
@@ -62,6 +63,22 @@ def service():
     )
 
 
+class RecordingStatusSink:
+    def __init__(self) -> None:
+        self.statuses = []
+        self.closed = False
+
+    @property
+    def owns_message(self) -> bool:
+        return True
+
+    def emit(self, status) -> None:
+        self.statuses.append(status)
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
 @pytest.mark.asyncio
 async def test_voice_service_runs_fake_session_then_stops_and_releases_everything() -> None:
     conversations, access, runtimes = service()
@@ -83,6 +100,42 @@ async def test_voice_service_runs_fake_session_then_stops_and_releases_everythin
     assert access.active_lease is None
     assert access.release_count == 1
     assert (await conversations.status()).active is False
+    await conversations.aclose()
+
+
+@pytest.mark.asyncio
+async def test_voice_service_streams_runtime_status_and_terminal_usage() -> None:
+    conversations, _, runtimes = service()
+    display = RecordingStatusSink()
+
+    active = await conversations.start(request(), display)
+    runtimes.runtimes[0].set_state(
+        VoiceSessionState.SPEAKING,
+        VoiceRuntimeStats(responses_started=3, responses_drained=2, task_control_calls=1),
+    )
+    runtimes.runtimes[0].usage = {
+        "input_tokens": 7,
+        "output_tokens": 5,
+        "total_tokens": 12,
+    }
+    await conversations.stop("person")
+
+    states = [status.state for status in display.statuses]
+    assert states[:3] == [
+        VoiceSessionState.STARTING,
+        VoiceSessionState.ACQUIRING_VOICE,
+        VoiceSessionState.CONNECTING_PROVIDER,
+    ]
+    assert VoiceSessionState.LISTENING in states
+    assert VoiceSessionState.SPEAKING in states
+    terminal = display.statuses[-1]
+    assert terminal.active is False
+    assert terminal.state is VoiceSessionState.CLOSED
+    assert terminal.session_id == active.session_id
+    assert terminal.model_display_name == "Fake realtime"
+    assert terminal.metrics["voice_responses_drained"] == 2
+    assert terminal.usage["total_tokens"] == 12
+    assert display.closed is True
     await conversations.aclose()
 
 

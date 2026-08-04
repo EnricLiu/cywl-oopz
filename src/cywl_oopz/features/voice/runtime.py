@@ -43,6 +43,7 @@ from .models import (
     VoiceProviderCapabilities,
     VoiceRuntimeResult,
     VoiceRuntimeStats,
+    VoiceRuntimeStatus,
     VoiceSessionState,
     VoiceStopReason,
     VoiceTaskNotification,
@@ -333,7 +334,7 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                 with suppress(Exception):
                     await media.flush_output()
                 await media.aclose()
-            self._state = VoiceSessionState.CLOSED
+            self._set_state(VoiceSessionState.CLOSED)
 
     async def _connect_provider(self) -> None:
         last_error: Exception | None = None
@@ -375,7 +376,7 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
         ) from last_error
 
     async def _recover_provider(self, *, playout_flushed: bool = False) -> bool:
-        self._state = VoiceSessionState.RECOVERING
+        self._set_state(VoiceSessionState.RECOVERING)
         if self._proactive_task_notices:
             await self._defer_pending_proactive_notifications()
         self._provider_ready.clear()
@@ -420,15 +421,15 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
         while not self._closed:
             event = await self._control.get()
             if isinstance(event, _StopRequested):
-                self._state = VoiceSessionState.CLOSING
+                self._set_state(VoiceSessionState.CLOSING)
                 self._complete(event.reason)
                 return
             if isinstance(event, _WatchdogExpired):
-                self._state = VoiceSessionState.CLOSING
+                self._set_state(VoiceSessionState.CLOSING)
                 self._complete(event.reason)
                 return
             if isinstance(event, _MediaEnded):
-                self._state = VoiceSessionState.CLOSING
+                self._set_state(VoiceSessionState.CLOSING)
                 reason = (
                     VoiceStopReason.OWNER_LEFT
                     if event.reason
@@ -453,7 +454,7 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                             "voice-provider-audio-recovered",
                         )
                     continue
-                self._state = VoiceSessionState.FAILED
+                self._set_state(VoiceSessionState.FAILED)
                 reason = (
                     VoiceStopReason.PROVIDER_FAILED
                     if event.retryable_provider or event.pump.startswith("provider")
@@ -481,7 +482,7 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
             model_event = event.event
             self._last_activity = time.monotonic()
             if isinstance(model_event, VoiceSessionReady):
-                self._state = (
+                self._set_state(
                     VoiceSessionState.USER_SPEAKING
                     if self._user_speaking
                     else VoiceSessionState.LISTENING
@@ -503,10 +504,11 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                         self._stats,
                         duplicate_speech_started=self._stats.duplicate_speech_started + 1,
                     )
+                    self._publish_status()
                     continue
                 self._user_speaking = True
                 if self._active_response is None:
-                    self._state = VoiceSessionState.USER_SPEAKING
+                    self._set_state(VoiceSessionState.USER_SPEAKING)
                     continue
                 await self._interrupt_active_response(
                     notify_provider=True,
@@ -516,7 +518,7 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
             elif isinstance(model_event, VoiceUserSpeechStopped):
                 self._user_speaking = False
                 self._last_user_speech_stopped = time.monotonic()
-                self._state = VoiceSessionState.THINKING
+                self._set_state(VoiceSessionState.THINKING)
             elif isinstance(model_event, VoiceResponseStarted):
                 await self._start_response(model_event.response_id)
                 if self._proactive_task_notices:
@@ -558,11 +560,11 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                     await self._defer_pending_proactive_notifications()
                 if model_event.retryable and await self._recover_provider():
                     continue
-                self._state = VoiceSessionState.FAILED
+                self._set_state(VoiceSessionState.FAILED)
                 self._complete(VoiceStopReason.PROVIDER_FAILED)
                 return
             elif isinstance(model_event, VoiceSessionFinished):
-                self._state = VoiceSessionState.CLOSING
+                self._set_state(VoiceSessionState.CLOSING)
                 self._complete(VoiceStopReason.RUNTIME_ENDED)
                 return
 
@@ -828,6 +830,7 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                 else self._stats.task_notifications_text_fallback
             ),
         )
+        self._publish_status()
         if self._mailbox_available_pending:
             self._handle_mailbox_available()
 
@@ -862,6 +865,7 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
             self._stats,
             task_control_calls=self._stats.task_control_calls + 1,
         )
+        self._publish_status()
         self._spawn(
             self._execute_tool_call(session, event),
             "voice-task-control",
@@ -925,6 +929,7 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
             last_task_control_ms=event.elapsed_ms,
             max_task_control_ms=max(self._stats.max_task_control_ms, event.elapsed_ms),
         )
+        self._publish_status()
         if event.session is not self._provider_session:
             return
         try:
@@ -938,7 +943,7 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                 exception_kind(exc),
             )
             if not await self._recover_provider():
-                self._state = VoiceSessionState.FAILED
+                self._set_state(VoiceSessionState.FAILED)
                 self._complete(VoiceStopReason.PROVIDER_FAILED)
             return
         self._remember_completed_tool_call(event.call_id)
@@ -984,7 +989,7 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
             self._stats,
             responses_started=self._stats.responses_started + 1,
         )
-        self._state = VoiceSessionState.THINKING
+        self._set_state(VoiceSessionState.THINKING)
 
     async def _stage_assistant_audio(self, event: VoiceAssistantAudio) -> None:
         active = self._active_response
@@ -1000,7 +1005,7 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
             return
         if event.provider_item_id:
             active.provider_item_id = event.provider_item_id
-        self._state = VoiceSessionState.SPEAKING
+        self._set_state(VoiceSessionState.SPEAKING)
         try:
             self._audio_events.put_nowait(event)
         except asyncio.QueueFull:
@@ -1114,7 +1119,7 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
             self._stats,
             responses_drained=self._stats.responses_drained + 1,
         )
-        self._state = (
+        self._set_state(
             VoiceSessionState.USER_SPEAKING if self._user_speaking else VoiceSessionState.LISTENING
         )
         if self._mailbox_available_pending:
@@ -1136,12 +1141,12 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
     ) -> bool:
         active = self._active_response
         if active is None:
-            self._state = target_state
+            self._set_state(target_state)
             if self._mailbox_available_pending and target_state is VoiceSessionState.LISTENING:
                 self._handle_mailbox_available()
             return True
         started_at = time.monotonic()
-        self._state = VoiceSessionState.INTERRUPTING
+        self._set_state(VoiceSessionState.INTERRUPTING)
         if count_barge_in:
             self._stats = replace(
                 self._stats,
@@ -1158,7 +1163,7 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                 opaque_ref(str(self._context.descriptor.session_id)),
                 exception_kind(exc),
             )
-            self._state = VoiceSessionState.FAILED
+            self._set_state(VoiceSessionState.FAILED)
             self._complete(VoiceStopReason.MEDIA_ENDED)
             return False
         flush_ms = (time.monotonic() - started_at) * 1000
@@ -1184,10 +1189,10 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                     )
                     if await self._recover_provider(playout_flushed=True):
                         return True
-                    self._state = VoiceSessionState.FAILED
+                    self._set_state(VoiceSessionState.FAILED)
                     self._complete(VoiceStopReason.PROVIDER_FAILED)
                     return False
-        self._state = target_state
+        self._set_state(target_state)
         if self._mailbox_available_pending and target_state is VoiceSessionState.LISTENING:
             self._handle_mailbox_available()
         logger.info(
@@ -1410,8 +1415,25 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
             task.get_name().split(":", 1)[0],
             exception_kind(error),
         )
-        self._state = VoiceSessionState.FAILED
+        self._set_state(VoiceSessionState.FAILED)
         self._complete(VoiceStopReason.PROVIDER_FAILED)
+
+    def _set_state(self, state: VoiceSessionState) -> None:
+        self._state = state
+        self._publish_status()
+
+    def _publish_status(self) -> None:
+        sink = self._context.status_sink
+        if sink is None:
+            return
+        try:
+            sink.emit(VoiceRuntimeStatus(self._state, self._stats))
+        except Exception as exc:
+            logger.warning(
+                "Voice runtime status sink failed: session=%s error=%s",
+                opaque_ref(str(self._context.descriptor.session_id)),
+                exception_kind(exc),
+            )
 
     def _complete(self, reason: VoiceStopReason) -> None:
         if self._result is not None and not self._result.done():

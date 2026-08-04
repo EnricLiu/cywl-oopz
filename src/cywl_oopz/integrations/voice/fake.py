@@ -22,6 +22,7 @@ from cywl_oopz.features.voice.models import (
     VoiceProviderCapabilities,
     VoiceRuntimeResult,
     VoiceRuntimeStats,
+    VoiceRuntimeStatus,
     VoiceSessionDescriptor,
     VoiceSessionState,
     VoiceStopReason,
@@ -413,7 +414,8 @@ class FakeRealtimeVoiceProvider:
 class FakeVoiceSessionRuntime:
     """Minimal controllable runtime for lifecycle tests."""
 
-    def __init__(self) -> None:
+    def __init__(self, context: VoiceSessionRuntimeContext | None = None) -> None:
+        self._context = context
         self.started = False
         self.closed = False
         self.stop_requests: list[VoiceStopReason] = []
@@ -433,7 +435,7 @@ class FakeVoiceSessionRuntime:
 
     async def start(self) -> None:
         self.started = True
-        self._state = VoiceSessionState.LISTENING
+        self.set_state(VoiceSessionState.LISTENING)
 
     async def wait_finished(self) -> VoiceRuntimeResult:
         await self._finished.wait()
@@ -441,21 +443,33 @@ class FakeVoiceSessionRuntime:
 
     async def request_stop(self, reason: VoiceStopReason) -> None:
         self.stop_requests.append(reason)
-        self._state = VoiceSessionState.CLOSING
+        self.set_state(VoiceSessionState.CLOSING)
         self._result = VoiceRuntimeResult(reason, dict(self.usage))
         self._finished.set()
 
     async def finish(self, reason: VoiceStopReason = VoiceStopReason.RUNTIME_ENDED) -> None:
         self._result = VoiceRuntimeResult(reason, dict(self.usage))
-        self._state = VoiceSessionState.CLOSED
+        self.set_state(VoiceSessionState.CLOSED)
         self._finished.set()
 
     async def aclose(self) -> None:
         if self.closed:
             return
         self.closed = True
-        self._state = VoiceSessionState.CLOSED
+        self.set_state(VoiceSessionState.CLOSED)
         self._finished.set()
+
+    def set_state(
+        self,
+        state: VoiceSessionState,
+        stats: VoiceRuntimeStats | None = None,
+    ) -> None:
+        self._state = state
+        if stats is not None:
+            self._stats = stats
+        sink = self._context.status_sink if self._context is not None else None
+        if sink is not None:
+            sink.emit(VoiceRuntimeStatus(self._state, self._stats))
 
 
 class FakeVoiceSessionRuntimeFactory:
@@ -466,7 +480,7 @@ class FakeVoiceSessionRuntimeFactory:
         self.runtimes: list[FakeVoiceSessionRuntime] = []
 
     async def create(self, context: VoiceSessionRuntimeContext) -> FakeVoiceSessionRuntime:
-        runtime = FakeVoiceSessionRuntime()
+        runtime = FakeVoiceSessionRuntime(context)
         self.contexts.append(context)
         self.runtimes.append(runtime)
         return runtime

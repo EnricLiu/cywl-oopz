@@ -18,8 +18,10 @@ from .models import (
     VoiceProviderCapabilities,
     VoiceRuntimeResult,
     VoiceRuntimeStats,
+    VoiceRuntimeStatus,
     VoiceSessionDescriptor,
     VoiceSessionState,
+    VoiceSessionStatus,
     VoiceStopReason,
     VoiceTaskNotification,
 )
@@ -114,6 +116,23 @@ class RealtimeVoiceProvider(Protocol):
     async def aclose(self) -> None: ...
 
 
+class VoiceRuntimeStatusSink(Protocol):
+    """Receive non-blocking runtime snapshots on the owning event loop."""
+
+    def emit(self, status: VoiceRuntimeStatus) -> None: ...
+
+
+class VoiceSessionStatusSink(Protocol):
+    """Own one optional user-facing session status surface."""
+
+    @property
+    def owns_message(self) -> bool: ...
+
+    def emit(self, status: VoiceSessionStatus) -> None: ...
+
+    async def aclose(self) -> None: ...
+
+
 @dataclass(frozen=True, slots=True)
 class VoiceSessionRuntimeContext:
     """Resources pinned for one runtime generation."""
@@ -121,6 +140,7 @@ class VoiceSessionRuntimeContext:
     descriptor: VoiceSessionDescriptor
     lease: VoiceLease
     configuration: VoiceStartConfiguration
+    status_sink: VoiceRuntimeStatusSink | None = None
 
 
 class VoiceSessionRuntime(Protocol):

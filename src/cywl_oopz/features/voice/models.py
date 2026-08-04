@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Literal
@@ -206,12 +207,24 @@ class VoiceSessionStatus:
     voice_channel: VoiceChannelKey | None = None
     state: VoiceSessionState = VoiceSessionState.CLOSED
     elapsed_seconds: float = 0.0
+    model_display_name: str = ""
+    metrics: Mapping[str, int | float] = field(default_factory=dict)
+    usage: Mapping[str, int | float] = field(default_factory=dict)
+    error_message: str = ""
 
     def __post_init__(self) -> None:
         if self.elapsed_seconds < 0:
             raise ValueError("Voice session elapsed time must not be negative")
         if self.active and (self.session_id is None or not self.owner_person_id):
             raise ValueError("Active voice status requires session identity and owner")
+
+
+@dataclass(frozen=True, slots=True)
+class VoiceRuntimeStatus:
+    """Transport-neutral runtime state emitted without awaiting presentation I/O."""
+
+    state: VoiceSessionState
+    stats: VoiceRuntimeStats
 
 
 @dataclass(frozen=True, slots=True)

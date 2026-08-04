@@ -27,8 +27,8 @@ from .errors import (
     VoiceSpeakerSelectionError,
     VoiceUserNotInChannelError,
 )
-from .models import VoiceSessionStatus, VoiceStartRequest, VoiceTextAddress
-from .ports import VoiceConfigurationRepository
+from .models import VoiceSessionState, VoiceSessionStatus, VoiceStartRequest, VoiceTextAddress
+from .ports import VoiceConfigurationRepository, VoiceSessionStatusSink
 from .service import VoiceConversationService
 from .settings import SelectableVoiceModel, VoiceUserSelection
 
@@ -37,6 +37,8 @@ logger = logging.getLogger(__name__)
 
 class VoiceCommandPresenter(Protocol):
     """Render command results at the OOPZ integration boundary."""
+
+    async def open_session(self, context: EventContext) -> VoiceSessionStatusSink: ...
 
     async def started(self, context: EventContext, status: VoiceSessionStatus) -> None: ...
 
@@ -87,11 +89,18 @@ class VoiceCommand:
         if not valid:
             await self._presenter.usage(context, self._prefix)
             return
+        display: VoiceSessionStatusSink | None = None
         try:
             owner = self._owner_person_id(context)
             if action == "start":
-                status = await self._conversations.start(self._start_request(context, owner))
-                await self._presenter.started(context, status)
+                request = self._start_request(context, owner)
+                display = await self._presenter.open_session(context)
+                status = await self._conversations.start(
+                    request,
+                    display,
+                )
+                if not display.owns_message:
+                    await self._presenter.started(context, status)
             elif action == "stop":
                 status = await self._conversations.stop(owner)
                 await self._presenter.stopped(context, status)
@@ -127,10 +136,14 @@ class VoiceCommand:
                 opaque_ref(self._safe_owner(context)),
                 exception_kind(exc),
             )
-            await self._presenter.error(context, self._error_message(exc))
+            message = self._error_message(exc)
+            if not await self._finish_display_error(display, message):
+                await self._presenter.error(context, message)
         except ValueError as exc:
             logger.info("Voice command context invalid: error=%s", exception_kind(exc))
-            await self._presenter.error(context, "无法识别发起人或当前文字频道。")
+            message = "无法识别发起人或当前文字频道。"
+            if not await self._finish_display_error(display, message):
+                await self._presenter.error(context, message)
         except Exception as exc:
             logger.error(
                 "Unexpected voice command failure: action=%s error=%s",
@@ -138,7 +151,29 @@ class VoiceCommand:
                 exception_kind(exc),
                 exc_info=True,
             )
-            await self._presenter.error(context, "语音会话处理失败，请稍后重试。")
+            message = "语音会话处理失败，请稍后重试。"
+            if not await self._finish_display_error(display, message):
+                await self._presenter.error(context, message)
+
+    @staticmethod
+    async def _finish_display_error(
+        display: VoiceSessionStatusSink | None,
+        message: str,
+    ) -> bool:
+        if display is None or not display.owns_message:
+            return False
+        display.emit(
+            VoiceSessionStatus(
+                active=False,
+                state=VoiceSessionState.FAILED,
+                error_message=message,
+            )
+        )
+        try:
+            await display.aclose()
+        except Exception as exc:
+            logger.warning("Voice error display finalization failed: error=%s", exception_kind(exc))
+        return True
 
     @staticmethod
     def _owner_person_id(context: Any) -> str:

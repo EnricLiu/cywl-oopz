@@ -2,18 +2,26 @@
 
 from __future__ import annotations
 
+import logging
+
 from oopz_sdk import OopzBot
 from oopz_sdk.events.context import EventContext
 
 from cywl_oopz.core.observability import opaque_ref
-from cywl_oopz.features.voice.models import VoiceChannelKey, VoiceSessionState, VoiceSessionStatus
+from cywl_oopz.features.voice.display import NoopVoiceSessionStatusSink
+from cywl_oopz.features.voice.models import VoiceChannelKey, VoiceSessionStatus
+from cywl_oopz.features.voice.ports import VoiceSessionStatusSink
 from cywl_oopz.features.voice.settings import SelectableVoiceModel, VoiceUserSelection
 
+from .editable_messages import MessageAddress, OopzEditableMessageGateway
 from .voice_lease import (
     OopzVoiceLeaseManager,
     VoiceLeasePurpose,
     VoiceLeaseRequest,
 )
+from .voice_status import VOICE_STATE_LABELS, OopzVoiceStatusMessage
+
+logger = logging.getLogger(__name__)
 
 
 class OopzConversationVoiceAccess:
@@ -38,28 +46,46 @@ class OopzConversationVoiceAccess:
 
 
 class OopzVoiceCommandPresenter:
-    """Render an I2 command skeleton without exposing internal identifiers."""
+    """Open one live status message and render compact command fallbacks."""
 
-    _STATE_LABELS = {
-        VoiceSessionState.STARTING: "正在启动",
-        VoiceSessionState.ACQUIRING_VOICE: "正在加入语音",
-        VoiceSessionState.RESOLVING_SPEAKER: "正在定位音轨",
-        VoiceSessionState.CONNECTING_PROVIDER: "正在连接模型",
-        VoiceSessionState.LISTENING: "正在听",
-        VoiceSessionState.USER_SPEAKING: "你在说",
-        VoiceSessionState.THINKING: "思考中",
-        VoiceSessionState.SPEAKING: "说话中",
-        VoiceSessionState.INTERRUPTING: "正在打断",
-        VoiceSessionState.RECOVERING: "恢复中",
-        VoiceSessionState.CLOSING: "正在结束",
-        VoiceSessionState.CLOSED: "已结束",
-        VoiceSessionState.FAILED: "已中断",
-    }
+    def __init__(
+        self,
+        editable_messages: OopzEditableMessageGateway | None = None,
+        *,
+        status_edit_interval_seconds: float = 0.5,
+    ) -> None:
+        if status_edit_interval_seconds <= 0:
+            raise ValueError("Voice status edit interval must be positive")
+        self._editable_messages = editable_messages
+        self._status_edit_interval = status_edit_interval_seconds
+        self._active_display: VoiceSessionStatusSink | None = None
+
+    async def open_session(self, context: EventContext) -> VoiceSessionStatusSink:
+        if self._editable_messages is None:
+            return NoopVoiceSessionStatusSink()
+        try:
+            display = OopzVoiceStatusMessage(
+                self._editable_messages,
+                MessageAddress.from_oopz_context(context),
+                edit_interval_seconds=self._status_edit_interval,
+            )
+            await display.open()
+            self._active_display = display
+            return display
+        except Exception as exc:
+            logger.warning(
+                "Could not open OOPZ voice status display: error=%s",
+                type(exc).__name__,
+            )
+            return NoopVoiceSessionStatusSink()
 
     async def started(self, context: EventContext, status: VoiceSessionStatus) -> None:
         await context.reply(f"🎙️ **初音未来语音** · {self._label(status)}")
 
     async def stopped(self, context: EventContext, status: VoiceSessionStatus) -> None:
+        if self._active_display is not None and self._active_display.owns_message:
+            self._active_display = None
+            return
         await context.reply(f"🎵 **语音会话结束** · {self._duration(status.elapsed_seconds)}")
 
     async def status(self, context: EventContext, status: VoiceSessionStatus) -> None:
@@ -117,7 +143,7 @@ class OopzVoiceCommandPresenter:
 
     @classmethod
     def _label(cls, status: VoiceSessionStatus) -> str:
-        return cls._STATE_LABELS[status.state]
+        return VOICE_STATE_LABELS[status.state]
 
     @staticmethod
     def _duration(seconds: float) -> str:
