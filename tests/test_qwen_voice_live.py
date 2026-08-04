@@ -155,21 +155,24 @@ async def _load_live_config() -> QwenOmniConfig:
             if row is None:
                 pytest.skip("database has no enabled application-default Qwen Omni voice model")
             model, provider = row
+            credentials = dict(provider.credentials)
+            if api_key := os.getenv("CYWL_QWEN_API_KEY", "").strip():
+                credentials["api_key"] = api_key
             configuration = VoiceStartConfiguration(
                 provider=VoiceProviderConfiguration(
                     provider.id,
                     provider.alias,
                     provider.display_name,
                     provider.protocol,
-                    provider.endpoint,
-                    MappingProxyType(dict(provider.credentials)),
+                    os.getenv("CYWL_QWEN_ENDPOINT", "").strip() or provider.endpoint,
+                    MappingProxyType(credentials),
                     MappingProxyType(dict(provider.config)),
                 ),
                 model=VoiceModelConfiguration(
                     model.id,
                     model.provider_id,
                     model.alias,
-                    model.remote_model_name,
+                    os.getenv("CYWL_QWEN_MODEL", "").strip() or model.remote_model_name,
                     model.display_name,
                     model.mode,
                     MappingProxyType(dict(model.capabilities)),
@@ -189,7 +192,7 @@ async def _load_live_config() -> QwenOmniConfig:
             try:
                 return QwenOmniConfig.from_start_configuration(configuration)
             except VoiceProviderConfigurationError as exc:
-                pytest.skip(f"database Qwen Omni configuration is incomplete: {type(exc).__name__}")
+                pytest.skip(f"database Qwen Omni configuration is incomplete: {exc}")
     finally:
         await engine.dispose()
 
