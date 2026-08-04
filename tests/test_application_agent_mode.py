@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
@@ -10,7 +11,12 @@ from cywl_oopz.application import BotApplication
 from cywl_oopz.core.errors import ConfigurationError
 from cywl_oopz.features.agent.catalog import ProviderCatalog
 from cywl_oopz.features.agent.commands import AgentModelCommand
-from cywl_oopz.features.agent.models import LlmModel, LlmProvider, ProviderProtocol
+from cywl_oopz.features.agent.models import (
+    LlmModel,
+    LlmProvider,
+    ModelCapability,
+    ProviderProtocol,
+)
 from cywl_oopz.features.chat.commands import ModelCommand
 from cywl_oopz.features.web.errors import BrowserUnavailableError
 from cywl_oopz.settings import AppSettings
@@ -180,6 +186,9 @@ async def test_composition_root_registers_experimental_voice_command_only_when_e
     assert {check.name: check.state.value for check in enabled.health.snapshot()}[
         "voice"
     ] == "pending"
+    health = {check.name: check.state.value for check in enabled.health.snapshot()}
+    assert health["llm"] == "pending"
+    assert health["skills"] == "pending"
 
     for application in (disabled, enabled):
         await application.voice_conversations.aclose()
@@ -361,6 +370,142 @@ async def test_application_recovers_stale_voice_sessions_before_oopz_even_when_d
 
     assert events == ["recover_voice", "run_oopz"]
     assert application.bot.did_run is True
+
+
+@pytest.mark.asyncio
+async def test_voice_only_mode_initializes_background_agent_runtime(monkeypatch) -> None:
+    monkeypatch.setattr(application_module, "OopzBot", FakeOopzBot)
+    application = BotApplication(settings("legacy", CYWL_VOICE_ENABLED="true"))
+    application.bot.voice = SimpleNamespace(capabilities=SimpleNamespace(feature_version=1))
+    application.agent_catalog._catalog = ProviderCatalog.build(
+        (
+            LlmProvider(
+                id=PROVIDER_ID,
+                alias="voice-agent",
+                display_name="Voice Agent",
+                protocol=ProviderProtocol.OPENAI_CHAT_COMPATIBLE,
+                base_url="https://llm.example/v1",
+                api_key="database-key",
+                user_selectable=True,
+                enabled=True,
+            ),
+        ),
+        (
+            LlmModel(
+                id=MODEL_ID,
+                provider_id=PROVIDER_ID,
+                alias="tool-model",
+                remote_model_name="tool-model",
+                display_name="Tool model",
+                enabled=True,
+                is_provider_default=True,
+                is_application_default=True,
+                capabilities=frozenset({ModelCapability.TOOL_CALLING}),
+            ),
+        ),
+    )
+    events: list[str] = []
+
+    async def no_op() -> None:
+        return None
+
+    async def recover_voice(now) -> int:
+        del now
+        events.append("recover_voice")
+        return 0
+
+    async def reload_catalog() -> None:
+        events.append("reload_catalog")
+
+    async def abandon_runs(before, now) -> int:
+        assert before < now
+        events.append("abandon_runs")
+        return 1
+
+    async def start_scheduler() -> None:
+        events.append("start_scheduler")
+
+    async def start_fallback() -> None:
+        events.append("start_fallback")
+
+    async def run_bot() -> None:
+        events.append("run_oopz")
+
+    monkeypatch.setattr(
+        application,
+        "voice_capability_gate",
+        SimpleNamespace(validate=lambda capabilities: None),
+    )
+    monkeypatch.setattr(application.database, "start", no_op)
+    monkeypatch.setattr(application.database, "close", no_op)
+    monkeypatch.setattr(application.voice_sessions, "recover_stale", recover_voice)
+    monkeypatch.setattr(application.agent_models, "reload", reload_catalog)
+    monkeypatch.setattr(application.agent_runs, "abandon_stale", abandon_runs)
+    monkeypatch.setattr(application.delegated_task_scheduler, "start", start_scheduler)
+    monkeypatch.setattr(application.delegated_task_text_fallback, "start", start_fallback)
+    monkeypatch.setattr(application.bot, "run", run_bot)
+
+    await application.run()
+
+    assert events == [
+        "recover_voice",
+        "reload_catalog",
+        "abandon_runs",
+        "start_scheduler",
+        "start_fallback",
+        "run_oopz",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_voice_only_mode_requires_tool_capable_background_model(monkeypatch) -> None:
+    monkeypatch.setattr(application_module, "OopzBot", FakeOopzBot)
+    application = BotApplication(settings("legacy", CYWL_VOICE_ENABLED="true"))
+    application.bot.voice = SimpleNamespace(capabilities=SimpleNamespace(feature_version=1))
+    application.agent_catalog._catalog = ProviderCatalog.build(
+        (
+            LlmProvider(
+                id=PROVIDER_ID,
+                alias="text-only",
+                display_name="Text only",
+                protocol=ProviderProtocol.OPENAI_CHAT_COMPATIBLE,
+                base_url="https://llm.example/v1",
+                api_key="database-key",
+                user_selectable=True,
+                enabled=True,
+            ),
+        ),
+        (
+            LlmModel(
+                id=MODEL_ID,
+                provider_id=PROVIDER_ID,
+                alias="model",
+                remote_model_name="model",
+                display_name="Model",
+                enabled=True,
+                is_provider_default=True,
+                is_application_default=True,
+            ),
+        ),
+    )
+
+    async def no_op() -> None:
+        return None
+
+    monkeypatch.setattr(
+        application,
+        "voice_capability_gate",
+        SimpleNamespace(validate=lambda capabilities: None),
+    )
+    monkeypatch.setattr(application.database, "start", no_op)
+    monkeypatch.setattr(application.database, "close", no_op)
+    monkeypatch.setattr(application.voice_sessions, "recover_stale", no_stale_voice_sessions)
+    monkeypatch.setattr(application.agent_models, "reload", no_op)
+
+    with pytest.raises(ConfigurationError, match="application-default"):
+        await application.run()
+
+    assert not hasattr(application.bot, "did_run")
 
 
 @pytest.mark.asyncio

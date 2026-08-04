@@ -550,7 +550,7 @@ class BotApplication:
         self.health.mark(
             "llm",
             HealthState.PENDING
-            if settings.chat.enabled or settings.agent.enabled
+            if settings.chat.enabled or settings.agent.enabled or settings.voice.enabled
             else HealthState.DISABLED,
         )
         self.health.mark("oopz", HealthState.PENDING)
@@ -561,7 +561,7 @@ class BotApplication:
         self.health.mark(
             "skills",
             HealthState.PENDING
-            if settings.agent.enabled and settings.agent.skills_enabled
+            if (settings.agent.enabled or settings.voice.enabled) and settings.agent.skills_enabled
             else HealthState.DISABLED,
         )
         self.health.mark(
@@ -653,12 +653,6 @@ class BotApplication:
                 raise
             self.health.mark("database", HealthState.HEALTHY, "connection check passed")
             logger.info("Database health check passed")
-            recovered_voice_sessions = await self.voice_sessions.recover_stale(datetime.now(UTC))
-            if recovered_voice_sessions:
-                logger.warning(
-                    "Marked stale voice sessions interrupted after process restart: count=%s",
-                    recovered_voice_sessions,
-                )
             if self.browser is not None:
                 try:
                     await self.browser.start()
@@ -679,7 +673,14 @@ class BotApplication:
                         HealthState.HEALTHY,
                         "MCP contract validated",
                     )
-            if self.settings.agent.enabled:
+            recovered_voice_sessions = await self.voice_sessions.recover_stale(datetime.now(UTC))
+            if recovered_voice_sessions:
+                logger.warning(
+                    "Marked stale voice sessions interrupted after process restart: count=%s",
+                    recovered_voice_sessions,
+                )
+            agent_runtime_enabled = self.settings.agent.enabled or self.settings.voice.enabled
+            if agent_runtime_enabled:
                 await self.agent_models.reload()
                 catalog = self.agent_catalog.snapshot
                 logger.info(
@@ -693,7 +694,7 @@ class BotApplication:
                         default_model_id,
                         required_capabilities=(
                             frozenset({ModelCapability.TOOL_CALLING})
-                            if self.settings.agent.enabled_tools
+                            if self.settings.agent.enabled_tools or self.settings.voice.enabled
                             else frozenset()
                         ),
                         require_user_selectable=False,
@@ -703,7 +704,7 @@ class BotApplication:
                 )
                 if default_model is None:
                     raise ConfigurationError(
-                        "Agent mode requires an enabled application-default LLM model"
+                        "Agent or voice mode requires an enabled application-default LLM model"
                     )
                 now = datetime.now(UTC)
                 abandoned = await self.agent_runs.abandon_stale(
@@ -712,7 +713,7 @@ class BotApplication:
                 )
                 if abandoned:
                     logger.warning("Marked stale Agent runs abandoned: count=%s", abandoned)
-            if self.settings.agent.enabled or self.settings.voice.enabled:
+            if agent_runtime_enabled:
                 await self.delegated_task_scheduler.start()
                 await self.delegated_task_text_fallback.start()
             logger.info("Starting OOPZ client")
