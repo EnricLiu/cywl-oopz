@@ -5,7 +5,7 @@ import logging
 import os
 import time
 import wave
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
 from uuid import uuid4
@@ -23,6 +23,7 @@ from cywl_oopz.features.voice.models import (
     RemoteAudioFrame,
     VoiceAudioFormat,
     VoiceChannelKey,
+    VoiceMediaEndReason,
     VoiceSessionDescriptor,
     VoiceSessionState,
     VoiceStopReason,
@@ -142,13 +143,23 @@ class _QwenLiveRuntimeHarness:
         cls,
         config: QwenOmniConfig,
         instructions: str,
+        *,
+        idle_timeout_seconds: int = 300,
+        owner_leave_grace_seconds: int = 15,
     ) -> _QwenLiveRuntimeHarness:
         access = FakeVoiceAccessGateway()
         channel = VoiceChannelKey("live-test-area", "live-test-voice")
         lease = await access.try_acquire(channel, "qwen-live-runtime")
         assert lease is not None
-        configuration = await FakeVoiceConfigurationRepository().resolve_start_configuration(
+        base_configuration = await FakeVoiceConfigurationRepository().resolve_start_configuration(
             "live-test-person", channel
+        )
+        configuration = replace(
+            base_configuration,
+            channel=replace(
+                base_configuration.channel,
+                idle_timeout_seconds=idle_timeout_seconds,
+            ),
         )
         descriptor = VoiceSessionDescriptor(
             uuid4(),
@@ -174,6 +185,7 @@ class _QwenLiveRuntimeHarness:
                     "CYWL_VOICE_START_TIMEOUT_SECONDS": "30",
                     "CYWL_VOICE_STOP_TIMEOUT_SECONDS": "1.5",
                     "CYWL_VOICE_IDLE_TIMEOUT_SECONDS": "300",
+                    "CYWL_VOICE_OWNER_LEAVE_GRACE_SECONDS": str(owner_leave_grace_seconds),
                     "CYWL_VOICE_MAX_SESSION_SECONDS": "1800",
                     "CYWL_VOICE_INPUT_QUEUE_MS": "1000",
                     "CYWL_VOICE_OUTPUT_QUEUE_MS": "2000",
@@ -565,6 +577,49 @@ async def test_qwen_live_runtime_survives_repeated_barge_in() -> None:
             harness.runtime.stats.responses_started,
         )
         await harness.stop()
+    finally:
+        await harness.aclose()
+    assert harness.media.closed is True
+    assert all(provider._closed for provider in harness.providers)
+
+
+@pytest.mark.asyncio
+async def test_qwen_live_runtime_closes_provider_on_idle_timeout() -> None:
+    load_dotenv(find_dotenv(usecwd=True), override=False)
+    if os.getenv("CYWL_RUN_LIVE_QWEN_TESTS") != "1":
+        pytest.skip("set CYWL_RUN_LIVE_QWEN_TESTS=1 to run the Qwen realtime smoke")
+    config = await _load_live_config()
+    harness = await _QwenLiveRuntimeHarness.create(
+        config,
+        "你正在执行空闲超时测试。不要主动说话。",
+        idle_timeout_seconds=1,
+    )
+    try:
+        async with asyncio.timeout(3):
+            result = await harness.runtime.wait_finished()
+        assert result.reason is VoiceStopReason.IDLE_TIMEOUT
+    finally:
+        await harness.aclose()
+    assert harness.media.closed is True
+    assert all(provider._closed for provider in harness.providers)
+
+
+@pytest.mark.asyncio
+async def test_qwen_live_runtime_closes_provider_when_owner_leaves() -> None:
+    load_dotenv(find_dotenv(usecwd=True), override=False)
+    if os.getenv("CYWL_RUN_LIVE_QWEN_TESTS") != "1":
+        pytest.skip("set CYWL_RUN_LIVE_QWEN_TESTS=1 to run the Qwen realtime smoke")
+    config = await _load_live_config()
+    harness = await _QwenLiveRuntimeHarness.create(
+        config,
+        "你正在执行离开频道测试。不要主动说话。",
+        owner_leave_grace_seconds=0,
+    )
+    try:
+        await harness.media.end_input(VoiceMediaEndReason.OWNER_LEFT)
+        async with asyncio.timeout(2):
+            result = await harness.runtime.wait_finished()
+        assert result.reason is VoiceStopReason.OWNER_LEFT
     finally:
         await harness.aclose()
     assert harness.media.closed is True
