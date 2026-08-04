@@ -239,6 +239,29 @@ async def test_realtime_runtime_streams_audio_and_persists_final_turns() -> None
 
 
 @pytest.mark.asyncio
+async def test_realtime_runtime_terminal_result_survives_cancelled_waiter() -> None:
+    runtime, _, _, providers = await runtime_fixture()
+    starting = asyncio.create_task(runtime.start())
+    await wait_until(lambda: bool(providers and providers[0].sessions))
+    await providers[0].sessions[0].emit(VoiceSessionReady())
+    await starting
+
+    observer = asyncio.create_task(runtime.wait_finished())
+    await asyncio.sleep(0)
+    observer.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await observer
+
+    await runtime.request_stop(VoiceStopReason.COMMAND)
+    async with asyncio.timeout(1):
+        result = await runtime.wait_finished()
+    assert result.reason is VoiceStopReason.COMMAND
+
+    await runtime.aclose()
+    assert providers[0].closed is True
+
+
+@pytest.mark.asyncio
 async def test_realtime_runtime_stop_budget_cancels_stalled_transports_and_pumps() -> None:
     runtime, media_gateway, _, providers = await runtime_fixture()
     runtime._settings = settings(CYWL_VOICE_STOP_TIMEOUT_SECONDS="0.05")

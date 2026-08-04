@@ -341,7 +341,7 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
     async def wait_finished(self) -> VoiceRuntimeResult:
         if self._result is None:
             raise RuntimeError("Voice runtime has not started")
-        return await self._result
+        return await asyncio.shield(self._result)
 
     async def request_stop(self, reason: VoiceStopReason) -> None:
         if self._closed:
