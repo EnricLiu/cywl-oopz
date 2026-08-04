@@ -130,6 +130,7 @@ from .integrations.oopz.voice_conversation import (
     OopzVoiceCommandPresenter,
 )
 from .integrations.oopz.voice_lease import OopzVoiceLeaseManager
+from .integrations.oopz.voice_media import OopzVoiceMediaGateway
 from .integrations.voice.unavailable import UnavailableVoiceSessionRuntimeFactory
 from .integrations.web.agent_browser_mcp import AgentBrowserMcpGateway
 from .integrations.web.duckduckgo import DuckDuckGoSearchGateway
@@ -158,6 +159,7 @@ class BotApplication:
         self.bot = OopzBot(settings.oopz)
         self.voice_capability_gate = OopzVoiceCapabilityGate()
         self.voice_leases = OopzVoiceLeaseManager(self.bot)
+        self.voice_media = OopzVoiceMediaGateway(self.bot, settings.voice)
         self.chat_invocations = OopzChatInvocationFactory(settings.oopz.person_uid)
         self.agent_presenters = OopzAgentPresenterFactory(
             OopzEditableMessageGateway(self.bot),

@@ -149,6 +149,26 @@ class VoiceStopReason(StrEnum):
     START_FAILED = "start_failed"
 
 
+class VoiceMediaEndReason(StrEnum):
+    """Project-owned terminal reason for the owner input track."""
+
+    CLOSED_BY_CALLER = "closed_by_caller"
+    OWNER_UNPUBLISHED = "owner_unpublished"
+    OWNER_LEFT = "owner_left"
+    VOICE_LEFT = "voice_left"
+    BACKEND_CLOSED = "backend_closed"
+    TRANSPORT_LOST = "transport_lost"
+    QUEUE_OVERFLOW = "queue_overflow"
+
+
+@dataclass(frozen=True, slots=True)
+class VoiceMediaTerminal:
+    """Sanitized terminal state surfaced by the OOPZ media adapter."""
+
+    reason: VoiceMediaEndReason
+    error_kind: str | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class VoiceStartRequest:
     """Trusted identity and reply address extracted from an OOPZ command."""

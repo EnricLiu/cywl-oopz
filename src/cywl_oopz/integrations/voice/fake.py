@@ -11,6 +11,8 @@ from cywl_oopz.features.voice.models import (
     PlaybackCursor,
     RemoteAudioFrame,
     VoiceChannelKey,
+    VoiceMediaEndReason,
+    VoiceMediaTerminal,
     VoiceProviderCapabilities,
     VoiceRuntimeResult,
     VoiceSessionDescriptor,
@@ -72,6 +74,8 @@ class FakeVoiceMediaSession:
 
     def __init__(self, *, sample_rate: int = 24_000) -> None:
         self._inputs: asyncio.Queue[RemoteAudioFrame | None] = asyncio.Queue()
+        self._input_closed = asyncio.Event()
+        self._input_terminal = VoiceMediaTerminal(VoiceMediaEndReason.CLOSED_BY_CALLER)
         self._cursor = PlaybackCursor(0, 0, 0, 0, sample_rate)
         self.outputs: list[PcmChunk] = []
         self.closed = False
@@ -79,7 +83,12 @@ class FakeVoiceMediaSession:
     async def push_input(self, frame: RemoteAudioFrame) -> None:
         await self._inputs.put(frame)
 
-    async def end_input(self) -> None:
+    async def end_input(
+        self,
+        reason: VoiceMediaEndReason = VoiceMediaEndReason.OWNER_LEFT,
+    ) -> None:
+        self._input_terminal = VoiceMediaTerminal(reason)
+        self._input_closed.set()
         await self._inputs.put(None)
 
     async def input_frames(self) -> AsyncIterator[RemoteAudioFrame]:
@@ -88,6 +97,10 @@ class FakeVoiceMediaSession:
             if frame is None:
                 return
             yield frame
+
+    async def wait_input_closed(self) -> VoiceMediaTerminal:
+        await self._input_closed.wait()
+        return self._input_terminal
 
     async def write_output(self, chunk: PcmChunk) -> PlaybackCursor:
         if self.closed:
@@ -124,6 +137,8 @@ class FakeVoiceMediaSession:
         if self.closed:
             return
         self.closed = True
+        self._input_terminal = VoiceMediaTerminal(VoiceMediaEndReason.CLOSED_BY_CALLER)
+        self._input_closed.set()
         await self._inputs.put(None)
 
 

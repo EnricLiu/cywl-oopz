@@ -12,6 +12,7 @@ from .models import (
     PlaybackCursor,
     RemoteAudioFrame,
     VoiceChannelKey,
+    VoiceMediaTerminal,
     VoiceProviderCapabilities,
     VoiceRuntimeResult,
     VoiceSessionDescriptor,
@@ -45,6 +46,8 @@ class VoiceMediaSession(Protocol):
 
     def input_frames(self) -> AsyncIterator[RemoteAudioFrame]: ...
 
+    async def wait_input_closed(self) -> VoiceMediaTerminal: ...
+
     async def write_output(self, chunk: PcmChunk) -> PlaybackCursor: ...
 
     async def flush_output(self) -> PlaybackCursor: ...
@@ -54,6 +57,16 @@ class VoiceMediaSession(Protocol):
     async def current_cursor(self) -> PlaybackCursor: ...
 
     async def aclose(self) -> None: ...
+
+
+class VoiceMediaGateway(Protocol):
+    """Open owner-only input and one incremental output under an acquired lease."""
+
+    async def open(
+        self,
+        descriptor: VoiceSessionDescriptor,
+        lease: VoiceLease,
+    ) -> VoiceMediaSession: ...
 
 
 class RealtimeVoiceSession(Protocol):

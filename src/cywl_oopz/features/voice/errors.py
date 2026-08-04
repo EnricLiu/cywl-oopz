@@ -53,3 +53,12 @@ class VoiceAudioQueueClosedError(VoiceConversationError):
 
 class VoiceOutputBackpressureError(VoiceConversationError):
     """Provider output could not make progress before its hard timeout."""
+
+
+class VoiceMediaTransportError(VoiceConversationError):
+    """The OOPZ media subscription or PCM output transport failed."""
+
+    def __init__(self, operation: str, error_kind: str) -> None:
+        super().__init__(f"Voice media operation failed: {operation}")
+        self.operation = operation
+        self.error_kind = error_kind
