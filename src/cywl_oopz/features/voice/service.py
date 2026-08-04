@@ -51,6 +51,9 @@ from .settings import PersistedVoiceSessionStatus, VoiceStartConfiguration
 
 logger = logging.getLogger(__name__)
 
+_LEASE_RELEASE_RETRY_DELAYS = (0.1, 0.25, 0.5)
+_LEASE_RELEASE_RETRY_TIMEOUT_SECONDS = 0.5
+
 
 @dataclass(slots=True)
 class _ActiveVoiceSession:
@@ -71,6 +74,7 @@ class _ActiveVoiceSession:
     stop_requested: bool = False
     cleanup_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     done: asyncio.Event = field(default_factory=asyncio.Event)
+    lease_release_task: asyncio.Task[None] | None = None
 
 
 class VoiceConversationService:
@@ -92,6 +96,8 @@ class VoiceConversationService:
         self._sessions = sessions
         self._memory_context_source = memory_context_source
         self._lock = asyncio.Lock()
+        self._close_lock = asyncio.Lock()
+        self._lease_release_tasks: set[asyncio.Task[None]] = set()
         self._active: _ActiveVoiceSession | None = None
         self._closed = False
 
@@ -256,15 +262,14 @@ class VoiceConversationService:
 
     async def aclose(self) -> None:
         """Reject new sessions and idempotently close the current generation."""
-        async with self._lock:
-            if self._closed:
-                return
-            self._closed = True
-            slot = self._active
-        if slot is None:
-            return
-        await self._request_stop(slot, VoiceStopReason.SHUTDOWN)
-        await self._await_done_or_force(slot, VoiceStopReason.SHUTDOWN)
+        async with self._close_lock:
+            async with self._lock:
+                self._closed = True
+                slot = self._active
+            if slot is not None:
+                await self._request_stop(slot, VoiceStopReason.SHUTDOWN)
+                await self._await_done_or_force(slot, VoiceStopReason.SHUTDOWN)
+            await self._cancel_lease_release_tasks()
 
     async def _await_done_or_force(
         self,
@@ -454,6 +459,93 @@ class VoiceConversationService:
                 "Voice lease cleanup failed: session=%s error=%s",
                 opaque_ref(str(slot.session_id)),
                 exception_kind(exc),
+            )
+        if not lease.released and not self._closed:
+            self._schedule_lease_release_retry(slot)
+
+    def _schedule_lease_release_retry(self, slot: _ActiveVoiceSession) -> None:
+        current = slot.lease_release_task
+        if current is not None and not current.done():
+            return
+        task = asyncio.create_task(
+            self._retry_release_lease(slot),
+            name=f"voice-lease-release:{slot.session_id}",
+        )
+        slot.lease_release_task = task
+        self._lease_release_tasks.add(task)
+        task.add_done_callback(lambda completed: self._lease_release_done(slot, completed))
+
+    async def _retry_release_lease(self, slot: _ActiveVoiceSession) -> None:
+        lease = slot.lease
+        if lease is None:
+            return
+        for attempt, delay in enumerate(_LEASE_RELEASE_RETRY_DELAYS, start=1):
+            await asyncio.sleep(delay)
+            if lease.released:
+                return
+            try:
+                async with asyncio.timeout(_LEASE_RELEASE_RETRY_TIMEOUT_SECONDS):
+                    await lease.release()
+            except TimeoutError:
+                logger.warning(
+                    "Voice lease release retry timed out: session=%s attempt=%s",
+                    opaque_ref(str(slot.session_id)),
+                    attempt,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "Voice lease release retry failed: session=%s attempt=%s error=%s",
+                    opaque_ref(str(slot.session_id)),
+                    attempt,
+                    exception_kind(exc),
+                )
+            if lease.released:
+                logger.info(
+                    "Voice lease released after retry: session=%s attempt=%s",
+                    opaque_ref(str(slot.session_id)),
+                    attempt,
+                )
+                return
+        logger.error(
+            "Voice lease release retries exhausted; backend remains reserved: session=%s",
+            opaque_ref(str(slot.session_id)),
+        )
+
+    def _lease_release_done(
+        self,
+        slot: _ActiveVoiceSession,
+        task: asyncio.Task[None],
+    ) -> None:
+        self._lease_release_tasks.discard(task)
+        if slot.lease_release_task is task:
+            slot.lease_release_task = None
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            logger.error(
+                "Voice lease release task failed unexpectedly: session=%s error=%s",
+                opaque_ref(str(slot.session_id)),
+                exception_kind(error),
+            )
+
+    async def _cancel_lease_release_tasks(self) -> None:
+        tasks = tuple(self._lease_release_tasks)
+        for task in tasks:
+            task.cancel()
+        if not tasks:
+            return
+        done, pending = await asyncio.wait(
+            tasks,
+            timeout=min(0.1, self._settings.stop_timeout_seconds * 0.1),
+        )
+        del done
+        if pending:
+            logger.warning(
+                "Voice lease release tasks exceeded shutdown budget: count=%s",
+                len(pending),
             )
 
     async def _close_status_sink(

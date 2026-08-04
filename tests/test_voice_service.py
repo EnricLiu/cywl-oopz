@@ -498,3 +498,105 @@ async def test_voice_service_stop_budget_forces_unresponsive_runtime_and_release
     assert access.release_count == 1
     assert (await conversations.status()).active is False
     await conversations.aclose()
+
+
+@pytest.mark.asyncio
+async def test_voice_service_retries_timed_out_lease_release_in_background() -> None:
+    access = FakeVoiceAccessGateway()
+    access.channels[("area", "person")] = "voice"
+    first_release_cancelled = asyncio.Event()
+
+    class RetryableLease:
+        def __init__(self) -> None:
+            self.released = False
+            self.attempts = 0
+
+        async def release(self) -> bool:
+            self.attempts += 1
+            if self.attempts == 1:
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    first_release_cancelled.set()
+            self.released = True
+            access.active_lease = None
+            access.release_count += 1
+            return True
+
+    lease = RetryableLease()
+
+    async def try_acquire(channel, owner_key):
+        access.acquisitions.append((channel, owner_key))
+        if access.active_lease is not None:
+            return None
+        access.active_lease = lease
+        return lease
+
+    access.try_acquire = try_acquire
+    conversations = VoiceConversationService(
+        settings(),
+        access,
+        FakeVoiceSessionRuntimeFactory(),
+        FakeVoiceConfigurationRepository(),
+        FakeVoiceSessionRepository(),
+    )
+    await conversations.start(request())
+
+    stopped = await conversations.stop("person")
+
+    assert stopped.active is False
+    assert first_release_cancelled.is_set()
+    assert lease.released is False
+    assert access.active_lease is lease
+    async with asyncio.timeout(1):
+        while not lease.released:
+            await asyncio.sleep(0.01)
+    assert lease.attempts == 2
+    assert access.active_lease is None
+    assert access.release_count == 1
+    await conversations.aclose()
+    assert not conversations._lease_release_tasks
+
+
+@pytest.mark.asyncio
+async def test_voice_service_close_cancels_pending_lease_release_retry() -> None:
+    access = FakeVoiceAccessGateway()
+    access.channels[("area", "person")] = "voice"
+
+    class HangingLease:
+        def __init__(self) -> None:
+            self.released = False
+            self.attempts = 0
+            self.cancelled = 0
+
+        async def release(self) -> bool:
+            self.attempts += 1
+            try:
+                await asyncio.Event().wait()
+            finally:
+                self.cancelled += 1
+
+    lease = HangingLease()
+
+    async def try_acquire(channel, owner_key):
+        access.acquisitions.append((channel, owner_key))
+        access.active_lease = lease
+        return lease
+
+    access.try_acquire = try_acquire
+    conversations = VoiceConversationService(
+        settings(),
+        access,
+        FakeVoiceSessionRuntimeFactory(),
+        FakeVoiceConfigurationRepository(),
+        FakeVoiceSessionRepository(),
+    )
+    await conversations.start(request())
+    await conversations.stop("person")
+
+    assert lease.cancelled == 1
+    assert conversations._lease_release_tasks
+    await conversations.aclose()
+
+    assert lease.attempts == 1
+    assert not conversations._lease_release_tasks
