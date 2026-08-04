@@ -73,6 +73,10 @@ class FakeVoice:
         self.playbacks: list[FakeSdkPlayback] = []
         self.leaves = 0
         self.volumes: list[int] = []
+        self.leave_entered = asyncio.Event()
+        self.leave_allowed = asyncio.Event()
+        self.leave_allowed.set()
+        self.leave_error: Exception | None = None
 
     async def join(self, **values: str) -> None:
         self.joins.append(values)
@@ -88,6 +92,10 @@ class FakeVoice:
         return True
 
     async def leave(self) -> None:
+        self.leave_entered.set()
+        await self.leave_allowed.wait()
+        if self.leave_error is not None:
+            raise self.leave_error
         self.leaves += 1
 
 
@@ -154,4 +162,59 @@ async def test_oopz_music_gateway_does_not_preempt_another_lease() -> None:
 
     await conversation.release()
     await gateway.aclose()
+    await leases.aclose()
+
+
+@pytest.mark.asyncio
+async def test_oopz_music_gateway_keeps_lease_when_release_is_cancelled() -> None:
+    bot = FakeBot()
+    leases = OopzVoiceLeaseManager(bot)
+    gateway = OopzMusicVoiceGateway(bot, leases)
+    channel = VoiceChannelKey("area", "voice")
+    assert await gateway.acquire(channel) is True
+    bot.voice.leave_allowed.clear()
+    releasing = asyncio.create_task(gateway.release(channel))
+    await bot.voice.leave_entered.wait()
+
+    releasing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await releasing
+
+    assert gateway._lease is not None
+    assert gateway._channel == channel
+    assert await leases.current() is not None
+    bot.voice.leave_allowed.set()
+    assert await gateway.release(channel) is True
+    assert gateway._lease is None
+    assert gateway._channel is None
+    assert await leases.current() is None
+    assert bot.voice.leaves == 1
+    await gateway.aclose()
+    await leases.aclose()
+
+
+@pytest.mark.asyncio
+async def test_oopz_music_gateway_close_retries_failed_lease_release() -> None:
+    bot = FakeBot()
+    leases = OopzVoiceLeaseManager(bot)
+    gateway = OopzMusicVoiceGateway(bot, leases)
+    channel = VoiceChannelKey("area", "voice")
+    assert await gateway.acquire(channel) is True
+    await gateway.start_playback(channel, "https://music.example/retry.mp3")
+    bot.voice.leave_error = RuntimeError("fixture leave failure")
+
+    await gateway.aclose()
+
+    assert gateway._lease is not None
+    assert gateway._channel == channel
+    assert gateway._playback is None
+    assert bot.voice.playbacks[0].stop_calls == 1
+    assert await leases.current() is not None
+    bot.voice.leave_error = None
+    await gateway.aclose()
+    assert gateway._lease is None
+    assert gateway._channel is None
+    assert await leases.current() is None
+    assert bot.voice.playbacks[0].stop_calls == 1
+    assert bot.voice.leaves == 1
     await leases.aclose()

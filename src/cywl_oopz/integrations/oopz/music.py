@@ -120,9 +120,6 @@ class OopzMusicVoiceGateway:
                 return False
             playback = self._playback
             lease = self._lease
-            self._playback = None
-            self._lease = None
-            self._channel = None
             if playback is not None and not playback.finished:
                 try:
                     await playback.stop()
@@ -131,15 +128,17 @@ class OopzMusicVoiceGateway:
                         "Could not stop music before releasing voice lease: error=%s",
                         exception_kind(exc),
                     )
-            return await lease.release()
+                else:
+                    self._playback = None
+            released = await lease.release()
+            if lease.released:
+                self._clear_lease_locked()
+            return released
 
     async def aclose(self) -> None:
         async with self._lock:
             playback = self._playback
             lease = self._lease
-            self._playback = None
-            self._lease = None
-            self._channel = None
             if playback is not None and not playback.finished:
                 try:
                     await playback.stop()
@@ -148,15 +147,29 @@ class OopzMusicVoiceGateway:
                         "Could not stop music during close: error=%s",
                         exception_kind(exc),
                     )
+                else:
+                    self._playback = None
             if lease is not None:
                 try:
                     await lease.release()
+                except asyncio.CancelledError:
+                    raise
                 except Exception as exc:
                     logger.warning(
                         "Could not release music voice lease during close: error=%s",
                         exception_kind(exc),
                     )
+                    return
+                if lease.released:
+                    self._clear_lease_locked()
+            else:
+                self._channel = None
         logger.info("Closed OOPZ music gateway")
+
+    def _clear_lease_locked(self) -> None:
+        self._playback = None
+        self._lease = None
+        self._channel = None
 
     @staticmethod
     def _channel_ref(channel: VoiceChannelKey) -> str:
