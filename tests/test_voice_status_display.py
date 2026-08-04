@@ -18,6 +18,8 @@ class FakeEditableGateway:
         self.created: list[str] = []
         self.replaced: list[str] = []
         self.replace_error: Exception | None = None
+        self.replace_started: asyncio.Event | None = None
+        self.replace_release: asyncio.Event | None = None
 
     async def create_reply(self, address, text):
         del address
@@ -26,6 +28,10 @@ class FakeEditableGateway:
 
     async def replace(self, message, text):
         del message
+        if self.replace_started is not None:
+            self.replace_started.set()
+        if self.replace_release is not None:
+            await self.replace_release.wait()
         if self.replace_error is not None:
             raise self.replace_error
         self.replaced.append(text)
@@ -147,3 +153,33 @@ async def test_voice_status_message_sends_terminal_fallback_after_edit_failure()
 
     assert len(gateway.created) == 2
     assert "上游连接失败" in gateway.created[-1]
+
+
+@pytest.mark.asyncio
+async def test_voice_status_close_can_resume_after_caller_cancellation() -> None:
+    gateway = FakeEditableGateway()
+    gateway.replace_started = asyncio.Event()
+    gateway.replace_release = asyncio.Event()
+    display = OopzVoiceStatusMessage(
+        gateway,
+        address(),
+        edit_interval_seconds=0.001,
+        heartbeat_seconds=0.05,
+    )
+    await display.open()
+    display.emit(status(VoiceSessionState.CLOSED, active=False))
+
+    closing = asyncio.create_task(display.aclose())
+    await gateway.replace_started.wait()
+    closing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await closing
+
+    assert display._worker is not None
+    assert display._worker.cancelled() is False
+    gateway.replace_release.set()
+    await display.aclose()
+
+    assert display._worker is None
+    assert len(gateway.replaced) == 1
+    assert "语音会话结束" in gateway.replaced[0]

@@ -100,6 +100,7 @@ class OopzVoiceStatusMessage:
         self._status: VoiceSessionStatus | None = None
         self._status_observed_at = 0.0
         self._worker: asyncio.Task[None] | None = None
+        self._close_lock = asyncio.Lock()
         self._wake = asyncio.Event()
         self._revision = 0
         self._flushed_revision = 0
@@ -108,6 +109,7 @@ class OopzVoiceStatusMessage:
         self._retryable_failures = 0
         self._closing = False
         self._disabled = False
+        self._fallback_sent = False
 
     @property
     def owns_message(self) -> bool:
@@ -133,29 +135,38 @@ class OopzVoiceStatusMessage:
         self._wake.set()
 
     async def aclose(self) -> None:
-        if self._closing:
-            worker = self._worker
-            if worker is not None:
-                await worker
-            return
-        self._closing = True
-        self._wake.set()
+        async with self._close_lock:
+            await self._close_once()
+
+    async def _close_once(self) -> None:
+        if not self._closing:
+            self._closing = True
+            self._wake.set()
         worker = self._worker
         if worker is not None:
-            await worker
+            await asyncio.shield(worker)
             self._worker = None
-        if self._disabled and self._status is not None and not self._status.active:
+        if (
+            not self._fallback_sent
+            and self._disabled
+            and self._status is not None
+            and not self._status.active
+        ):
             try:
                 await self._gateway.create_reply(
                     self._address,
                     self._render(self._status),
                 )
+            except asyncio.CancelledError:
+                raise
             except Exception as exc:
                 logger.warning(
                     "OOPZ voice terminal fallback failed: address=%s error=%s",
                     self._address_ref(),
                     type(exc).__name__,
                 )
+            else:
+                self._fallback_sent = True
 
     async def _run_worker(self) -> None:
         while not self._disabled:
