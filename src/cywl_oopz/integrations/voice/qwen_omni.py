@@ -89,6 +89,7 @@ class QwenOmniRealtimeSession:
         self._events_started = False
         self._active_response_id = ""
         self._finishing = False
+        self._closing = False
         self._closed = False
 
     async def send_audio(self, chunk: PcmChunk) -> None:
@@ -153,12 +154,12 @@ class QwenOmniRealtimeSession:
                 if isinstance(event, VoiceSessionFinished):
                     finished = True
                     return
-            if not finished and not self._finishing and not self._closed:
+            if not finished and not self._finishing and not self._closing and not self._closed:
                 yield VoiceProviderFailed("connection_eof", retryable=True)
         except asyncio.CancelledError:
             raise
         except ConnectionClosed as exc:
-            if not self._finishing and not self._closed:
+            if not self._finishing and not self._closing and not self._closed:
                 yield VoiceProviderFailed(
                     error_kind="connection_closed",
                     retryable=exc.code not in {1000, 1001, 4001, 4003},
@@ -173,7 +174,7 @@ class QwenOmniRealtimeSession:
             yield VoiceProviderFailed(exception_kind(exc), retryable=True)
 
     async def finish(self) -> None:
-        if self._closed or self._finishing:
+        if self._closed or self._closing or self._finishing:
             return
         self._finishing = True
         if self._send_finish_event:
@@ -183,14 +184,15 @@ class QwenOmniRealtimeSession:
         async with self._close_lock:
             if self._closed:
                 return
-            self._closed = True
+            self._closing = True
             await self._websocket.close()
+            self._closed = True
 
     async def _send(self, event: dict[str, object]) -> None:
         await self._send_many(event)
 
     async def _send_many(self, *events: dict[str, object]) -> None:
-        if self._closed:
+        if self._closed or self._closing:
             raise VoiceProviderDisconnectedError("Qwen session is closed")
         try:
             async with self._writer_lock:
@@ -224,6 +226,8 @@ class QwenOmniRealtimeProvider:
         self._proactive_context = proactive_context
         self._send_finish_event = send_finish_event
         self._sessions: set[QwenOmniRealtimeSession] = set()
+        self._close_lock = asyncio.Lock()
+        self._closing = False
         self._closed = False
 
     @property
@@ -237,7 +241,7 @@ class QwenOmniRealtimeProvider:
         )
 
     async def connect(self, descriptor: VoiceSessionDescriptor) -> QwenOmniRealtimeSession:
-        if self._closed:
+        if self._closed or self._closing:
             raise VoiceProviderDisconnectedError("Qwen Provider is closed")
         logger.info(
             "Connecting Qwen realtime session: session=%s model=%s",
@@ -274,22 +278,27 @@ class QwenOmniRealtimeProvider:
             proactive_context=self._proactive_context,
             send_finish_event=self._send_finish_event,
         )
-        self._sessions.add(session)
         try:
             await session.configure(self._config, self._instructions, self._tool_schemas)
         except BaseException:
             await session.aclose()
-            self._sessions.discard(session)
             raise
-        return session
+        async with self._close_lock:
+            if not self._closing and not self._closed:
+                self._sessions.add(session)
+                return session
+        await session.aclose()
+        raise VoiceProviderDisconnectedError("Qwen Provider closed while connecting")
 
     async def aclose(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        sessions = tuple(self._sessions)
-        self._sessions.clear()
-        await asyncio.gather(*(session.aclose() for session in sessions), return_exceptions=True)
+        async with self._close_lock:
+            if self._closed:
+                return
+            self._closing = True
+            sessions = tuple(self._sessions)
+            await asyncio.gather(*(session.aclose() for session in sessions))
+            self._sessions.clear()
+            self._closed = True
 
 
 class QwenOmniProviderBuilder:

@@ -8,6 +8,7 @@ from uuid import uuid4
 import pytest
 
 from cywl_oopz.features.voice.audio import PROVIDER_INPUT_FORMAT
+from cywl_oopz.features.voice.errors import VoiceProviderDisconnectedError
 from cywl_oopz.features.voice.events import (
     VoiceProviderFailed,
     VoiceResponseCancelled,
@@ -65,6 +66,33 @@ class FakeConnector:
 
     async def __call__(self, url: str, **kwargs):
         self.calls.append((url, kwargs))
+        return self.websocket
+
+
+class StalledCloseWebSocket(FakeWebSocket):
+    def __init__(self) -> None:
+        super().__init__()
+        self.close_started = asyncio.Event()
+        self.allow_close = asyncio.Event()
+        self.close_calls = 0
+
+    async def close(self) -> None:
+        self.close_calls += 1
+        self.close_started.set()
+        await self.allow_close.wait()
+        await super().close()
+
+
+class StalledConnector(FakeConnector):
+    def __init__(self, websocket: FakeWebSocket) -> None:
+        super().__init__(websocket)
+        self.started = asyncio.Event()
+        self.allow_connect = asyncio.Event()
+
+    async def __call__(self, url: str, **kwargs):
+        self.calls.append((url, kwargs))
+        self.started.set()
+        await self.allow_connect.wait()
         return self.websocket
 
 
@@ -218,3 +246,56 @@ async def test_qwen_adapter_cancels_only_an_active_response() -> None:
     assert len(websocket.sent) == sent_count
 
     await provider.aclose()
+
+
+@pytest.mark.asyncio
+async def test_qwen_adapter_close_can_retry_after_caller_cancellation() -> None:
+    websocket = StalledCloseWebSocket()
+    provider = QwenOmniRealtimeProvider(
+        QwenOmniConfig("wss://workspace.example/realtime", "secret", "model"),
+        "prompt",
+        connector=FakeConnector(websocket),
+    )
+    session = await provider.connect(descriptor())
+    closing = asyncio.create_task(provider.aclose())
+    await websocket.close_started.wait()
+
+    closing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await closing
+
+    assert provider._closing is True
+    assert provider._closed is False
+    assert session._closing is True
+    assert session._closed is False
+    with pytest.raises(VoiceProviderDisconnectedError, match="closed"):
+        await session.send_audio(PcmChunk(b"\x00" * 640, PROVIDER_INPUT_FORMAT, 20, 0))
+
+    websocket.allow_close.set()
+    await provider.aclose()
+
+    assert websocket.closed is True
+    assert websocket.close_calls == 2
+    assert provider._closed is True
+    assert session._closed is True
+
+
+@pytest.mark.asyncio
+async def test_qwen_adapter_rejects_connection_that_arrives_during_close() -> None:
+    websocket = FakeWebSocket()
+    connector = StalledConnector(websocket)
+    provider = QwenOmniRealtimeProvider(
+        QwenOmniConfig("wss://workspace.example/realtime", "secret", "model"),
+        "prompt",
+        connector=connector,
+    )
+    connecting = asyncio.create_task(provider.connect(descriptor()))
+    await connector.started.wait()
+
+    await provider.aclose()
+    connector.allow_connect.set()
+
+    with pytest.raises(VoiceProviderDisconnectedError, match="closed while connecting"):
+        await connecting
+    assert websocket.closed is True
+    assert not provider._sessions
