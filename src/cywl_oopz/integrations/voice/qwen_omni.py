@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from typing import Protocol
 from uuid import uuid4
 
 from websockets.asyncio.client import ClientConnection, connect
@@ -14,8 +15,10 @@ from cywl_oopz.core.observability import exception_kind, opaque_ref
 from cywl_oopz.features.voice.audio import PROVIDER_INPUT_FORMAT
 from cywl_oopz.features.voice.errors import (
     VoiceProviderAuthenticationError,
+    VoiceProviderConfigurationError,
     VoiceProviderDisconnectedError,
     VoiceProviderError,
+    VoiceProviderProtocolError,
     VoiceProviderRateLimitedError,
 )
 from cywl_oopz.features.voice.events import (
@@ -29,6 +32,7 @@ from cywl_oopz.features.voice.events import (
 from cywl_oopz.features.voice.models import (
     PcmChunk,
     PlaybackCursor,
+    VoiceInternalContextItem,
     VoiceProviderCapabilities,
     VoiceSessionDescriptor,
 )
@@ -40,6 +44,7 @@ from .qwen_protocol import (
     audio_append_event,
     encode_client_event,
     function_call_output_event,
+    internal_context_event,
     parse_server_event,
     response_cancel_event,
     response_create_event,
@@ -50,11 +55,35 @@ logger = logging.getLogger(__name__)
 QwenConnector = Callable[..., Awaitable[ClientConnection]]
 
 
+class QwenRealtimeWireConfig(Protocol):
+    api_key: str
+    model: str
+    connect_timeout_seconds: float
+
+    @property
+    def url(self) -> str: ...
+
+    def session_update(
+        self,
+        instructions: str,
+        event_id: str,
+        tools: Sequence[Mapping[str, object]] = (),
+    ) -> dict[str, object]: ...
+
+
 class QwenOmniRealtimeSession:
     """One physical Qwen WebSocket with a serialized writer and single reader."""
 
-    def __init__(self, websocket: ClientConnection) -> None:
+    def __init__(
+        self,
+        websocket: ClientConnection,
+        *,
+        proactive_context: bool = False,
+        send_finish_event: bool = True,
+    ) -> None:
         self._websocket = websocket
+        self._proactive_context = proactive_context
+        self._send_finish_event = send_finish_event
         self._writer_lock = asyncio.Lock()
         self._close_lock = asyncio.Lock()
         self._events_started = False
@@ -69,7 +98,7 @@ class QwenOmniRealtimeSession:
 
     async def configure(
         self,
-        config: QwenOmniConfig,
+        config: QwenRealtimeWireConfig,
         instructions: str,
         tools: Sequence[Mapping[str, object]],
     ) -> None:
@@ -89,8 +118,22 @@ class QwenOmniRealtimeSession:
         output: Mapping[str, object],
     ) -> None:
         """Return one function result and ask Qwen to continue the response."""
-        await self._send(function_call_output_event(call_id, output, _event_id()))
-        await self._send(response_create_event(_event_id()))
+        await self._send_many(
+            function_call_output_event(call_id, output, _event_id()),
+            response_create_event(_event_id()),
+        )
+
+    async def request_proactive_response(self, item: VoiceInternalContextItem) -> None:
+        if not self._proactive_context:
+            raise VoiceProviderConfigurationError(
+                "Qwen Provider does not support proactive context injection"
+            )
+        if self._active_response_id:
+            raise VoiceProviderProtocolError("Qwen response is already in progress")
+        await self._send_many(
+            internal_context_event(item.item_id, item.text, _event_id()),
+            response_create_event(_event_id()),
+        )
 
     async def events(self) -> AsyncIterator[VoiceModelEvent]:
         if self._events_started:
@@ -133,7 +176,8 @@ class QwenOmniRealtimeSession:
         if self._closed or self._finishing:
             return
         self._finishing = True
-        await self._send({"event_id": _event_id(), "type": "session.finish"})
+        if self._send_finish_event:
+            await self._send({"event_id": _event_id(), "type": "session.finish"})
 
     async def aclose(self) -> None:
         async with self._close_lock:
@@ -143,11 +187,15 @@ class QwenOmniRealtimeSession:
             await self._websocket.close()
 
     async def _send(self, event: dict[str, object]) -> None:
+        await self._send_many(event)
+
+    async def _send_many(self, *events: dict[str, object]) -> None:
         if self._closed:
             raise VoiceProviderDisconnectedError("Qwen session is closed")
         try:
             async with self._writer_lock:
-                await self._websocket.send(encode_client_event(event))
+                for event in events:
+                    await self._websocket.send(encode_client_event(event))
         except asyncio.CancelledError:
             raise
         except ConnectionClosed as exc:
@@ -161,16 +209,20 @@ class QwenOmniRealtimeProvider:
 
     def __init__(
         self,
-        config: QwenOmniConfig,
+        config: QwenRealtimeWireConfig,
         instructions: str,
         *,
         tool_schemas: Sequence[Mapping[str, object]] = (),
         connector: QwenConnector = connect,
+        proactive_context: bool = False,
+        send_finish_event: bool = True,
     ) -> None:
         self._config = config
         self._instructions = instructions
         self._tool_schemas = tuple(tool_schemas)
         self._connector = connector
+        self._proactive_context = proactive_context
+        self._send_finish_event = send_finish_event
         self._sessions: set[QwenOmniRealtimeSession] = set()
         self._closed = False
 
@@ -180,6 +232,8 @@ class QwenOmniRealtimeProvider:
             response_cancel=True,
             context_truncate_to_playout=False,
             tool_calls=bool(self._tool_schemas),
+            context_injection=self._proactive_context,
+            proactive_response=self._proactive_context,
         )
 
     async def connect(self, descriptor: VoiceSessionDescriptor) -> QwenOmniRealtimeSession:
@@ -215,7 +269,11 @@ class QwenOmniRealtimeProvider:
         except Exception as exc:
             raise VoiceProviderDisconnectedError("Qwen connection failed") from exc
 
-        session = QwenOmniRealtimeSession(websocket)
+        session = QwenOmniRealtimeSession(
+            websocket,
+            proactive_context=self._proactive_context,
+            send_finish_event=self._send_finish_event,
+        )
         self._sessions.add(session)
         try:
             await session.configure(self._config, self._instructions, self._tool_schemas)

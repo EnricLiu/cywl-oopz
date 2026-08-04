@@ -8,7 +8,7 @@ def test_initial_schema_models_and_migration_head_are_present() -> None:
     config = Config("alembic.ini")
     revisions = ScriptDirectory.from_config(config)
 
-    assert revisions.get_current_head() == "20260804_20"
+    assert revisions.get_current_head() == "20260804_21"
     assert set(Base.metadata.tables) == {
         "agent_memory_items",
         "agent_memory_preferences",
@@ -69,6 +69,7 @@ def test_initial_schema_models_and_migration_head_are_present() -> None:
     assert voice_providers.c.id.server_default is not None
     assert voice_providers.c.credentials.server_default is not None
     assert voice_providers.c.protocol.type.name == "voice_provider_protocol"
+    assert "qwen_audio_realtime_ws" in voice_providers.c.protocol.type.enums
     voice_models = Base.metadata.tables["voice_models"]
     assert voice_models.c.provider_id.unique is not True
     assert voice_models.c.mode.type.name == "voice_model_mode"

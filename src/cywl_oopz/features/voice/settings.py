@@ -13,6 +13,7 @@ from .models import VoiceChannelKey
 
 class VoiceProviderProtocol(StrEnum):
     QWEN_OMNI_REALTIME_WS = "qwen_omni_realtime_ws"
+    QWEN_AUDIO_REALTIME_WS = "qwen_audio_realtime_ws"
     VOLC_REALTIME_DIALOGUE_WS = "volc_realtime_dialogue_ws"
 
 

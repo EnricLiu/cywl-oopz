@@ -232,6 +232,40 @@ async def test_scheduler_recovers_restart_and_cancels_a_running_task() -> None:
 
 
 @pytest.mark.asyncio
+async def test_scheduler_serializes_mutations_with_the_same_resource_key() -> None:
+    first = replace(
+        task("owner-a"),
+        lane=DelegatedTaskLane.MUTATION_SERIAL,
+        conflict_key="area:shared",
+    )
+    second = replace(
+        task("owner-b"),
+        lane=DelegatedTaskLane.MUTATION_SERIAL,
+        conflict_key="area:shared",
+    )
+    repository = MemorySchedulerRepository([first, second])
+    wakeup = InProcessDelegatedTaskWakeup()
+    runner = BlockingRunner()
+    scheduler = DelegatedTaskScheduler(
+        repository,
+        wakeup,
+        runner,
+        reconcile_seconds=0.02,
+        worker_id="test-worker",
+    )
+
+    await scheduler.start()
+    await eventually(lambda: first.id in runner.started)
+    assert second.id not in runner.started
+
+    runner.release(first.id)
+    await eventually(lambda: second.id in runner.started)
+    assert runner.started == [first.id, second.id]
+
+    await scheduler.aclose()
+
+
+@pytest.mark.asyncio
 async def test_voice_stop_does_not_cancel_an_accepted_background_task() -> None:
     envelope = task("owner")
     repository = MemorySchedulerRepository([envelope])

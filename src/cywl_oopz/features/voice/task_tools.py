@@ -65,7 +65,7 @@ class VoiceTaskControlTools:
     }
     _DESCRIPTIONS = {
         "delegate_agent_task": (
-            "把需要搜索、读网页或其他慢操作的目标交给后台 Agent，任务入队后立即返回。"
+            "把需要搜索、读网页或频道策略允许的慢速修改目标交给后台 Agent，任务入队后立即返回。"
         ),
         "get_agent_task": "查询当前用户的一个后台任务状态和简短进度。",
         "list_agent_tasks": "列出当前语音会话最近的后台任务。",

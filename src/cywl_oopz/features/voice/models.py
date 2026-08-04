@@ -307,3 +307,17 @@ class VoiceTaskNotification:
             raise ValueError("Voice task notification identity is too long")
         if len(self.summary) > 1000 or len(self.error_message) > 1000:
             raise ValueError("Voice task notification detail is too long")
+
+
+@dataclass(frozen=True, slots=True)
+class VoiceInternalContextItem:
+    """Bounded trusted context injected by a capability-gated Provider adapter."""
+
+    item_id: str
+    text: str
+
+    def __post_init__(self) -> None:
+        if not self.item_id.strip() or len(self.item_id) > 128:
+            raise ValueError("Voice internal context item identifier is invalid")
+        if not self.text.strip() or len(self.text) > 4000:
+            raise ValueError("Voice internal context text must contain 1-4000 characters")

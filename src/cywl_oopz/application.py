@@ -151,7 +151,7 @@ from .integrations.oopz.voice_conversation import (
 from .integrations.oopz.voice_lease import OopzVoiceLeaseManager
 from .integrations.oopz.voice_media import OopzVoiceMediaGateway
 from .integrations.oopz.voice_task_notifications import OopzVoiceTaskTextGateway
-from .integrations.voice.qwen_omni import QwenOmniProviderBuilder
+from .integrations.voice.provider_builder import ConfiguredVoiceProviderBuilder
 from .integrations.web.agent_browser_mcp import AgentBrowserMcpGateway
 from .integrations.web.duckduckgo import DuckDuckGoSearchGateway
 from .settings import (
@@ -530,7 +530,7 @@ class BotApplication:
             settings.voice,
             self.voice_media,
             self.voice_sessions,
-            QwenOmniProviderBuilder(tool_schemas=self.voice_task_tools.schemas()),
+            ConfiguredVoiceProviderBuilder(tool_schemas=self.voice_task_tools.schemas()),
             self.voice_task_tools,
             self.voice_task_mailbox,
         )

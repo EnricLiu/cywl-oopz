@@ -11,6 +11,7 @@ import pytest
 from cywl_oopz.features.agent.delegation.models import (
     CancelOutcome,
     DelegatedAgentTask,
+    DelegatedResultStyle,
     DelegatedTaskLane,
     DelegatedTaskNotificationState,
     DelegatedTaskPolicy,
@@ -29,11 +30,12 @@ from cywl_oopz.features.voice.task_tools import VoiceTaskControlTools
 class MemoryTaskRepository:
     def __init__(self) -> None:
         self.model_id = uuid4()
+        self.profile = "voice_readonly_v1"
         self.tasks: list[DelegatedAgentTask] = []
 
     async def resolve_submission_policy(self, session_id, owner_person_id):
         del session_id, owner_person_id
-        return DelegatedTaskPolicy("voice_readonly_v1", self.model_id)
+        return DelegatedTaskPolicy(self.profile, self.model_id)
 
     async def submit(self, request):
         for task in self.tasks:
@@ -55,8 +57,8 @@ class MemoryTaskRepository:
             objective=request.objective,
             result_style=request.result_style,
             status=DelegatedTaskStatus.QUEUED,
-            lane=DelegatedTaskLane.READ_PARALLEL,
-            conflict_key="",
+            lane=request.lane,
+            conflict_key=request.conflict_key,
             notification_state=DelegatedTaskNotificationState.PENDING,
             agent_model_id=request.agent_model_id,
             allowed_tool_names=request.allowed_tool_names,
@@ -250,4 +252,37 @@ async def test_task_control_validation_returns_stable_bounded_errors() -> None:
         "ok": False,
         "code": "task_not_found",
     }
+    await runner.aclose()
+
+
+@pytest.mark.asyncio
+async def test_mutation_profile_is_server_owned_area_serial_and_excludes_media_control() -> None:
+    repository = MemoryTaskRepository()
+    repository.profile = "voice_mutation_v1"
+    runner = DeterministicFakeRunner()
+    service = VoiceDelegatedTaskService(repository, runner)
+    session = descriptor()
+
+    created = await service.delegate(
+        session,
+        "mutation-call",
+        "新建一个共享歌单并加入两首歌",
+        result_style=DelegatedResultStyle.BRIEF,
+    )
+
+    assert created.lane is DelegatedTaskLane.MUTATION_SERIAL
+    assert created.conflict_key == "area:area"
+    assert {
+        "create_music_playlist",
+        "add_music_playlist_track",
+        "create_agent_skill",
+        "update_agent_skill",
+    }.issubset(created.allowed_tool_names)
+    assert {
+        "enqueue_music",
+        "load_music_playlist",
+        "set_music_playback_mode",
+        "delegate_agent_task",
+    }.isdisjoint(created.allowed_tool_names)
+    runner.release.set()
     await runner.aclose()

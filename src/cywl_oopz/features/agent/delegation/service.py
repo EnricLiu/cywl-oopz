@@ -37,6 +37,13 @@ class DelegatedTaskProfile:
     allowed_tool_names: tuple[str, ...]
     conflict_key: str = ""
 
+    def resolve_conflict_key(self, descriptor: VoiceSessionDescriptor) -> str:
+        if not self.conflict_key:
+            return ""
+        if self.conflict_key == "area":
+            return f"area:{descriptor.voice_channel.area_id}"
+        raise ValueError("Delegated task profile conflict scope is unsupported")
+
 
 class DelegatedTaskProfileCatalog:
     """Resolve server-owned task capabilities; model arguments cannot alter them."""
@@ -60,9 +67,33 @@ class DelegatedTaskProfileCatalog:
             "search_web",
         ),
     )
+    MUTATION_V1 = DelegatedTaskProfile(
+        name="voice_mutation_v1",
+        lane=DelegatedTaskLane.MUTATION_SERIAL,
+        allowed_tool_names=(
+            *READONLY_V1.allowed_tool_names,
+            "add_music_playlist_track",
+            "create_agent_skill",
+            "create_music_playlist",
+            "import_netease_playlist",
+            "invite_agent_skill_share",
+            "manage_agent_skill_resource",
+            "remove_music_playlist_track",
+            "respond_agent_skill_share",
+            "revoke_agent_skill_share",
+            "set_agent_skill_state",
+            "update_agent_skill",
+        ),
+        conflict_key="area",
+    )
 
     def __init__(self) -> None:
-        self._profiles = MappingProxyType({self.READONLY_V1.name: self.READONLY_V1})
+        self._profiles = MappingProxyType(
+            {
+                self.READONLY_V1.name: self.READONLY_V1,
+                self.MUTATION_V1.name: self.MUTATION_V1,
+            }
+        )
 
     def resolve(self, name: str) -> DelegatedTaskProfile:
         try:
@@ -143,7 +174,7 @@ class VoiceDelegatedTaskService:
                 objective=normalized,
                 result_style=result_style,
                 lane=profile.lane,
-                conflict_key=profile.conflict_key,
+                conflict_key=profile.resolve_conflict_key(descriptor),
                 agent_model_id=policy.agent_model_id,
                 allowed_tool_names=profile.allowed_tool_names,
             )

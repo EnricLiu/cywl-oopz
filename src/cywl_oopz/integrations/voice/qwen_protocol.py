@@ -195,6 +195,23 @@ def response_create_event(event_id: str) -> dict[str, str]:
     return {"event_id": event_id, "type": "response.create"}
 
 
+def internal_context_event(item_id: str, text: str, event_id: str) -> dict[str, object]:
+    if not item_id.strip() or len(item_id) > 128:
+        raise VoiceProviderProtocolError("Qwen internal item identifier is invalid")
+    if not text.strip() or len(text.encode("utf-8")) > 16_384:
+        raise VoiceProviderProtocolError("Qwen internal context text is invalid")
+    return {
+        "event_id": event_id,
+        "type": "conversation.item.create",
+        "item": {
+            "id": item_id,
+            "type": "message",
+            "role": "system",
+            "content": [{"type": "input_text", "text": text}],
+        },
+    }
+
+
 def parse_server_event(raw: str | bytes) -> VoiceModelEvent | None:
     if isinstance(raw, bytes):
         try:

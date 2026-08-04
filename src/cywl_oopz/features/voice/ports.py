@@ -13,6 +13,7 @@ from .models import (
     PlaybackCursor,
     RemoteAudioFrame,
     VoiceChannelKey,
+    VoiceInternalContextItem,
     VoiceMediaTerminal,
     VoiceProviderCapabilities,
     VoiceRuntimeResult,
@@ -92,6 +93,8 @@ class RealtimeVoiceSession(Protocol):
         call_id: str,
         output: Mapping[str, object],
     ) -> None: ...
+
+    async def request_proactive_response(self, item: VoiceInternalContextItem) -> None: ...
 
     def events(self) -> AsyncIterator[VoiceModelEvent]: ...
 

@@ -69,7 +69,9 @@ class FakeTaskMailbox:
         self.claim_calls = 0
         self.presented: list[tuple[VoiceTaskNotification, ...]] = []
         self.deferred: list[tuple] = []
+        self.marked_presented: list[tuple] = []
         self.delivery_succeeds = True
+        self.mark_presented_failures = 0
 
     async def wait(self, owner_person_id: str, timeout_seconds: float) -> bool:
         del owner_person_id
@@ -93,7 +95,10 @@ class FakeTaskMailbox:
         return self.delivery_succeeds
 
     async def mark_presented(self, task_ids):
-        del task_ids
+        if self.mark_presented_failures:
+            self.mark_presented_failures -= 1
+            raise RuntimeError("fixture persistence failure")
+        self.marked_presented.append(task_ids)
 
     async def defer(self, task_ids):
         self.deferred.append(task_ids)
@@ -299,7 +304,7 @@ async def test_task_notification_delivery_failure_is_deferred(monkeypatch) -> No
 
 
 @pytest.mark.asyncio
-async def test_capability_strategy_defers_until_proactive_adapter_is_available(
+async def test_capability_strategy_marks_presented_only_after_proactive_response_starts(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(runtime_module, "_NOTIFICATION_COALESCE_SECONDS", 0)
@@ -319,13 +324,147 @@ async def test_capability_strategy_defers_until_proactive_adapter_is_available(
     await providers[0].sessions[0].emit(VoiceSessionReady())
     await starting
 
-    await wait_until(lambda: bool(mailbox.deferred))
-    assert mailbox.deferred == [(notice.task_id,)]
+    provider_session = providers[0].sessions[0]
+    await wait_until(lambda: bool(provider_session.proactive_items))
+    assert "[CYWL_INTERNAL_TASK_EVENT v1]" in provider_session.proactive_items[0].text
+    assert mailbox.marked_presented == []
     assert mailbox.presented == []
-    assert runtime.stats.task_notifications_deferred == 1
+    await provider_session.emit(VoiceResponseStarted("proactive-response"))
+    await wait_until(lambda: runtime.stats.task_notifications_presented == 1)
+    assert mailbox.marked_presented == [(notice.task_id,)]
+    assert runtime.stats.task_notifications_deferred == 0
+    await provider_session.emit(VoiceResponseCompleted("proactive-response"))
+    await wait_until(lambda: runtime.state is VoiceSessionState.LISTENING)
     await runtime.request_stop(VoiceStopReason.COMMAND)
     await runtime.wait_finished()
     await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_failed_proactive_request_returns_notification_to_mailbox(monkeypatch) -> None:
+    monkeypatch.setattr(runtime_module, "_NOTIFICATION_COALESCE_SECONDS", 0)
+    mailbox = FakeTaskMailbox()
+    notice = notification(1)
+    mailbox.pending.append(notice)
+    capabilities = VoiceProviderCapabilities(
+        context_injection=True,
+        proactive_response=True,
+    )
+    runtime, _, _, providers = await runtime_fixture(
+        task_mailbox=mailbox,
+        capabilities=capabilities,
+    )
+    starting = asyncio.create_task(runtime.start())
+    await wait_until(lambda: bool(providers and providers[0].sessions))
+    provider_session = providers[0].sessions[0]
+    provider_session.proactive_error = RuntimeError("fixture injection failure")
+    await provider_session.emit(VoiceSessionReady())
+    await starting
+
+    await wait_until(lambda: runtime.stats.task_notifications_deferred == 1)
+    assert mailbox.deferred == [(notice.task_id,)]
+    assert mailbox.marked_presented == []
+    await runtime.request_stop(VoiceStopReason.COMMAND)
+    await runtime.wait_finished()
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_proactive_notification_confirmation_retries_transient_failure(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(runtime_module, "_NOTIFICATION_COALESCE_SECONDS", 0)
+    monkeypatch.setattr(runtime_module, "_NOTIFICATION_PERSIST_RETRY_SECONDS", 0)
+    mailbox = FakeTaskMailbox()
+    mailbox.mark_presented_failures = 2
+    notice = notification(1)
+    mailbox.pending.append(notice)
+    capabilities = VoiceProviderCapabilities(
+        context_injection=True,
+        proactive_response=True,
+    )
+    runtime, _, _, providers = await runtime_fixture(
+        task_mailbox=mailbox,
+        capabilities=capabilities,
+    )
+    starting = asyncio.create_task(runtime.start())
+    await wait_until(lambda: bool(providers and providers[0].sessions))
+    provider_session = providers[0].sessions[0]
+    await provider_session.emit(VoiceSessionReady())
+    await starting
+
+    await wait_until(lambda: bool(provider_session.proactive_items))
+    await provider_session.emit(VoiceResponseStarted("proactive-response"))
+    await wait_until(lambda: runtime.stats.task_notifications_presented == 1)
+
+    assert mailbox.mark_presented_failures == 0
+    assert mailbox.marked_presented == [(notice.task_id,)]
+    assert runtime.stats.task_notifications_deferred == 0
+    await runtime.request_stop(VoiceStopReason.COMMAND)
+    await runtime.wait_finished()
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_retryable_disconnect_defers_unstarted_proactive_notification(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(runtime_module, "_NOTIFICATION_COALESCE_SECONDS", 0)
+    mailbox = FakeTaskMailbox()
+    notice = notification(1)
+    mailbox.pending.append(notice)
+    capabilities = VoiceProviderCapabilities(
+        context_injection=True,
+        proactive_response=True,
+    )
+    runtime, _, _, providers = await runtime_fixture(
+        task_mailbox=mailbox,
+        capabilities=capabilities,
+    )
+    starting = asyncio.create_task(runtime.start())
+    await wait_until(lambda: bool(providers and providers[0].sessions))
+    first_session = providers[0].sessions[0]
+    await first_session.emit(VoiceSessionReady())
+    await starting
+
+    await wait_until(lambda: bool(first_session.proactive_items))
+    await first_session.emit(VoiceProviderFailed("connection_closed", True))
+    await wait_until(lambda: len(providers) == 2 and bool(providers[1].sessions))
+
+    assert mailbox.deferred == [(notice.task_id,)]
+    assert mailbox.marked_presented == []
+    assert runtime.stats.task_notifications_deferred == 1
+    await providers[1].sessions[0].emit(VoiceSessionReady())
+    await runtime.request_stop(VoiceStopReason.COMMAND)
+    await runtime.wait_finished()
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_close_defers_unstarted_proactive_notification(monkeypatch) -> None:
+    monkeypatch.setattr(runtime_module, "_NOTIFICATION_COALESCE_SECONDS", 0)
+    mailbox = FakeTaskMailbox()
+    notice = notification(1)
+    mailbox.pending.append(notice)
+    capabilities = VoiceProviderCapabilities(
+        context_injection=True,
+        proactive_response=True,
+    )
+    runtime, _, _, providers = await runtime_fixture(
+        task_mailbox=mailbox,
+        capabilities=capabilities,
+    )
+    starting = asyncio.create_task(runtime.start())
+    await wait_until(lambda: bool(providers and providers[0].sessions))
+    provider_session = providers[0].sessions[0]
+    await provider_session.emit(VoiceSessionReady())
+    await starting
+
+    await wait_until(lambda: bool(provider_session.proactive_items))
+    await runtime.aclose()
+
+    assert mailbox.deferred == [(notice.task_id,)]
+    assert mailbox.marked_presented == []
 
 
 @pytest.mark.asyncio

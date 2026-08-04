@@ -369,3 +369,33 @@ async def test_runner_schedules_task_retry_without_sleeping_worker() -> None:
     assert repository.retry_at is not None
     assert 0.9 <= (repository.retry_at - started).total_seconds() <= 1.2
     assert wakeup.ids == [envelope.id]
+
+
+@pytest.mark.asyncio
+async def test_runner_never_retries_mutation_task_after_provider_failure() -> None:
+    model_id, provider_catalog = catalog()
+    envelope = replace(
+        task(model_id),
+        lane=DelegatedTaskLane.MUTATION_SERIAL,
+        conflict_key="area:area",
+    )
+    repository = MemoryRunnerRepository(envelope)
+    wakeup = RecordingWakeup()
+    runner = DelegatedAgentTaskRunner(
+        settings(),
+        repository,
+        wakeup,
+        FailingRunService(),
+        FakeCatalog(provider_catalog),
+        MemoryThreads(),
+        RecordingContextBuilder(),
+        NamedTools(),
+        max_task_retries=2,
+        heartbeat_interval_seconds=10,
+    )
+
+    await runner.run(envelope, "worker")
+
+    assert repository.task.status is DelegatedTaskStatus.FAILED
+    assert repository.retry_at is None
+    assert wakeup.ids == [envelope.id]

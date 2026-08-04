@@ -16,6 +16,7 @@ from cywl_oopz.features.voice.models import (
     PlaybackCursor,
     RemoteAudioFrame,
     VoiceChannelKey,
+    VoiceInternalContextItem,
     VoiceMediaEndReason,
     VoiceMediaTerminal,
     VoiceProviderCapabilities,
@@ -335,6 +336,8 @@ class FakeRealtimeVoiceSession:
         self.interruptions: list[PlaybackCursor] = []
         self.interrupt_error: Exception | None = None
         self.tool_outputs: list[tuple[str, dict[str, object]]] = []
+        self.proactive_items: list[VoiceInternalContextItem] = []
+        self.proactive_error: Exception | None = None
         self._events: asyncio.Queue[VoiceModelEvent | None] = asyncio.Queue()
         self.finished = False
         self.closed = False
@@ -358,6 +361,11 @@ class FakeRealtimeVoiceSession:
         output: Mapping[str, object],
     ) -> None:
         self.tool_outputs.append((call_id, dict(output)))
+
+    async def request_proactive_response(self, item: VoiceInternalContextItem) -> None:
+        if self.proactive_error is not None:
+            raise self.proactive_error
+        self.proactive_items.append(item)
 
     async def events(self) -> AsyncIterator[VoiceModelEvent]:
         while True:

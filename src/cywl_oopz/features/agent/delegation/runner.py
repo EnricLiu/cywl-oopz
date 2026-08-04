@@ -281,7 +281,7 @@ class DelegatedAgentTaskRunner:
             AgentMessage(
                 "system",
                 "delegated_task",
-                {"text": self._task_instructions(task.result_style)},
+                {"text": self._task_instructions(task.result_style, task.lane)},
             ),
             *context[1:],
         )
@@ -485,16 +485,25 @@ class DelegatedAgentTaskRunner:
         )
 
     @staticmethod
-    def _task_instructions(style: DelegatedResultStyle) -> str:
+    def _task_instructions(
+        style: DelegatedResultStyle,
+        lane: DelegatedTaskLane,
+    ) -> str:
         detail = (
             "给出较完整但有界的结果，保留关键依据和实际使用的来源 URL。"
             if style is DelegatedResultStyle.DETAILED
             else "给出 1 至 3 句可直接播报的摘要，必要时附最关键的来源 URL。"
         )
+        mutation = (
+            "这是允许副作用的串行任务；只执行用户目标明确要求的修改，先读取当前状态，"
+            "不要扩展修改范围，并在结果中准确说明已经发生的操作。"
+            if lane is DelegatedTaskLane.MUTATION_SERIAL
+            else "这是只读任务，不得尝试修改外部状态。"
+        )
         return (
             "你正在执行一个由实时语音会话委派的独立后台任务。"
             "只完成当前用户目标，不创建或调用新的语音委派任务，也不要假装仍在实时语音中。"
-            "可用工具结果是事实依据；工具不足或失败时明确说明。"
+            f"{mutation}可用工具结果是事实依据；工具不足或失败时明确说明。"
             f"{detail} 最终只输出给用户看的结果，不输出内部过程、任务状态或等待话术。"
         )
 

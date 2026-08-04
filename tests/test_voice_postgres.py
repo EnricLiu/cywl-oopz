@@ -99,6 +99,18 @@ async def test_voice_migration_and_repositories_on_postgresql() -> None:
                 ),
                 {"provider_id": provider_id},
             )
+            audio_provider_id = await connection.scalar(
+                text(
+                    """
+                    INSERT INTO voice_providers (
+                        alias, display_name, protocol, endpoint
+                    ) VALUES (
+                        'qwen-audio', 'Qwen Audio Realtime',
+                        'qwen_audio_realtime_ws', 'wss://voice.example/realtime'
+                    ) RETURNING id
+                    """
+                )
+            )
             await connection.execute(
                 text(
                     """
@@ -112,6 +124,7 @@ async def test_voice_migration_and_repositories_on_postgresql() -> None:
         assert defaults["enabled"] is True
         assert defaults["user_selectable"] is True
         assert defaults["created_at"] == defaults["updated_at"]
+        assert audio_provider_id is not None
 
         async with test_engine.begin() as connection:
             await connection.execute(
@@ -205,6 +218,12 @@ async def test_voice_migration_and_repositories_on_postgresql() -> None:
                 )
             )
         assert trigger_count == 5
+
+        async with test_engine.begin() as connection:
+            await connection.execute(
+                text("DELETE FROM voice_providers WHERE id = :provider_id"),
+                {"provider_id": audio_provider_id},
+            )
 
         await _migrate(test_engine, "downgrade", "20260730_18")
         async with test_engine.connect() as connection:
