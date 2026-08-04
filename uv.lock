@@ -511,7 +511,6 @@ dependencies = [
     { name = "oopz-sdk" },
     { name = "pydantic-ai-slim", extra = ["mcp", "openai"] },
     { name = "python-dotenv" },
-    { name = "requests" },
     { name = "sqlalchemy" },
 ]
 
@@ -528,10 +527,9 @@ requires-dist = [
     { name = "asyncpg", specifier = ">=0.30.0" },
     { name = "ddgs", specifier = ">=9.14.4" },
     { name = "httpx", specifier = ">=0.28.0" },
-    { name = "oopz-sdk", specifier = ">=0.13.1" },
+    { name = "oopz-sdk", editable = "sdk" },
     { name = "pydantic-ai-slim", extras = ["mcp", "openai"], specifier = ">=2.18.0" },
     { name = "python-dotenv", specifier = ">=1.1.0" },
-    { name = "requests", specifier = ">=2.32.0" },
     { name = "sqlalchemy", specifier = ">=2.0.0" },
 ]
 
@@ -1343,19 +1341,31 @@ wheels = [
 
 [[package]]
 name = "oopz-sdk"
-version = "0.13.1"
-source = { registry = "https://pypi.org/simple" }
+version = "0.15.0"
+source = { editable = "sdk" }
 dependencies = [
     { name = "aiohttp" },
     { name = "cryptography" },
     { name = "pillow" },
     { name = "playwright" },
     { name = "pydantic" },
+    { name = "requests" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/53/9f/b0b6ce7696f031387a064df0b36afbab5148a83b901106093392508a58d9/oopz_sdk-0.13.1.tar.gz", hash = "sha256:48d76e7725ca1c48d1e77b3ba99401f0f68f80cc85f0c20084c882b3fc79ac09", size = 145871, upload-time = "2026-05-15T08:47:57.83Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/8c/06/a197178c20d2cf94337bee0d98b98f6e5d28b0431118121e9efcdc184ff4/oopz_sdk-0.13.1-py3-none-any.whl", hash = "sha256:f063154cd43efc2ef236effedfc15941e9af47c61635737f0f12cd011ba6f2a5", size = 150589, upload-time = "2026-05-15T08:47:56.788Z" },
+
+[package.metadata]
+requires-dist = [
+    { name = "aiohttp", specifier = ">=3.11,<4" },
+    { name = "build", marker = "extra == 'dev'", specifier = ">=1.2,<2" },
+    { name = "cryptography", specifier = ">=42,<48" },
+    { name = "pillow", specifier = ">=10,<13" },
+    { name = "playwright", specifier = ">=1.58.0" },
+    { name = "pydantic", specifier = ">=2,<3" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8,<9" },
+    { name = "requests", specifier = ">=2.28,<3" },
+    { name = "tomli", marker = "python_full_version < '3.11' and extra == 'dev'", specifier = ">=2,<3" },
+    { name = "twine", marker = "extra == 'dev'", specifier = ">=6.2,<8" },
 ]
+provides-extras = ["dev"]
 
 [[package]]
 name = "openai"

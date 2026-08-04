@@ -661,6 +661,129 @@ class MusicSettings:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class VoiceSettings:
+    """Runtime bounds for the optional realtime voice conversation feature."""
+
+    enabled: bool
+    experimental: bool
+    start_timeout_seconds: float
+    idle_timeout_seconds: int
+    owner_leave_grace_seconds: int
+    max_session_seconds: int
+    input_queue_ms: int
+    output_queue_ms: int
+    output_prebuffer_ms: int
+    event_queue_size: int
+    provider_connect_attempts: int
+    read_task_concurrency: int
+    per_user_task_concurrency: int
+    mailbox_poll_seconds: float
+    transcript_debug: bool
+
+    @classmethod
+    def from_mapping(cls, values: Mapping[str, str]) -> VoiceSettings:
+        """Build bounded media/session policy without loading Provider credentials."""
+        settings = cls(
+            enabled=_boolean(values, "CYWL_VOICE_ENABLED", False),
+            experimental=_boolean(values, "CYWL_VOICE_EXPERIMENTAL", True),
+            start_timeout_seconds=_positive_float(
+                values,
+                "CYWL_VOICE_START_TIMEOUT_SECONDS",
+                15.0,
+            ),
+            idle_timeout_seconds=_positive_integer(
+                values,
+                "CYWL_VOICE_IDLE_TIMEOUT_SECONDS",
+                180,
+            ),
+            owner_leave_grace_seconds=_positive_integer(
+                values,
+                "CYWL_VOICE_OWNER_LEAVE_GRACE_SECONDS",
+                15,
+                allow_zero=True,
+            ),
+            max_session_seconds=_positive_integer(
+                values,
+                "CYWL_VOICE_MAX_SESSION_SECONDS",
+                1800,
+            ),
+            input_queue_ms=_positive_integer(values, "CYWL_VOICE_INPUT_QUEUE_MS", 200),
+            output_queue_ms=_positive_integer(values, "CYWL_VOICE_OUTPUT_QUEUE_MS", 300),
+            output_prebuffer_ms=_positive_integer(
+                values,
+                "CYWL_VOICE_OUTPUT_PREBUFFER_MS",
+                100,
+            ),
+            event_queue_size=_positive_integer(
+                values,
+                "CYWL_VOICE_EVENT_QUEUE_SIZE",
+                128,
+            ),
+            provider_connect_attempts=_positive_integer(
+                values,
+                "CYWL_VOICE_PROVIDER_CONNECT_ATTEMPTS",
+                3,
+            ),
+            read_task_concurrency=_positive_integer(
+                values,
+                "CYWL_VOICE_READ_TASK_CONCURRENCY",
+                2,
+            ),
+            per_user_task_concurrency=_positive_integer(
+                values,
+                "CYWL_VOICE_PER_USER_TASK_CONCURRENCY",
+                1,
+            ),
+            mailbox_poll_seconds=_positive_float(
+                values,
+                "CYWL_VOICE_MAILBOX_POLL_SECONDS",
+                2.0,
+            ),
+            transcript_debug=_boolean(values, "CYWL_VOICE_TRANSCRIPT_DEBUG", False),
+        )
+        settings._validate_bounds()
+        return settings
+
+    def _validate_bounds(self) -> None:
+        """Reject values that would make the realtime loop unsafe or misleading."""
+        maximums: tuple[tuple[str, int | float, int | float], ...] = (
+            ("CYWL_VOICE_START_TIMEOUT_SECONDS", self.start_timeout_seconds, 60),
+            ("CYWL_VOICE_IDLE_TIMEOUT_SECONDS", self.idle_timeout_seconds, 3600),
+            ("CYWL_VOICE_OWNER_LEAVE_GRACE_SECONDS", self.owner_leave_grace_seconds, 60),
+            ("CYWL_VOICE_MAX_SESSION_SECONDS", self.max_session_seconds, 14400),
+            ("CYWL_VOICE_INPUT_QUEUE_MS", self.input_queue_ms, 1000),
+            ("CYWL_VOICE_OUTPUT_QUEUE_MS", self.output_queue_ms, 2000),
+            ("CYWL_VOICE_OUTPUT_PREBUFFER_MS", self.output_prebuffer_ms, 1000),
+            ("CYWL_VOICE_EVENT_QUEUE_SIZE", self.event_queue_size, 4096),
+            ("CYWL_VOICE_PROVIDER_CONNECT_ATTEMPTS", self.provider_connect_attempts, 5),
+            ("CYWL_VOICE_READ_TASK_CONCURRENCY", self.read_task_concurrency, 8),
+            ("CYWL_VOICE_PER_USER_TASK_CONCURRENCY", self.per_user_task_concurrency, 8),
+            ("CYWL_VOICE_MAILBOX_POLL_SECONDS", self.mailbox_poll_seconds, 30),
+        )
+        for name, value, maximum in maximums:
+            if value > maximum:
+                raise ConfigurationError(f"{name} must not exceed {maximum}")
+        if self.idle_timeout_seconds > self.max_session_seconds:
+            raise ConfigurationError(
+                "CYWL_VOICE_IDLE_TIMEOUT_SECONDS must not exceed CYWL_VOICE_MAX_SESSION_SECONDS"
+            )
+        if self.owner_leave_grace_seconds > self.idle_timeout_seconds:
+            raise ConfigurationError(
+                "CYWL_VOICE_OWNER_LEAVE_GRACE_SECONDS must not exceed "
+                "CYWL_VOICE_IDLE_TIMEOUT_SECONDS"
+            )
+        if self.output_prebuffer_ms > self.output_queue_ms:
+            raise ConfigurationError(
+                "CYWL_VOICE_OUTPUT_PREBUFFER_MS must not exceed CYWL_VOICE_OUTPUT_QUEUE_MS"
+            )
+        if self.per_user_task_concurrency > self.read_task_concurrency:
+            raise ConfigurationError(
+                "CYWL_VOICE_PER_USER_TASK_CONCURRENCY must not exceed "
+                "CYWL_VOICE_READ_TASK_CONCURRENCY"
+            )
+
+
 class WebSearchSafeSearch(StrEnum):
     """DuckDuckGo safe-search levels accepted by the project boundary."""
 
@@ -799,6 +922,7 @@ class AppSettings:
     chat: ChatSettings
     agent: AgentSettings
     music: MusicSettings
+    voice: VoiceSettings
     web: WebToolsSettings
     command_prefix: str = "/"
     environment: str = "development"
@@ -833,6 +957,7 @@ class AppSettings:
             chat=ChatSettings.from_mapping(values),
             agent=AgentSettings.from_mapping(values),
             music=MusicSettings.from_mapping(values),
+            voice=VoiceSettings.from_mapping(values),
             web=WebToolsSettings.from_mapping(values),
             command_prefix=command_prefix,
             environment=values.get("CYWL_ENV", "development").strip() or "development",

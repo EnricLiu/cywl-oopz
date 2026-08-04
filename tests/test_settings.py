@@ -10,6 +10,7 @@ from cywl_oopz.settings import (
     ChatSettings,
     DatabaseSettings,
     MusicSettings,
+    VoiceSettings,
     WebSearchSafeSearch,
     WebToolsSettings,
 )
@@ -99,6 +100,12 @@ def test_app_settings_use_the_injected_oopz_credentials(monkeypatch) -> None:
     assert settings.agent.max_skill_resource_characters == 12000
     assert settings.agent.max_skill_context_characters == 24000
     assert settings.music.enabled is False
+    assert settings.voice.enabled is False
+    assert settings.voice.experimental is True
+    assert settings.voice.input_queue_ms == 200
+    assert settings.voice.output_prebuffer_ms == 100
+    assert settings.voice.provider_connect_attempts == 3
+    assert settings.voice.transcript_debug is False
     assert settings.web.search_enabled is True
     assert settings.web.search_safesearch is WebSearchSafeSearch.MODERATE
     assert settings.web.browser_enabled is False
@@ -263,6 +270,79 @@ def test_enabled_music_requires_http_catalog_and_loads_bounds() -> None:
     assert settings.search_limit == 7
     assert settings.max_queue_length == 12
     assert settings.max_playlist_tracks == 1000
+
+
+def test_voice_settings_load_runtime_bounds() -> None:
+    settings = VoiceSettings.from_mapping(
+        {
+            "CYWL_VOICE_ENABLED": "true",
+            "CYWL_VOICE_EXPERIMENTAL": "false",
+            "CYWL_VOICE_START_TIMEOUT_SECONDS": "12.5",
+            "CYWL_VOICE_IDLE_TIMEOUT_SECONDS": "240",
+            "CYWL_VOICE_OWNER_LEAVE_GRACE_SECONDS": "10",
+            "CYWL_VOICE_MAX_SESSION_SECONDS": "2400",
+            "CYWL_VOICE_INPUT_QUEUE_MS": "160",
+            "CYWL_VOICE_OUTPUT_QUEUE_MS": "360",
+            "CYWL_VOICE_OUTPUT_PREBUFFER_MS": "90",
+            "CYWL_VOICE_EVENT_QUEUE_SIZE": "256",
+            "CYWL_VOICE_PROVIDER_CONNECT_ATTEMPTS": "2",
+            "CYWL_VOICE_READ_TASK_CONCURRENCY": "4",
+            "CYWL_VOICE_PER_USER_TASK_CONCURRENCY": "2",
+            "CYWL_VOICE_MAILBOX_POLL_SECONDS": "1.5",
+            "CYWL_VOICE_TRANSCRIPT_DEBUG": "true",
+        }
+    )
+
+    assert settings.enabled is True
+    assert settings.experimental is False
+    assert settings.start_timeout_seconds == 12.5
+    assert settings.idle_timeout_seconds == 240
+    assert settings.owner_leave_grace_seconds == 10
+    assert settings.max_session_seconds == 2400
+    assert settings.input_queue_ms == 160
+    assert settings.output_queue_ms == 360
+    assert settings.output_prebuffer_ms == 90
+    assert settings.event_queue_size == 256
+    assert settings.provider_connect_attempts == 2
+    assert settings.read_task_concurrency == 4
+    assert settings.per_user_task_concurrency == 2
+    assert settings.mailbox_poll_seconds == 1.5
+    assert settings.transcript_debug is True
+
+
+@pytest.mark.parametrize(
+    ("overrides", "error_name"),
+    [
+        ({"CYWL_VOICE_PROVIDER_CONNECT_ATTEMPTS": "6"}, "PROVIDER_CONNECT_ATTEMPTS"),
+        (
+            {
+                "CYWL_VOICE_IDLE_TIMEOUT_SECONDS": "2000",
+                "CYWL_VOICE_MAX_SESSION_SECONDS": "1000",
+            },
+            "IDLE_TIMEOUT_SECONDS",
+        ),
+        (
+            {
+                "CYWL_VOICE_OUTPUT_QUEUE_MS": "80",
+                "CYWL_VOICE_OUTPUT_PREBUFFER_MS": "100",
+            },
+            "OUTPUT_PREBUFFER_MS",
+        ),
+        (
+            {
+                "CYWL_VOICE_READ_TASK_CONCURRENCY": "1",
+                "CYWL_VOICE_PER_USER_TASK_CONCURRENCY": "2",
+            },
+            "PER_USER_TASK_CONCURRENCY",
+        ),
+    ],
+)
+def test_voice_settings_reject_inconsistent_bounds(
+    overrides: dict[str, str],
+    error_name: str,
+) -> None:
+    with pytest.raises(ConfigurationError, match=error_name):
+        VoiceSettings.from_mapping(overrides)
 
 
 def test_web_search_settings_validate_provider_bounds() -> None:

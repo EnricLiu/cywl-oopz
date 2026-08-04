@@ -122,6 +122,7 @@ from .integrations.oopz.message_renderer import OopzMessageRenderer
 from .integrations.oopz.music import OopzMusicVoiceGateway
 from .integrations.oopz.reactions import OopzReactionGateway
 from .integrations.oopz.skill_sharing import OopzSkillShareNotifier
+from .integrations.oopz.voice_capabilities import OopzVoiceCapabilityGate
 from .integrations.web.agent_browser_mcp import AgentBrowserMcpGateway
 from .integrations.web.duckduckgo import DuckDuckGoSearchGateway
 from .settings import (
@@ -147,6 +148,7 @@ class BotApplication:
         self.health = HealthRegistry()
         self.database = Database(settings.database)
         self.bot = OopzBot(settings.oopz)
+        self.voice_capability_gate = OopzVoiceCapabilityGate()
         self.chat_invocations = OopzChatInvocationFactory(settings.oopz.person_uid)
         self.agent_presenters = OopzAgentPresenterFactory(
             OopzEditableMessageGateway(self.bot),
@@ -353,10 +355,11 @@ class BotApplication:
             max_available_skills=settings.agent.max_available_skills,
         )
         logger.info(
-            "Application configured: agent=%s tools=%s music=%s web_search=%s browser=%s",
+            "Application configured: agent=%s tools=%s music=%s voice=%s web_search=%s browser=%s",
             settings.agent.enabled,
             len(self.agent_tool_registry.names),
             self.music is not None,
+            settings.voice.enabled,
             self.web_search is not None,
             self.browser is not None,
         )
@@ -513,6 +516,12 @@ class BotApplication:
         """Start the database check before entering the long-running OOPZ client."""
         logger.info("Application startup started")
         try:
+            if self.settings.voice.enabled:
+                self.voice_capability_gate.validate(self.bot.voice.capabilities)
+                logger.info(
+                    "OOPZ realtime voice SDK contract validated: feature_version=%s",
+                    self.bot.voice.capabilities.feature_version,
+                )
             try:
                 await self.database.start()
             except DatabaseError:

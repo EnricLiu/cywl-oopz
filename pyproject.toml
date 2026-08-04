@@ -13,11 +13,9 @@ dependencies = [
     "asyncpg>=0.30.0",
     "ddgs>=9.14.4",
     "httpx>=0.28.0",
-    "oopz-sdk>=0.13.1",
+    "oopz-sdk>=0.15.0",
     "pydantic-ai-slim[mcp,openai]>=2.18.0",
     "python-dotenv>=1.1.0",
-    # oopz-sdk 0.13.1 imports requests but does not declare it itself.
-    "requests>=2.32.0",
     "sqlalchemy>=2.0.0",
 ]
 
@@ -42,3 +40,6 @@ extend-exclude = ["ref"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]
+
+[tool.uv.sources]
+oopz-sdk = { path = "sdk", editable = true }

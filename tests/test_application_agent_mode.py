@@ -3,6 +3,7 @@ from __future__ import annotations
 from uuid import UUID
 
 import pytest
+from oopz_sdk import VoiceCapabilities
 
 import cywl_oopz.application as application_module
 from cywl_oopz.application import BotApplication
@@ -30,6 +31,25 @@ class FakeOopzBot:
 
     async def run(self) -> None:
         self.did_run = True
+
+
+class IncompleteVoiceContractBot(FakeOopzBot):
+    def __init__(self, config) -> None:
+        super().__init__(config)
+        self.voice = type(
+            "IncompleteVoiceBackend",
+            (),
+            {
+                "capabilities": VoiceCapabilities(
+                    feature_version=0,
+                    remote_audio_subscription=True,
+                    person_audio_subscription=False,
+                    streaming_pcm_output=False,
+                    playback_cursor=False,
+                    typed_playback_handle=False,
+                )
+            },
+        )()
 
 
 def settings(mode: str, **overrides: str) -> AppSettings:
@@ -280,6 +300,31 @@ async def test_browser_startup_failure_degrades_health_without_stopping_bot(
     assert application.bot.did_run is True
     assert browser_health.state.value == "degraded"
     assert browser_health.detail == "MCP initialization failed"
+
+
+@pytest.mark.asyncio
+async def test_voice_sdk_contract_is_validated_before_database_or_oopz_start(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(application_module, "OopzBot", IncompleteVoiceContractBot)
+    application = BotApplication(settings("legacy", CYWL_VOICE_ENABLED="true"))
+    database_started = False
+
+    async def start_database() -> None:
+        nonlocal database_started
+        database_started = True
+
+    async def no_op() -> None:
+        return None
+
+    monkeypatch.setattr(application.database, "start", start_database)
+    monkeypatch.setattr(application.database, "close", no_op)
+
+    with pytest.raises(ConfigurationError, match="newer OOPZ SDK voice contract"):
+        await application.run()
+
+    assert database_started is False
+    assert not hasattr(application.bot, "did_run")
 
 
 @pytest.mark.asyncio
