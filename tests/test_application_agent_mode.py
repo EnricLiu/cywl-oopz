@@ -66,6 +66,11 @@ def settings(mode: str, **overrides: str) -> AppSettings:
     )
 
 
+async def no_stale_voice_sessions(now) -> int:
+    del now
+    return 0
+
+
 @pytest.mark.asyncio
 async def test_composition_root_routes_chat_and_provider_command_by_agent_flag(
     monkeypatch,
@@ -315,6 +320,7 @@ async def test_browser_startup_failure_degrades_health_without_stopping_bot(
 
     monkeypatch.setattr(application.database, "start", no_op)
     monkeypatch.setattr(application.database, "close", no_op)
+    monkeypatch.setattr(application.voice_sessions, "recover_stale", no_stale_voice_sessions)
     assert application.browser is not None
     monkeypatch.setattr(application.browser, "start", unavailable)
 
@@ -324,6 +330,37 @@ async def test_browser_startup_failure_degrades_health_without_stopping_bot(
     assert application.bot.did_run is True
     assert browser_health.state.value == "degraded"
     assert browser_health.detail == "MCP initialization failed"
+
+
+@pytest.mark.asyncio
+async def test_application_recovers_stale_voice_sessions_before_oopz_even_when_disabled(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(application_module, "OopzBot", FakeOopzBot)
+    application = BotApplication(settings("legacy"))
+    events: list[str] = []
+
+    async def no_op() -> None:
+        return None
+
+    async def recover_stale(now) -> int:
+        assert now.tzinfo is not None
+        events.append("recover_voice")
+        return 2
+
+    async def run_bot() -> None:
+        events.append("run_oopz")
+        application.bot.did_run = True
+
+    monkeypatch.setattr(application.database, "start", no_op)
+    monkeypatch.setattr(application.database, "close", no_op)
+    monkeypatch.setattr(application.voice_sessions, "recover_stale", recover_stale)
+    monkeypatch.setattr(application.bot, "run", run_bot)
+
+    await application.run()
+
+    assert events == ["recover_voice", "run_oopz"]
+    assert application.bot.did_run is True
 
 
 @pytest.mark.asyncio
@@ -364,6 +401,7 @@ async def test_agent_mode_fails_before_oopz_when_catalog_has_no_application_defa
     monkeypatch.setattr(application.database, "start", no_op)
     monkeypatch.setattr(application.database, "close", no_op)
     monkeypatch.setattr(application.agent_models, "reload", no_op)
+    monkeypatch.setattr(application.voice_sessions, "recover_stale", no_stale_voice_sessions)
 
     with pytest.raises(ConfigurationError, match="application-default"):
         await application.run()
@@ -408,6 +446,7 @@ async def test_agent_mode_rejects_disabled_application_default(monkeypatch) -> N
     monkeypatch.setattr(application.database, "start", no_op)
     monkeypatch.setattr(application.database, "close", no_op)
     monkeypatch.setattr(application.agent_models, "reload", no_op)
+    monkeypatch.setattr(application.voice_sessions, "recover_stale", no_stale_voice_sessions)
 
     with pytest.raises(ConfigurationError, match="enabled application-default"):
         await application.run()
@@ -452,6 +491,7 @@ async def test_agent_tools_require_a_tool_calling_application_default(monkeypatc
     monkeypatch.setattr(application.database, "start", no_op)
     monkeypatch.setattr(application.database, "close", no_op)
     monkeypatch.setattr(application.agent_models, "reload", no_op)
+    monkeypatch.setattr(application.voice_sessions, "recover_stale", no_stale_voice_sessions)
 
     with pytest.raises(ConfigurationError, match="application-default"):
         await application.run()

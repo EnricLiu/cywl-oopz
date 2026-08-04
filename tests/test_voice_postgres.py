@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
@@ -204,6 +205,50 @@ async def test_voice_migration_and_repositories_on_postgresql() -> None:
         assert stored_turn is not None
         assert stored_turn.transcript == "你好，未来。"
 
+        stale_descriptors = [
+            VoiceSessionDescriptor(
+                uuid4(),
+                f"stale-person-{index}",
+                VoiceChannelKey("area", "voice"),
+                VoiceTextAddress("area", "text"),
+            )
+            for index in range(3)
+        ]
+        for stale_descriptor in stale_descriptors:
+            await history.create(stale_descriptor, second)
+        await history.mark_active(stale_descriptors[1].session_id)
+        await history.mark_active(stale_descriptors[2].session_id)
+        await history.mark_recovering(stale_descriptors[2].session_id)
+
+        recovered_at = datetime.now(UTC)
+        assert await history.recover_stale(recovered_at) == 3
+        assert await history.recover_stale(datetime.now(UTC)) == 0
+        async with sessions() as session:
+            recovered_sessions = (
+                (
+                    await session.execute(
+                        select(VoiceSessionRecord).where(
+                            VoiceSessionRecord.id.in_(
+                                tuple(item.session_id for item in stale_descriptors)
+                            )
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            original_session = await session.get(VoiceSessionRecord, descriptor.session_id)
+        assert len(recovered_sessions) == 3
+        assert all(
+            item.status is PersistedVoiceSessionStatus.FAILED
+            and item.ended_at == recovered_at
+            and item.stop_reason == "process_restarted"
+            for item in recovered_sessions
+        )
+        assert original_session is not None
+        assert original_session.status is PersistedVoiceSessionStatus.ENDED
+        assert original_session.stop_reason == "command"
+
         async with test_engine.connect() as connection:
             trigger_count = await connection.scalar(
                 text(
@@ -230,7 +275,17 @@ async def test_voice_migration_and_repositories_on_postgresql() -> None:
             assert await connection.scalar(text("SELECT to_regclass('voice_providers')")) is None
             assert (
                 await connection.scalar(
-                    text("SELECT EXISTS (SELECT 1 FROM pg_type WHERE typname='voice_model_mode')")
+                    text(
+                        """
+                            SELECT EXISTS (
+                                SELECT 1
+                                FROM pg_type
+                                JOIN pg_namespace ON pg_namespace.oid = pg_type.typnamespace
+                                WHERE pg_type.typname = 'voice_model_mode'
+                                  AND pg_namespace.nspname = current_schema()
+                            )
+                            """
+                    )
                 )
                 is False
             )

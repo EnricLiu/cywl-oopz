@@ -653,6 +653,12 @@ class BotApplication:
                 raise
             self.health.mark("database", HealthState.HEALTHY, "connection check passed")
             logger.info("Database health check passed")
+            recovered_voice_sessions = await self.voice_sessions.recover_stale(datetime.now(UTC))
+            if recovered_voice_sessions:
+                logger.warning(
+                    "Marked stale voice sessions interrupted after process restart: count=%s",
+                    recovered_voice_sessions,
+                )
             if self.browser is not None:
                 try:
                     await self.browser.start()

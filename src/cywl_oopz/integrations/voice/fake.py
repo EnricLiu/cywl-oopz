@@ -158,6 +158,13 @@ class FakeVoiceSessionRepository:
         self.finished: list[tuple[UUID, PersistedVoiceSessionStatus, str]] = []
         self.finished_usage: list[dict[str, object]] = []
         self.turns: list[tuple[UUID, int, VoiceTurnRole, str]] = []
+        self.stale_recovery_count = 0
+        self.recovery_calls = 0
+
+    async def recover_stale(self, now) -> int:
+        del now
+        self.recovery_calls += 1
+        return self.stale_recovery_count
 
     async def create(self, descriptor, configuration) -> None:
         self.created.append((descriptor, configuration))

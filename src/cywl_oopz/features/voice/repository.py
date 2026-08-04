@@ -270,6 +270,35 @@ class SqlAlchemyVoiceSessionRepository:
     def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
         self._sessions = sessions
 
+    async def recover_stale(self, now: datetime) -> int:
+        """Close every non-terminal session owned by a previous process generation."""
+        statement = (
+            update(VoiceSessionRecord)
+            .where(
+                VoiceSessionRecord.status.in_(
+                    (
+                        PersistedVoiceSessionStatus.STARTING,
+                        PersistedVoiceSessionStatus.ACTIVE,
+                        PersistedVoiceSessionStatus.RECOVERING,
+                    )
+                ),
+                VoiceSessionRecord.ended_at.is_(None),
+                VoiceSessionRecord.started_at <= now,
+            )
+            .values(
+                status=PersistedVoiceSessionStatus.FAILED,
+                ended_at=now,
+                stop_reason="process_restarted",
+            )
+        )
+        try:
+            async with self._sessions() as session:
+                async with session.begin():
+                    result = await session.execute(statement)
+                    return result.rowcount
+        except SQLAlchemyError as exc:
+            raise _database_error("recover stale voice sessions", exc) from exc
+
     async def create(
         self,
         descriptor: VoiceSessionDescriptor,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Protocol
 from uuid import UUID
 
@@ -233,6 +234,10 @@ class VoiceConfigurationRepository(Protocol):
 
 class VoiceSessionRepository(Protocol):
     """Persist session lifecycle and final transcript turns."""
+
+    async def recover_stale(self, now: datetime) -> int:
+        """Terminate sessions left non-terminal by an earlier process generation."""
+        ...
 
     async def create(
         self,
