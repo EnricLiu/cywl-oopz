@@ -40,6 +40,7 @@ from .ports import (
     VoiceAccessGateway,
     VoiceConfigurationRepository,
     VoiceLease,
+    VoiceMemoryContextSource,
     VoiceSessionRepository,
     VoiceSessionRuntime,
     VoiceSessionRuntimeContext,
@@ -82,12 +83,14 @@ class VoiceConversationService:
         runtimes: VoiceSessionRuntimeFactory,
         configurations: VoiceConfigurationRepository,
         sessions: VoiceSessionRepository,
+        memory_context_source: VoiceMemoryContextSource | None = None,
     ) -> None:
         self._settings = settings
         self._access = access
         self._runtimes = runtimes
         self._configurations = configurations
         self._sessions = sessions
+        self._memory_context_source = memory_context_source
         self._lock = asyncio.Lock()
         self._active: _ActiveVoiceSession | None = None
         self._closed = False
@@ -138,6 +141,8 @@ class VoiceConversationService:
                 )
                 slot.configuration = configuration
                 await self._ensure_starting(slot)
+                memory_context = await self._load_memory_context(request.owner_person_id)
+                await self._ensure_starting(slot)
 
                 lease = await self._access.try_acquire(
                     channel,
@@ -164,6 +169,7 @@ class VoiceConversationService:
                         lease,
                         configuration,
                         _SessionRuntimeStatusRelay(self, slot),
+                        memory_context,
                     )
                 )
                 slot.runtime = runtime
@@ -212,6 +218,21 @@ class VoiceConversationService:
             opaque_ref(channel.area_id, channel.channel_id),
         )
         return status
+
+    async def _load_memory_context(self, owner_person_id: str) -> str:
+        source = self._memory_context_source
+        if source is None:
+            return ""
+        try:
+            memory = await source.context_text(owner_person_id)
+        except Exception as exc:
+            logger.warning(
+                "Voice memory context load failed; continuing without memory: owner=%s error=%s",
+                opaque_ref(owner_person_id),
+                exception_kind(exc),
+            )
+            return ""
+        return memory.strip()[:1500]
 
     async def stop(self, owner_person_id: str) -> VoiceSessionStatus:
         """Stop the active session when requested by its owner."""

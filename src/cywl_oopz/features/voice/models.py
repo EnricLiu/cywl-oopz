@@ -323,6 +323,49 @@ class VoiceTaskNotification:
 
 
 @dataclass(frozen=True, slots=True)
+class VoiceRecoveryTurn:
+    """One confirmed final transcript safe to seed a replacement Provider session."""
+
+    role: Literal["user", "assistant"]
+    text: str
+
+    def __post_init__(self) -> None:
+        if self.role not in {"user", "assistant"}:
+            raise ValueError("Voice recovery turn role is unsupported")
+        if not self.text.strip() or len(self.text) > 500:
+            raise ValueError("Voice recovery turn text must contain 1-500 characters")
+
+
+@dataclass(frozen=True, slots=True)
+class VoiceRecoveryTask:
+    """One already-presented terminal task result safe to retain across reconnects."""
+
+    alias: str
+    status: VoiceTaskNotificationStatus
+    summary: str
+
+    def __post_init__(self) -> None:
+        if not self.alias.strip() or len(self.alias) > 16:
+            raise ValueError("Voice recovery task alias is invalid")
+        if not self.summary.strip() or len(self.summary) > 360:
+            raise ValueError("Voice recovery task summary must contain 1-360 characters")
+
+
+@dataclass(frozen=True, slots=True)
+class VoiceRecoveryContext:
+    """Small confirmed context carried into a newly connected Provider session."""
+
+    turns: tuple[VoiceRecoveryTurn, ...] = ()
+    tasks: tuple[VoiceRecoveryTask, ...] = ()
+
+    def __post_init__(self) -> None:
+        if len(self.turns) > 8:
+            raise ValueError("Voice recovery context may contain at most 8 turns")
+        if len(self.tasks) > 3:
+            raise ValueError("Voice recovery context may contain at most 3 tasks")
+
+
+@dataclass(frozen=True, slots=True)
 class VoiceInternalContextItem:
     """Bounded trusted context injected by a capability-gated Provider adapter."""
 

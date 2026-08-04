@@ -79,6 +79,19 @@ class RecordingStatusSink:
         self.closed = True
 
 
+class MemoryContextSource:
+    def __init__(self, text: str = "", error: Exception | None = None) -> None:
+        self.text = text
+        self.error = error
+        self.calls: list[str] = []
+
+    async def context_text(self, person_id: str) -> str:
+        self.calls.append(person_id)
+        if self.error is not None:
+            raise self.error
+        return self.text
+
+
 @pytest.mark.asyncio
 async def test_voice_service_runs_fake_session_then_stops_and_releases_everything() -> None:
     conversations, access, runtimes = service()
@@ -160,6 +173,51 @@ async def test_voice_service_pins_fresh_configuration_and_persists_lifecycle() -
 
     assert sessions.finished == [(active.session_id, PersistedVoiceSessionStatus.ENDED, "command")]
     assert sessions.finished_usage == [{"input_tokens": 4, "output_tokens": 2}]
+    await conversations.aclose()
+
+
+@pytest.mark.asyncio
+async def test_voice_service_loads_bounded_memory_once_for_the_runtime() -> None:
+    access = FakeVoiceAccessGateway()
+    access.channels[("area", "person")] = "voice"
+    runtimes = FakeVoiceSessionRuntimeFactory()
+    memory = MemoryContextSource("  用户喜欢电子音乐。  ")
+    conversations = VoiceConversationService(
+        settings(),
+        access,
+        runtimes,
+        FakeVoiceConfigurationRepository(),
+        FakeVoiceSessionRepository(),
+        memory,
+    )
+
+    await conversations.start(request())
+
+    assert memory.calls == ["person"]
+    assert runtimes.contexts[0].memory_context == "用户喜欢电子音乐。"
+    await conversations.stop("person")
+    await conversations.aclose()
+
+
+@pytest.mark.asyncio
+async def test_voice_service_continues_when_memory_projection_fails() -> None:
+    access = FakeVoiceAccessGateway()
+    access.channels[("area", "person")] = "voice"
+    runtimes = FakeVoiceSessionRuntimeFactory()
+    conversations = VoiceConversationService(
+        settings(),
+        access,
+        runtimes,
+        FakeVoiceConfigurationRepository(),
+        FakeVoiceSessionRepository(),
+        MemoryContextSource(error=RuntimeError("fixture database failure")),
+    )
+
+    active = await conversations.start(request())
+
+    assert active.active is True
+    assert runtimes.contexts[0].memory_context == ""
+    await conversations.stop("person")
     await conversations.aclose()
 
 

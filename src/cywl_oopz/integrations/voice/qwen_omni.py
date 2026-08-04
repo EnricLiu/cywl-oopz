@@ -308,7 +308,11 @@ class QwenOmniProviderBuilder:
         configuration = context.configuration
         return QwenOmniRealtimeProvider(
             QwenOmniConfig.from_start_configuration(configuration),
-            self._prompts.compile(configuration),
+            self._prompts.compile(
+                configuration,
+                memory_context=context.memory_context,
+                recovery_context=context.recovery_context,
+            ),
             tool_schemas=self._tool_schemas,
         )
 

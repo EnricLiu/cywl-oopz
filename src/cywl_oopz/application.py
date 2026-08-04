@@ -541,6 +541,7 @@ class BotApplication:
             self.voice_runtimes,
             self.voice_configurations,
             self.voice_sessions,
+            self.agent_memory,
         )
         self._register_commands()
         self.bot.on_ready(self._on_ready)

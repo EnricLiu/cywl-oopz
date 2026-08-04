@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -17,10 +18,17 @@ from cywl_oopz.features.voice.models import (
     PcmChunk,
     PlaybackCursor,
     VoiceChannelKey,
+    VoiceRecoveryContext,
+    VoiceRecoveryTurn,
     VoiceSessionDescriptor,
     VoiceTextAddress,
 )
-from cywl_oopz.integrations.voice.qwen_omni import QwenOmniRealtimeProvider
+from cywl_oopz.features.voice.ports import VoiceSessionRuntimeContext
+from cywl_oopz.integrations.voice.fake import FakeVoiceConfigurationRepository
+from cywl_oopz.integrations.voice.qwen_omni import (
+    QwenOmniProviderBuilder,
+    QwenOmniRealtimeProvider,
+)
 from cywl_oopz.integrations.voice.qwen_protocol import QwenOmniConfig
 
 
@@ -118,6 +126,26 @@ async def test_qwen_adapter_serializes_session_update_audio_and_finish() -> None
 
     await provider.aclose()
     assert websocket.closed is True
+
+
+@pytest.mark.asyncio
+async def test_qwen_omni_builder_compiles_recovery_into_initial_instructions() -> None:
+    configuration = await FakeVoiceConfigurationRepository().resolve_start_configuration(
+        "person", VoiceChannelKey("area", "voice")
+    )
+    provider = QwenOmniProviderBuilder()(
+        VoiceSessionRuntimeContext(
+            descriptor(),
+            SimpleNamespace(),
+            configuration,
+            recovery_context=VoiceRecoveryContext(
+                (VoiceRecoveryTurn("assistant", "上一句已经完整播完。"),)
+            ),
+        )
+    )
+
+    assert '"role":"assistant","text":"上一句已经完整播完。"' in provider._instructions
+    await provider.aclose()
 
 
 @pytest.mark.asyncio

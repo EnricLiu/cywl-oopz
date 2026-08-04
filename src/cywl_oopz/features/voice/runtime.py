@@ -41,6 +41,9 @@ from .models import (
     PlaybackCursor,
     VoiceMediaEndReason,
     VoiceProviderCapabilities,
+    VoiceRecoveryContext,
+    VoiceRecoveryTask,
+    VoiceRecoveryTurn,
     VoiceRuntimeResult,
     VoiceRuntimeStats,
     VoiceRuntimeStatus,
@@ -82,6 +85,12 @@ _NOTIFICATION_COOLDOWN_SECONDS = 5.0
 _NOTIFICATION_BATCH_LIMIT = 3
 _NOTIFICATION_PERSIST_ATTEMPTS = 3
 _NOTIFICATION_PERSIST_RETRY_SECONDS = 0.05
+
+
+def _compact_recovery_text(text: str, limit: int) -> str:
+    """Normalize Provider/user text before retaining a small reconnect snapshot."""
+    normalized = " ".join(text.split())
+    return normalized[:limit] or "（无可用文本）"
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,9 +158,13 @@ class _MailboxClaimed:
 
 @dataclass(frozen=True, slots=True)
 class _MailboxPresented:
-    count: int
+    notices: tuple[VoiceTaskNotification, ...]
     strategy: VoiceTaskNotificationStrategy
     succeeded: bool
+
+    @property
+    def count(self) -> int:
+        return len(self.notices)
 
 
 @dataclass(slots=True)
@@ -228,6 +241,14 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
         self._mailbox_claim_in_flight = False
         self._notification_in_flight = False
         self._proactive_task_notices: tuple[VoiceTaskNotification, ...] = ()
+        self._recovery_turns: deque[VoiceRecoveryTurn] = deque(
+            context.recovery_context.turns,
+            maxlen=8,
+        )
+        self._recovery_tasks: deque[VoiceRecoveryTask] = deque(
+            context.recovery_context.tasks,
+            maxlen=3,
+        )
         self._start_lock = asyncio.Lock()
         self._close_lock = asyncio.Lock()
         self._started = False
@@ -339,7 +360,14 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
     async def _connect_provider(self) -> None:
         last_error: Exception | None = None
         for attempt in range(1, self._settings.provider_connect_attempts + 1):
-            provider = self._provider_builder(self._context)
+            provider_context = replace(
+                self._context,
+                recovery_context=VoiceRecoveryContext(
+                    tuple(self._recovery_turns),
+                    tuple(self._recovery_tasks),
+                ),
+            )
+            provider = self._provider_builder(provider_context)
             try:
                 session = await provider.connect(self._context.descriptor)
             except asyncio.CancelledError:
@@ -706,7 +734,7 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
         await self._defer_notifications(tuple(item.task_id for item in notices))
         await self._control.put(
             _MailboxPresented(
-                len(notices),
+                notices,
                 VoiceTaskNotificationStrategy.INTERNAL_RESPONSE,
                 False,
             )
@@ -739,7 +767,7 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                     await asyncio.sleep(_NOTIFICATION_PERSIST_RETRY_SECONDS * attempt)
         await self._control.put(
             _MailboxPresented(
-                len(notices),
+                notices,
                 VoiceTaskNotificationStrategy.INTERNAL_RESPONSE,
                 succeeded,
             )
@@ -753,7 +781,7 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
         await self._defer_notifications(tuple(item.task_id for item in notices))
         self._handle_mailbox_presented(
             _MailboxPresented(
-                len(notices),
+                notices,
                 VoiceTaskNotificationStrategy.INTERNAL_RESPONSE,
                 False,
             )
@@ -801,7 +829,7 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                 await self._defer_notifications(tuple(item.task_id for item in notices))
         await self._control.put(
             _MailboxPresented(
-                len(notices),
+                notices,
                 VoiceTaskNotificationStrategy.TEXT_FALLBACK,
                 succeeded,
             )
@@ -830,6 +858,16 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                 else self._stats.task_notifications_text_fallback
             ),
         )
+        if event.succeeded:
+            for notice in event.notices:
+                detail = notice.summary or notice.error_message or notice.objective
+                self._recovery_tasks.append(
+                    VoiceRecoveryTask(
+                        notice.alias,
+                        notice.status,
+                        _compact_recovery_text(detail, 360),
+                    )
+                )
         self._publish_status()
         if self._mailbox_available_pending:
             self._handle_mailbox_available()
@@ -1052,6 +1090,9 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
         active.pending_transcript = event
 
     async def _persist_transcript(self, event: VoiceTranscriptFinal) -> None:
+        self._recovery_turns.append(
+            VoiceRecoveryTurn(event.role, _compact_recovery_text(event.text, 500))
+        )
         self._turn_sequence += 1
         try:
             await self._sessions.append_final_turn(

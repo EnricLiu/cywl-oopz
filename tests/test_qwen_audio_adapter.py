@@ -11,6 +11,8 @@ from cywl_oopz.features.voice.models import (
     VoiceChannelKey,
     VoiceInternalContextItem,
     VoiceProviderCapabilities,
+    VoiceRecoveryContext,
+    VoiceRecoveryTurn,
     VoiceSessionDescriptor,
     VoiceTextAddress,
 )
@@ -25,7 +27,10 @@ from cywl_oopz.features.voice.settings import (
     VoiceStartConfiguration,
 )
 from cywl_oopz.integrations.voice.provider_builder import ConfiguredVoiceProviderBuilder
-from cywl_oopz.integrations.voice.qwen_audio import QwenAudioRealtimeProvider
+from cywl_oopz.integrations.voice.qwen_audio import (
+    QwenAudioProviderBuilder,
+    QwenAudioRealtimeProvider,
+)
 from cywl_oopz.integrations.voice.qwen_audio_protocol import (
     QwenAudioConfig,
     QwenAudioTurnDetectionMode,
@@ -154,6 +159,23 @@ async def test_configured_provider_builder_routes_qwen_audio_without_coordinator
     )
 
     assert isinstance(provider, QwenAudioRealtimeProvider)
+    await provider.aclose()
+
+
+@pytest.mark.asyncio
+async def test_qwen_audio_builder_compiles_memory_and_recovery_into_initial_instructions() -> None:
+    provider = QwenAudioProviderBuilder()(
+        VoiceSessionRuntimeContext(
+            descriptor(),
+            SimpleNamespace(),
+            configuration(),
+            memory_context="用户喜欢电子音乐。",
+            recovery_context=VoiceRecoveryContext((VoiceRecoveryTurn("user", "刚才说到哪里了？"),)),
+        )
+    )
+
+    assert "用户喜欢电子音乐" in provider._instructions
+    assert '"role":"user","text":"刚才说到哪里了？"' in provider._instructions
     await provider.aclose()
 
 

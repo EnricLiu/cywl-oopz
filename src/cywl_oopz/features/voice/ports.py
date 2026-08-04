@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 from uuid import UUID
 
@@ -16,6 +16,7 @@ from .models import (
     VoiceInternalContextItem,
     VoiceMediaTerminal,
     VoiceProviderCapabilities,
+    VoiceRecoveryContext,
     VoiceRuntimeResult,
     VoiceRuntimeStats,
     VoiceRuntimeStatus,
@@ -133,6 +134,12 @@ class VoiceSessionStatusSink(Protocol):
     async def aclose(self) -> None: ...
 
 
+class VoiceMemoryContextSource(Protocol):
+    """Load a bounded long-term memory projection for one voice session."""
+
+    async def context_text(self, person_id: str) -> str: ...
+
+
 @dataclass(frozen=True, slots=True)
 class VoiceSessionRuntimeContext:
     """Resources pinned for one runtime generation."""
@@ -141,6 +148,12 @@ class VoiceSessionRuntimeContext:
     lease: VoiceLease
     configuration: VoiceStartConfiguration
     status_sink: VoiceRuntimeStatusSink | None = None
+    memory_context: str = ""
+    recovery_context: VoiceRecoveryContext = field(default_factory=VoiceRecoveryContext)
+
+    def __post_init__(self) -> None:
+        if len(self.memory_context) > 1500:
+            raise ValueError("Voice memory context exceeds 1500 characters")
 
 
 class VoiceSessionRuntime(Protocol):

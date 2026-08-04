@@ -840,6 +840,71 @@ async def test_realtime_runtime_recovers_retryable_provider_disconnect() -> None
 
 
 @pytest.mark.asyncio
+async def test_realtime_runtime_reconnects_with_only_confirmed_bounded_context(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(runtime_module, "_NOTIFICATION_COALESCE_SECONDS", 0)
+    monkeypatch.setattr(runtime_module, "_NOTIFICATION_SILENCE_SECONDS", 0)
+    monkeypatch.setattr(runtime_module, "_NOTIFICATION_COOLDOWN_SECONDS", 0)
+    mailbox = FakeTaskMailbox()
+    runtime, _, _, providers = await runtime_fixture(task_mailbox=mailbox)
+    built_contexts = []
+    original_builder = runtime._provider_builder
+
+    def capture_context(context):
+        built_contexts.append(context)
+        return original_builder(context)
+
+    runtime._provider_builder = capture_context
+    starting = asyncio.create_task(runtime.start())
+    await wait_until(lambda: bool(providers and providers[0].sessions))
+    first_session = providers[0].sessions[0]
+    await first_session.emit(VoiceSessionReady())
+    await starting
+
+    await first_session.emit(VoiceTranscriptFinal("user", "帮我查演唱会", "user-1"))
+    await first_session.emit(VoiceResponseStarted("response-1"))
+    await first_session.emit(
+        VoiceTranscriptFinal("assistant", "已经交给后台处理啦。", "item-1", "response-1")
+    )
+    await first_session.emit(VoiceResponseCompleted("response-1"))
+    await wait_until(lambda: runtime.stats.responses_drained == 1)
+
+    mailbox.pending.append(notification(1))
+    mailbox.signal.set()
+    await wait_until(lambda: bool(mailbox.presented))
+    await wait_until(lambda: runtime.stats.task_notifications_presented == 1)
+
+    await first_session.emit(VoiceResponseStarted("response-unplayed"))
+    await first_session.emit(
+        VoiceTranscriptFinal(
+            "assistant",
+            "这段没有完整播放，不能进入恢复上下文。",
+            "item-unplayed",
+            "response-unplayed",
+        )
+    )
+    await first_session.emit(VoiceProviderFailed("connection_closed", True))
+    await wait_until(lambda: len(providers) == 2 and len(built_contexts) == 2)
+
+    recovery = built_contexts[1].recovery_context
+    assert [(turn.role, turn.text) for turn in recovery.turns] == [
+        ("user", "帮我查演唱会"),
+        ("assistant", "已经交给后台处理啦。"),
+    ]
+    assert [(task.alias, task.status.value, task.summary) for task in recovery.tasks] == [
+        ("T1", "succeeded", "结果 1")
+    ]
+    assert "没有完整播放" not in repr(recovery)
+
+    await providers[1].sessions[0].emit(VoiceSessionReady())
+    await wait_until(lambda: runtime.state is VoiceSessionState.LISTENING)
+    await runtime.request_stop(VoiceStopReason.COMMAND)
+    await runtime.wait_finished()
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
 async def test_realtime_runtime_ends_when_owner_leaves() -> None:
     runtime, media, _, providers = await runtime_fixture()
     starting = asyncio.create_task(runtime.start())
