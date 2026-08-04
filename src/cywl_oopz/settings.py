@@ -662,6 +662,7 @@ class VoiceSettings:
     enabled: bool
     experimental: bool
     start_timeout_seconds: float
+    stop_timeout_seconds: float
     idle_timeout_seconds: int
     owner_leave_grace_seconds: int
     max_session_seconds: int
@@ -685,6 +686,11 @@ class VoiceSettings:
                 values,
                 "CYWL_VOICE_START_TIMEOUT_SECONDS",
                 15.0,
+            ),
+            stop_timeout_seconds=_positive_float(
+                values,
+                "CYWL_VOICE_STOP_TIMEOUT_SECONDS",
+                1.5,
             ),
             idle_timeout_seconds=_positive_integer(
                 values,
@@ -743,6 +749,7 @@ class VoiceSettings:
         """Reject values that would make the realtime loop unsafe or misleading."""
         maximums: tuple[tuple[str, int | float, int | float], ...] = (
             ("CYWL_VOICE_START_TIMEOUT_SECONDS", self.start_timeout_seconds, 60),
+            ("CYWL_VOICE_STOP_TIMEOUT_SECONDS", self.stop_timeout_seconds, 1.6),
             ("CYWL_VOICE_IDLE_TIMEOUT_SECONDS", self.idle_timeout_seconds, 3600),
             ("CYWL_VOICE_OWNER_LEAVE_GRACE_SECONDS", self.owner_leave_grace_seconds, 60),
             ("CYWL_VOICE_MAX_SESSION_SECONDS", self.max_session_seconds, 14400),

@@ -102,6 +102,7 @@ def test_app_settings_use_the_injected_oopz_credentials(monkeypatch) -> None:
     assert settings.music.enabled is False
     assert settings.voice.enabled is False
     assert settings.voice.experimental is True
+    assert settings.voice.stop_timeout_seconds == 1.5
     assert settings.voice.input_queue_ms == 200
     assert settings.voice.output_prebuffer_ms == 100
     assert settings.voice.provider_connect_attempts == 3
@@ -278,6 +279,7 @@ def test_voice_settings_load_runtime_bounds() -> None:
             "CYWL_VOICE_ENABLED": "true",
             "CYWL_VOICE_EXPERIMENTAL": "false",
             "CYWL_VOICE_START_TIMEOUT_SECONDS": "12.5",
+            "CYWL_VOICE_STOP_TIMEOUT_SECONDS": "1.25",
             "CYWL_VOICE_IDLE_TIMEOUT_SECONDS": "240",
             "CYWL_VOICE_OWNER_LEAVE_GRACE_SECONDS": "10",
             "CYWL_VOICE_MAX_SESSION_SECONDS": "2400",
@@ -296,6 +298,7 @@ def test_voice_settings_load_runtime_bounds() -> None:
     assert settings.enabled is True
     assert settings.experimental is False
     assert settings.start_timeout_seconds == 12.5
+    assert settings.stop_timeout_seconds == 1.25
     assert settings.idle_timeout_seconds == 240
     assert settings.owner_leave_grace_seconds == 10
     assert settings.max_session_seconds == 2400
@@ -314,6 +317,7 @@ def test_voice_settings_load_runtime_bounds() -> None:
     ("overrides", "error_name"),
     [
         ({"CYWL_VOICE_PROVIDER_CONNECT_ATTEMPTS": "6"}, "PROVIDER_CONNECT_ATTEMPTS"),
+        ({"CYWL_VOICE_STOP_TIMEOUT_SECONDS": "2"}, "STOP_TIMEOUT_SECONDS"),
         (
             {
                 "CYWL_VOICE_IDLE_TIMEOUT_SECONDS": "2000",

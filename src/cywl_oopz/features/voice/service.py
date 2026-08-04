@@ -271,8 +271,9 @@ class VoiceConversationService:
         slot: _ActiveVoiceSession,
         reason: VoiceStopReason,
     ) -> None:
+        grace_seconds = min(0.1, self._settings.stop_timeout_seconds / 4)
         try:
-            async with asyncio.timeout(self._settings.start_timeout_seconds):
+            async with asyncio.timeout(grace_seconds):
                 await slot.done.wait()
         except TimeoutError:
             task: asyncio.Task[object] | None = slot.task or slot.startup_task
@@ -323,7 +324,13 @@ class VoiceConversationService:
         self._publish_status(slot)
         if runtime is not None:
             try:
-                await runtime.request_stop(reason)
+                async with asyncio.timeout(min(0.1, self._settings.stop_timeout_seconds / 4)):
+                    await runtime.request_stop(reason)
+            except TimeoutError:
+                logger.warning(
+                    "Voice runtime stop request exceeded grace period: session=%s",
+                    opaque_ref(str(slot.session_id)),
+                )
             except Exception as exc:
                 logger.warning(
                     "Voice runtime stop request failed: session=%s error=%s",
@@ -366,62 +373,109 @@ class VoiceConversationService:
             runtime = slot.runtime
             if runtime is not None:
                 try:
-                    await runtime.aclose()
+                    async with asyncio.timeout(self._settings.stop_timeout_seconds * 0.7):
+                        await runtime.aclose()
+                except TimeoutError:
+                    logger.warning(
+                        "Voice runtime force-close exceeded cleanup budget: session=%s",
+                        opaque_ref(str(slot.session_id)),
+                    )
                 except Exception as exc:
                     logger.warning(
                         "Voice runtime cleanup failed: session=%s error=%s",
                         opaque_ref(str(slot.session_id)),
                         exception_kind(exc),
                     )
-            if slot.persisted:
-                persisted_status = (
-                    PersistedVoiceSessionStatus.FAILED
-                    if state is VoiceSessionState.FAILED
-                    else PersistedVoiceSessionStatus.ENDED
-                )
-                try:
-                    await self._sessions.finish(
-                        slot.session_id,
-                        persisted_status,
-                        reason.value,
-                        usage=slot.usage,
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "Voice session persistence cleanup failed: session=%s error=%s",
-                        opaque_ref(str(slot.session_id)),
-                        exception_kind(exc),
-                    )
-            lease = slot.lease
-            if lease is not None and not lease.released:
-                try:
-                    await lease.release()
-                except Exception as exc:
-                    logger.warning(
-                        "Voice lease cleanup failed: session=%s error=%s",
-                        opaque_ref(str(slot.session_id)),
-                        exception_kind(exc),
-                    )
+            await asyncio.gather(
+                self._finish_persisted_session(slot, state, reason),
+                self._release_lease(slot),
+            )
             async with self._lock:
                 slot.state = state
                 if self._active is slot:
                     self._active = None
             self._publish_status(slot, active=False)
-            if finalize_status:
-                try:
-                    await slot.status_sink.aclose()
-                except Exception as exc:
-                    logger.warning(
-                        "Voice status display cleanup failed: session=%s error=%s",
-                        opaque_ref(str(slot.session_id)),
-                        exception_kind(exc),
-                    )
+            await self._close_status_sink(slot, finalize_status)
             slot.done.set()
             logger.info(
                 "Voice conversation closed: session=%s reason=%s state=%s",
                 opaque_ref(str(slot.session_id)),
                 reason.value,
                 state.value,
+            )
+
+    async def _finish_persisted_session(
+        self,
+        slot: _ActiveVoiceSession,
+        state: VoiceSessionState,
+        reason: VoiceStopReason,
+    ) -> None:
+        if not slot.persisted:
+            return
+        persisted_status = (
+            PersistedVoiceSessionStatus.FAILED
+            if state is VoiceSessionState.FAILED
+            else PersistedVoiceSessionStatus.ENDED
+        )
+        try:
+            async with asyncio.timeout(self._settings.stop_timeout_seconds * 0.1):
+                await self._sessions.finish(
+                    slot.session_id,
+                    persisted_status,
+                    reason.value,
+                    usage=slot.usage,
+                )
+        except TimeoutError:
+            logger.warning(
+                "Voice session persistence cleanup exceeded budget: session=%s",
+                opaque_ref(str(slot.session_id)),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Voice session persistence cleanup failed: session=%s error=%s",
+                opaque_ref(str(slot.session_id)),
+                exception_kind(exc),
+            )
+
+    async def _release_lease(self, slot: _ActiveVoiceSession) -> None:
+        lease = slot.lease
+        if lease is None or lease.released:
+            return
+        try:
+            async with asyncio.timeout(self._settings.stop_timeout_seconds * 0.1):
+                await lease.release()
+        except TimeoutError:
+            logger.warning(
+                "Voice lease cleanup exceeded budget: session=%s",
+                opaque_ref(str(slot.session_id)),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Voice lease cleanup failed: session=%s error=%s",
+                opaque_ref(str(slot.session_id)),
+                exception_kind(exc),
+            )
+
+    async def _close_status_sink(
+        self,
+        slot: _ActiveVoiceSession,
+        finalize_status: bool,
+    ) -> None:
+        if not finalize_status:
+            return
+        try:
+            async with asyncio.timeout(self._settings.stop_timeout_seconds * 0.1):
+                await slot.status_sink.aclose()
+        except TimeoutError:
+            logger.warning(
+                "Voice status display cleanup exceeded budget: session=%s",
+                opaque_ref(str(slot.session_id)),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Voice status display cleanup failed: session=%s error=%s",
+                opaque_ref(str(slot.session_id)),
+                exception_kind(exc),
             )
 
     def _publish_status(self, slot: _ActiveVoiceSession, *, active: bool = True) -> None:

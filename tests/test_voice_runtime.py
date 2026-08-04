@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import replace
 from uuid import uuid4
 
@@ -227,6 +228,54 @@ async def test_realtime_runtime_streams_audio_and_persists_final_turns() -> None
     await runtime.aclose()
     assert media.closed is True
     assert providers[0].closed is True
+
+
+@pytest.mark.asyncio
+async def test_realtime_runtime_stop_budget_cancels_stalled_transports_and_pumps() -> None:
+    runtime, media_gateway, _, providers = await runtime_fixture()
+    runtime._settings = settings(CYWL_VOICE_STOP_TIMEOUT_SECONDS="0.05")
+    starting = asyncio.create_task(runtime.start())
+    await wait_until(lambda: bool(providers and providers[0].sessions))
+    provider_session = providers[0].sessions[0]
+    await provider_session.emit(VoiceSessionReady())
+    await starting
+    media = media_gateway.sessions[0]
+    provider_close_cancelled = asyncio.Event()
+    media_close_cancelled = asyncio.Event()
+    never = asyncio.Event()
+    owned_tasks = tuple(runtime._tasks)
+
+    async def stalled_provider_close() -> None:
+        try:
+            await never.wait()
+        finally:
+            providers[0].closed = True
+            provider_close_cancelled.set()
+
+    async def stalled_media_close() -> None:
+        try:
+            await never.wait()
+        finally:
+            media.closed = True
+            media_close_cancelled.set()
+
+    providers[0].aclose = stalled_provider_close
+    media.aclose = stalled_media_close
+    await runtime.request_stop(VoiceStopReason.COMMAND)
+    await runtime.wait_finished()
+
+    started_at = time.monotonic()
+    async with asyncio.timeout(2):
+        await runtime.aclose()
+    elapsed = time.monotonic() - started_at
+    await asyncio.sleep(0)
+
+    assert elapsed < 2
+    assert provider_close_cancelled.is_set()
+    assert media_close_cancelled.is_set()
+    assert all(task.done() for task in owned_tasks)
+    assert not runtime._tasks
+    assert runtime.state is VoiceSessionState.CLOSED
 
 
 @pytest.mark.asyncio

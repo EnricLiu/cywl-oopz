@@ -329,35 +329,105 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
             self._provider_ready.clear()
             await self._input.aclose()
             await self._output.aclose()
-            if self._proactive_task_notices and self._task_mailbox is not None:
-                notices = self._proactive_task_notices
-                self._proactive_task_notices = ()
-                with suppress(Exception):
-                    await asyncio.shield(
-                        self._task_mailbox.defer(tuple(item.task_id for item in notices))
-                    )
-            current = asyncio.current_task()
-            tasks = tuple(task for task in self._tasks if task is not current)
-            for task in tasks:
-                task.cancel()
-            if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
-            self._tasks.clear()
-            provider_session = self._provider_session
-            if provider_session is not None:
-                with suppress(Exception):
-                    async with asyncio.timeout(1.0):
-                        await provider_session.finish()
-            provider = self._provider
-            if provider is not None:
-                with suppress(Exception):
-                    await provider.aclose()
-            media = self._media
-            if media is not None:
-                with suppress(Exception):
-                    await media.flush_output()
-                await media.aclose()
-            self._set_state(VoiceSessionState.CLOSED)
+            try:
+                async with asyncio.timeout(self._settings.stop_timeout_seconds):
+                    await self._close_owned_resources()
+            except TimeoutError:
+                logger.warning(
+                    "Voice runtime cleanup exceeded stop budget: session=%s budget_seconds=%.2f",
+                    opaque_ref(str(self._context.descriptor.session_id)),
+                    self._settings.stop_timeout_seconds,
+                )
+            finally:
+                self._set_state(VoiceSessionState.CLOSED)
+
+    async def _close_owned_resources(self) -> None:
+        notices = self._proactive_task_notices
+        self._proactive_task_notices = ()
+        current = asyncio.current_task()
+        tasks = tuple(task for task in self._tasks if task is not current)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        cleanup = [
+            self._close_provider_transport(),
+            self._close_media_transport(),
+        ]
+        if notices and self._task_mailbox is not None:
+            cleanup.append(self._defer_task_notifications(notices))
+        await asyncio.gather(*cleanup)
+
+    async def _defer_task_notifications(
+        self,
+        notices: tuple[VoiceTaskNotification, ...],
+    ) -> None:
+        if self._task_mailbox is None:  # pragma: no cover - guarded by caller
+            return
+        try:
+            await self._task_mailbox.defer(tuple(item.task_id for item in notices))
+        except Exception as exc:
+            logger.warning(
+                "Voice task notification defer failed during cleanup: session=%s error=%s",
+                opaque_ref(str(self._context.descriptor.session_id)),
+                exception_kind(exc),
+            )
+
+    async def _close_provider_transport(self) -> None:
+        provider_session = self._provider_session
+        if provider_session is not None:
+            try:
+                async with asyncio.timeout(min(0.25, self._settings.stop_timeout_seconds / 4)):
+                    await provider_session.finish()
+            except TimeoutError:
+                logger.warning(
+                    "Voice Provider finish exceeded graceful budget: session=%s",
+                    opaque_ref(str(self._context.descriptor.session_id)),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Voice Provider finish failed during cleanup: session=%s error=%s",
+                    opaque_ref(str(self._context.descriptor.session_id)),
+                    exception_kind(exc),
+                )
+        provider = self._provider
+        if provider is not None:
+            try:
+                await provider.aclose()
+            except Exception as exc:
+                logger.warning(
+                    "Voice Provider close failed during cleanup: session=%s error=%s",
+                    opaque_ref(str(self._context.descriptor.session_id)),
+                    exception_kind(exc),
+                )
+
+    async def _close_media_transport(self) -> None:
+        media = self._media
+        if media is None:
+            return
+        try:
+            async with asyncio.timeout(min(0.25, self._settings.stop_timeout_seconds / 4)):
+                await media.flush_output()
+        except TimeoutError:
+            logger.warning(
+                "Voice output flush exceeded cleanup budget: session=%s",
+                opaque_ref(str(self._context.descriptor.session_id)),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Voice output flush failed during cleanup: session=%s error=%s",
+                opaque_ref(str(self._context.descriptor.session_id)),
+                exception_kind(exc),
+            )
+        try:
+            await media.aclose()
+        except Exception as exc:
+            logger.warning(
+                "Voice media close failed during cleanup: session=%s error=%s",
+                opaque_ref(str(self._context.descriptor.session_id)),
+                exception_kind(exc),
+            )
 
     async def _connect_provider(self) -> None:
         last_error: Exception | None = None

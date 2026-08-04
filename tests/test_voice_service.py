@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 import pytest
 
@@ -413,4 +414,87 @@ async def test_voice_service_forces_bounded_cleanup_when_runtime_ignores_stop() 
     assert stopped.state is VoiceSessionState.CLOSED
     assert factory.runtime.closed is True
     assert access.release_count == 1
+    await conversations.aclose()
+
+
+@pytest.mark.asyncio
+async def test_voice_service_stop_budget_forces_unresponsive_runtime_and_releases_lease() -> None:
+    access = FakeVoiceAccessGateway()
+    access.channels[("area", "person")] = "voice"
+    never = asyncio.Event()
+    persistence_cancelled = asyncio.Event()
+
+    class UnresponsiveSessionRepository(FakeVoiceSessionRepository):
+        async def finish(self, *args, **kwargs) -> None:
+            del args, kwargs
+            try:
+                await never.wait()
+            finally:
+                persistence_cancelled.set()
+
+    class UnresponsiveStatusSink(RecordingStatusSink):
+        def __init__(self) -> None:
+            super().__init__()
+            self.close_cancelled = asyncio.Event()
+
+        async def aclose(self) -> None:
+            try:
+                await never.wait()
+            finally:
+                self.close_cancelled.set()
+
+    class UnresponsiveRuntime(FakeVoiceSessionRuntime):
+        def __init__(self) -> None:
+            super().__init__()
+            self.stop_cancelled = asyncio.Event()
+            self.close_cancelled = asyncio.Event()
+
+        async def request_stop(self, reason):
+            self.stop_requests.append(reason)
+            try:
+                await never.wait()
+            finally:
+                self.stop_cancelled.set()
+
+        async def aclose(self) -> None:
+            try:
+                await never.wait()
+            finally:
+                self.closed = True
+                self.close_cancelled.set()
+
+    class UnresponsiveFactory:
+        def __init__(self) -> None:
+            self.runtime = UnresponsiveRuntime()
+
+        async def create(self, context):
+            self.runtime._context = context
+            return self.runtime
+
+    factory = UnresponsiveFactory()
+    status_sink = UnresponsiveStatusSink()
+    conversations = VoiceConversationService(
+        settings(CYWL_VOICE_STOP_TIMEOUT_SECONDS="1.6"),
+        access,
+        factory,
+        FakeVoiceConfigurationRepository(),
+        UnresponsiveSessionRepository(),
+    )
+    await conversations.start(request(), status_sink)
+
+    started_at = time.monotonic()
+    async with asyncio.timeout(2):
+        stopped = await conversations.stop("person")
+    elapsed = time.monotonic() - started_at
+
+    assert elapsed < 2
+    assert stopped.active is False
+    assert stopped.state is VoiceSessionState.CLOSED
+    assert factory.runtime.stop_cancelled.is_set()
+    assert factory.runtime.close_cancelled.is_set()
+    assert persistence_cancelled.is_set()
+    assert status_sink.close_cancelled.is_set()
+    assert access.active_lease is None
+    assert access.release_count == 1
+    assert (await conversations.status()).active is False
     await conversations.aclose()
