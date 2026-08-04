@@ -64,9 +64,9 @@ def _tone(duration_ms: int = 100) -> PcmChunk:
 
 @pytest.mark.asyncio
 async def test_live_project_voice_media_receives_owner_and_plays_fixed_pcm() -> None:
+    load_dotenv(find_dotenv(usecwd=True), override=False)
     if not _live_enabled():
         pytest.skip("set CYWL_RUN_LIVE_VOICE_TESTS=1 for explicit RTC mutation")
-    load_dotenv(find_dotenv(usecwd=True), override=False)
     area_id = _required("OOPZ_AREA_ID")
     channel_id = _required("OOPZ_CHANNEL_ID")
     target_person_id = _required("OOPZ_TARGET_PERSON_UID")

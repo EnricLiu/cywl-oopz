@@ -5,6 +5,7 @@ import os
 from uuid import uuid4
 
 import pytest
+from dotenv import find_dotenv, load_dotenv
 
 from cywl_oopz.features.voice.events import (
     VoiceAssistantAudio,
@@ -24,6 +25,7 @@ from cywl_oopz.integrations.voice.qwen_audio_protocol import QwenAudioConfig
 
 @pytest.mark.asyncio
 async def test_qwen_audio_proactive_system_item_live() -> None:
+    load_dotenv(find_dotenv(usecwd=True), override=False)
     if os.getenv("CYWL_RUN_LIVE_QWEN_AUDIO_TESTS") != "1":
         pytest.skip("set CYWL_RUN_LIVE_QWEN_AUDIO_TESTS=1 to run the Qwen Audio proactive gate")
     required = (
