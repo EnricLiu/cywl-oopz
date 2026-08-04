@@ -94,6 +94,7 @@ class OopzVoiceLeaseManager:
         self._pending: VoiceLeaseSnapshot | None = None
         self._pending_done = asyncio.Event()
         self._pending_done.set()
+        self._joined_without_lease = False
         self._generation = 0
         self._closed = False
 
@@ -143,8 +144,10 @@ class OopzVoiceLeaseManager:
             if self._closed:
                 should_leave = True
                 self._pending = None
+                self._joined_without_lease = True
             elif self._pending is None or self._pending.generation != generation:
                 should_leave = True
+                self._joined_without_lease = True
             else:
                 lease = OopzVoiceLease(self, request, generation)
                 self._active = lease
@@ -155,6 +158,8 @@ class OopzVoiceLeaseManager:
                 await self._bot.voice.leave()
             finally:
                 self._pending_done.set()
+            async with self._lock:
+                self._joined_without_lease = False
             raise RuntimeError("OOPZ voice lease manager closed during join")
 
         logger.info(
@@ -179,7 +184,12 @@ class OopzVoiceLeaseManager:
     async def aclose(self) -> None:
         """Prevent new owners and release the active generation if present."""
         async with self._lock:
-            if self._closed:
+            if (
+                self._closed
+                and self._pending is None
+                and self._active is None
+                and not self._joined_without_lease
+            ):
                 return
             self._closed = True
             pending = self._pending is not None
@@ -188,23 +198,28 @@ class OopzVoiceLeaseManager:
 
         async with self._lock:
             active = self._active
-            self._active = None
-            if active is None:
+            orphaned_join = self._joined_without_lease
+            if active is None and not orphaned_join:
                 return
-            active._released = True
             try:
                 await self._bot.voice.leave()
+            except asyncio.CancelledError:
+                raise
             except Exception as exc:
                 logger.warning(
-                    "Could not leave OOPZ voice while closing lease manager: purpose=%s error=%s",
-                    active.request.purpose.value,
+                    "Could not leave OOPZ voice while closing lease manager: owner=%s error=%s",
+                    active.request.purpose.value if active is not None else "orphaned_join",
                     exception_kind(exc),
                 )
             else:
+                self._active = None
+                self._joined_without_lease = False
+                if active is not None:
+                    active._released = True
                 logger.info(
                     "OOPZ voice lease manager released active owner: purpose=%s generation=%s",
-                    active.request.purpose.value,
-                    active.generation,
+                    active.request.purpose.value if active is not None else "orphaned_join",
+                    active.generation if active is not None else 0,
                 )
 
     async def _release(self, lease: OopzVoiceLease) -> bool:
@@ -216,10 +231,8 @@ class OopzVoiceLeaseManager:
                     lease.generation,
                 )
                 return False
-            try:
-                await self._bot.voice.leave()
-            finally:
-                self._active = None
+            await self._bot.voice.leave()
+            self._active = None
             logger.info(
                 "OOPZ voice lease released: purpose=%s channel=%s generation=%s",
                 lease.request.purpose.value,

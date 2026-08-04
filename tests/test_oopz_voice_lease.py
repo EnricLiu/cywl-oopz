@@ -29,6 +29,11 @@ class FakeVoice:
         self.join_allowed = asyncio.Event()
         self.join_allowed.set()
         self.join_error: Exception | None = None
+        self.leave_entered = asyncio.Event()
+        self.leave_allowed = asyncio.Event()
+        self.leave_allowed.set()
+        self.leave_error: Exception | None = None
+        self.leave_calls = 0
 
     async def join(self, **values: str) -> None:
         self.join_entered.set()
@@ -38,6 +43,11 @@ class FakeVoice:
         self.joins.append(values)
 
     async def leave(self) -> None:
+        self.leave_calls += 1
+        self.leave_entered.set()
+        await self.leave_allowed.wait()
+        if self.leave_error is not None:
+            raise self.leave_error
         self.leaves += 1
 
 
@@ -136,3 +146,85 @@ async def test_voice_lease_close_waits_for_pending_join_and_leaves_it() -> None:
 
     assert await manager.current() is None
     assert bot.voice.leaves == 1
+
+
+@pytest.mark.asyncio
+async def test_voice_lease_release_can_retry_after_leave_cancellation() -> None:
+    bot = FakeBot()
+    manager = OopzVoiceLeaseManager(bot)
+    lease = await manager.try_acquire(request(VoiceLeasePurpose.CONVERSATION))
+    assert lease is not None
+    bot.voice.leave_allowed.clear()
+    releasing = asyncio.create_task(lease.release())
+    await bot.voice.leave_entered.wait()
+
+    releasing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await releasing
+
+    assert lease.released is False
+    assert await manager.current() is not None
+    assert bot.voice.leaves == 0
+    bot.voice.leave_allowed.set()
+    assert await lease.release() is True
+    assert lease.released is True
+    assert await manager.current() is None
+    assert bot.voice.leaves == 1
+    await manager.aclose()
+
+
+@pytest.mark.asyncio
+async def test_voice_lease_manager_close_retries_cancelled_or_failed_leave() -> None:
+    bot = FakeBot()
+    manager = OopzVoiceLeaseManager(bot)
+    lease = await manager.try_acquire(request(VoiceLeasePurpose.MUSIC))
+    assert lease is not None
+    bot.voice.leave_allowed.clear()
+    closing = asyncio.create_task(manager.aclose())
+    await bot.voice.leave_entered.wait()
+
+    closing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await closing
+    assert lease.released is False
+    assert await manager.current() is not None
+
+    bot.voice.leave_allowed.set()
+    bot.voice.leave_error = RuntimeError("fixture leave failure")
+    await manager.aclose()
+    assert lease.released is False
+    assert await manager.current() is not None
+
+    bot.voice.leave_error = None
+    await manager.aclose()
+    assert lease.released is True
+    assert await manager.current() is None
+    assert bot.voice.leaves == 1
+
+
+@pytest.mark.asyncio
+async def test_voice_lease_manager_retries_cancelled_post_join_compensation() -> None:
+    bot = FakeBot()
+    bot.voice.join_allowed.clear()
+    bot.voice.leave_allowed.clear()
+    manager = OopzVoiceLeaseManager(bot)
+    acquiring = asyncio.create_task(manager.try_acquire(request(VoiceLeasePurpose.CONVERSATION)))
+    await bot.voice.join_entered.wait()
+    closing = asyncio.create_task(manager.aclose())
+    await asyncio.sleep(0)
+    bot.voice.join_allowed.set()
+    await bot.voice.leave_entered.wait()
+
+    acquiring.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await acquiring
+    for _ in range(100):
+        if bot.voice.leave_calls >= 2:
+            break
+        await asyncio.sleep(0)
+    assert bot.voice.leave_calls == 2
+
+    bot.voice.leave_allowed.set()
+    await closing
+    assert bot.voice.leaves == 1
+    assert await manager.current() is None
