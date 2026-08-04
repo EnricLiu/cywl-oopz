@@ -123,6 +123,7 @@ from .integrations.oopz.music import OopzMusicVoiceGateway
 from .integrations.oopz.reactions import OopzReactionGateway
 from .integrations.oopz.skill_sharing import OopzSkillShareNotifier
 from .integrations.oopz.voice_capabilities import OopzVoiceCapabilityGate
+from .integrations.oopz.voice_lease import OopzVoiceLeaseManager
 from .integrations.web.agent_browser_mcp import AgentBrowserMcpGateway
 from .integrations.web.duckduckgo import DuckDuckGoSearchGateway
 from .settings import (
@@ -149,6 +150,7 @@ class BotApplication:
         self.database = Database(settings.database)
         self.bot = OopzBot(settings.oopz)
         self.voice_capability_gate = OopzVoiceCapabilityGate()
+        self.voice_leases = OopzVoiceLeaseManager(self.bot)
         self.chat_invocations = OopzChatInvocationFactory(settings.oopz.person_uid)
         self.agent_presenters = OopzAgentPresenterFactory(
             OopzEditableMessageGateway(self.bot),
@@ -217,7 +219,7 @@ class BotApplication:
             self.music = MusicRequestService(
                 settings.music,
                 self.music_catalog,
-                OopzMusicVoiceGateway(self.bot),
+                OopzMusicVoiceGateway(self.bot, self.voice_leases),
             )
             self.music_playlists = MusicPlaylistService(
                 settings.music,
@@ -590,6 +592,7 @@ class BotApplication:
             await self.agent_summary_tasks.close()
             if self.music is not None:
                 await self.music.aclose()
+            await self.voice_leases.aclose()
             if self.browser is not None:
                 await self.browser.aclose()
             if self.web_search is not None:

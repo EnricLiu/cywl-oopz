@@ -33,6 +33,10 @@ class MusicPlaybackError(MusicError):
     """Raised when the OOPZ voice backend cannot perform a requested action."""
 
 
+class MusicVoiceBusyError(MusicPlaybackError):
+    """Raised when music cannot reserve the backend without preempting its owner."""
+
+
 class MusicAreaRequiredError(MusicError):
     """Raised when a shared playlist operation has no OOPZ area scope."""
 

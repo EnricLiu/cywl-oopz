@@ -13,6 +13,7 @@ from cywl_oopz.features.music.errors import (
     MusicPlaybackError,
     MusicQueryError,
     MusicQueueFullError,
+    MusicVoiceBusyError,
     MusicVoiceChannelRequiredError,
 )
 from cywl_oopz.features.music.models import (
@@ -41,6 +42,7 @@ class _MusicTool:
         MusicQueueFullError: "music_queue_full",
         MusicNotFoundError: "music_not_found",
         MusicCatalogError: "music_catalog_unavailable",
+        MusicVoiceBusyError: "music_voice_busy",
         MusicPlaybackError: "music_playback_failed",
     }
 

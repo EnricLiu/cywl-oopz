@@ -78,6 +78,26 @@ class PlaybackMode(StrEnum):
     SHUFFLE = "shuffle"
 
 
+class MusicPlaybackEndReason(StrEnum):
+    """Project-owned terminal result independent from OOPZ SDK enums."""
+
+    FINISHED = "finished"
+    STOPPED = "stopped"
+    REPLACED = "replaced"
+    TRACK_ERROR = "track_error"
+    VOICE_LEFT = "voice_left"
+    BACKEND_CLOSED = "backend_closed"
+
+
+@dataclass(frozen=True, slots=True)
+class MusicPlaybackResult:
+    """One complete playback outcome returned by the voice gateway."""
+
+    end_reason: MusicPlaybackEndReason
+    duration_seconds: float | None = None
+    terminal_error: BaseException | None = field(default=None, repr=False, compare=False)
+
+
 @dataclass(frozen=True, slots=True)
 class MusicQueueSnapshot:
     """Bounded immutable view of one voice channel queue."""

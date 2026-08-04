@@ -618,7 +618,6 @@ class MusicSettings:
     max_queue_length: int
     max_playlist_tracks: int
     max_query_characters: int
-    playback_poll_seconds: float
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, str]) -> MusicSettings:
@@ -652,11 +651,6 @@ class MusicSettings:
                 values,
                 "CYWL_MUSIC_MAX_QUERY_CHARACTERS",
                 200,
-            ),
-            playback_poll_seconds=_positive_float(
-                values,
-                "CYWL_MUSIC_PLAYBACK_POLL_SECONDS",
-                1.0,
             ),
         )
 
