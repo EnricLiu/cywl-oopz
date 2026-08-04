@@ -13,6 +13,7 @@ from uuid import uuid4
 import numpy as np
 import pytest
 from dotenv import find_dotenv, load_dotenv
+from oopz_sdk import OopzBot, OopzConfig
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -38,6 +39,13 @@ from cywl_oopz.features.voice.settings import (
     VoiceStartConfiguration,
     VoiceTurnRole,
 )
+from cywl_oopz.integrations.oopz.voice_lease import (
+    OopzVoiceLease,
+    OopzVoiceLeaseManager,
+    VoiceLeasePurpose,
+    VoiceLeaseRequest,
+)
+from cywl_oopz.integrations.oopz.voice_media import OopzVoiceMediaGateway
 from cywl_oopz.integrations.voice.fake import (
     FakeVoiceAccessGateway,
     FakeVoiceConfigurationRepository,
@@ -194,6 +202,131 @@ class _QwenLiveRuntimeHarness:
         await self.lease.release()
 
 
+@dataclass(slots=True)
+class _OopzQwenLiveRuntimeHarness:
+    """Own the paid Provider and mutating OOPZ resources for one manual E2E gate."""
+
+    bot: OopzBot
+    leases: OopzVoiceLeaseManager
+    lease: OopzVoiceLease
+    runtime: RealtimeVoiceSessionRuntimeImpl
+    sessions: FakeVoiceSessionRepository
+    providers: list[QwenOmniRealtimeProvider]
+
+    @classmethod
+    async def create(
+        cls,
+        config: QwenOmniConfig,
+        *,
+        area_id: str,
+        channel_id: str,
+        target_person_id: str,
+    ) -> _OopzQwenLiveRuntimeHarness:
+        bot = OopzBot(await OopzConfig.from_env_async())
+        leases = OopzVoiceLeaseManager(bot)
+        lease = None
+        runtime = None
+        try:
+            await bot.rest.start()
+            await bot.voice.start()
+            lease = await leases.try_acquire(
+                VoiceLeaseRequest(
+                    VoiceLeasePurpose.CONVERSATION,
+                    area_id,
+                    channel_id,
+                    owner_key="qwen-oopz-live-e2e",
+                )
+            )
+            if lease is None:
+                pytest.fail("OOPZ voice backend is already leased")
+            channel = VoiceChannelKey(area_id, channel_id)
+            configuration = await FakeVoiceConfigurationRepository().resolve_start_configuration(
+                target_person_id,
+                channel,
+            )
+            descriptor = VoiceSessionDescriptor(
+                uuid4(),
+                target_person_id,
+                channel,
+                VoiceTextAddress(area_id, channel_id),
+            )
+            settings = VoiceSettings.from_mapping(
+                {
+                    "CYWL_VOICE_ENABLED": "true",
+                    "CYWL_VOICE_START_TIMEOUT_SECONDS": "30",
+                    "CYWL_VOICE_STOP_TIMEOUT_SECONDS": "1.5",
+                    "CYWL_VOICE_IDLE_TIMEOUT_SECONDS": "300",
+                    "CYWL_VOICE_MAX_SESSION_SECONDS": "1800",
+                    "CYWL_VOICE_INPUT_QUEUE_MS": "1000",
+                    "CYWL_VOICE_OUTPUT_QUEUE_MS": "2000",
+                }
+            )
+            sessions = FakeVoiceSessionRepository()
+            providers: list[QwenOmniRealtimeProvider] = []
+
+            def build_provider(context):
+                del context
+                provider = QwenOmniRealtimeProvider(
+                    config,
+                    "你正在执行实时语音端到端测试。听清用户后，每次只用一句简短中文回答。",
+                )
+                providers.append(provider)
+                return provider
+
+            runtime = RealtimeVoiceSessionRuntimeImpl(
+                VoiceSessionRuntimeContext(descriptor, lease, configuration),
+                settings,
+                OopzVoiceMediaGateway(bot, settings),
+                sessions,
+                build_provider,
+            )
+            await runtime.start()
+            return cls(bot, leases, lease, runtime, sessions, providers)
+        except BaseException:
+            if runtime is not None:
+                await runtime.aclose()
+            if lease is not None:
+                await lease.release()
+            await leases.aclose()
+            try:
+                await bot.voice.close()
+            finally:
+                await bot.rest.close()
+            raise
+
+    async def wait_for_responses(self, count: int, timeout_seconds: float) -> None:
+        finished = asyncio.create_task(self.runtime.wait_finished())
+        try:
+            async with asyncio.timeout(timeout_seconds):
+                while self.runtime.stats.responses_drained < count:
+                    if finished.done():
+                        result = finished.result()
+                        pytest.fail(
+                            "voice runtime finished before the requested responses: "
+                            f"reason={result.reason.value}"
+                        )
+                    await asyncio.sleep(0.05)
+        finally:
+            if not finished.done():
+                finished.cancel()
+            await asyncio.gather(finished, return_exceptions=True)
+
+    async def stop(self) -> None:
+        await self.runtime.request_stop(VoiceStopReason.COMMAND)
+        async with asyncio.timeout(2):
+            result = await self.runtime.wait_finished()
+        assert result.reason is VoiceStopReason.COMMAND
+
+    async def aclose(self) -> None:
+        await self.runtime.aclose()
+        await self.lease.release()
+        await self.leases.aclose()
+        try:
+            await self.bot.voice.close()
+        finally:
+            await self.bot.rest.close()
+
+
 def test_live_wav_replay_loads_bounded_pcm_fixture(tmp_path: Path) -> None:
     path = tmp_path / "speech.wav"
     samples = np.zeros(3_200, dtype="<i2")
@@ -217,6 +350,17 @@ def test_qwen_live_counts_are_bounded(monkeypatch) -> None:
     monkeypatch.setenv("CYWL_QWEN_LIVE_BARGE_INS", "0")
     with pytest.raises(ValueError, match="between 1 and 20"):
         _bounded_live_integer("CYWL_QWEN_LIVE_BARGE_INS", 20, 20)
+
+    monkeypatch.setenv("CYWL_VOICE_E2E_ROUNDS", "11")
+    with pytest.raises(ValueError, match="between 1 and 10"):
+        _bounded_live_integer("CYWL_VOICE_E2E_ROUNDS", 3, 10)
+
+
+def _required_live_value(name: str) -> str:
+    value = os.getenv(name, "").strip()
+    if not value:
+        pytest.fail(f"live voice E2E test requires {name}")
+    return value
 
 
 async def _load_live_config() -> QwenOmniConfig:
@@ -424,4 +568,50 @@ async def test_qwen_live_runtime_survives_repeated_barge_in() -> None:
     finally:
         await harness.aclose()
     assert harness.media.closed is True
+    assert all(provider._closed for provider in harness.providers)
+
+
+@pytest.mark.asyncio
+async def test_qwen_live_runtime_traverses_real_oopz_media_end_to_end() -> None:
+    """Manually speak in the target room and hear each response before this returns."""
+
+    load_dotenv(find_dotenv(usecwd=True), override=False)
+    if os.getenv("CYWL_RUN_LIVE_VOICE_E2E_TESTS") != "1":
+        pytest.skip("set CYWL_RUN_LIVE_VOICE_E2E_TESTS=1 for explicit paid RTC mutation")
+    config = await _load_live_config()
+    rounds = _bounded_live_integer("CYWL_VOICE_E2E_ROUNDS", 3, 10)
+    harness = await _OopzQwenLiveRuntimeHarness.create(
+        config,
+        area_id=_required_live_value("OOPZ_AREA_ID"),
+        channel_id=_required_live_value("OOPZ_CHANNEL_ID"),
+        target_person_id=_required_live_value("OOPZ_TARGET_PERSON_UID"),
+    )
+    try:
+        await harness.wait_for_responses(rounds, timeout_seconds=rounds * 90)
+        stats = harness.runtime.stats
+        user_turns = sum(turn[2] is VoiceTurnRole.USER for turn in harness.sessions.turns)
+        assistant_turns = sum(turn[2] is VoiceTurnRole.ASSISTANT for turn in harness.sessions.turns)
+        assert stats.responses_started >= rounds
+        assert stats.responses_drained >= rounds
+        assert stats.first_final_transcript_ms > 0
+        assert stats.first_provider_audio_ms > 0
+        assert stats.first_oopz_output_ms > 0
+        assert user_turns >= rounds
+        assert assistant_turns >= rounds
+        logger.info(
+            "OOPZ/Qwen E2E gate: responses=%s first_transcript_ms=%.1f "
+            "first_provider_audio_ms=%.1f first_oopz_output_ms=%.1f "
+            "input_depth=%s output_depth=%s provider_reconnects=%s media_reconnects=%s",
+            stats.responses_drained,
+            stats.first_final_transcript_ms,
+            stats.first_provider_audio_ms,
+            stats.first_oopz_output_ms,
+            stats.max_input_queue_depth,
+            stats.max_output_queue_depth,
+            stats.provider_reconnects,
+            stats.media_reconnects,
+        )
+        await harness.stop()
+    finally:
+        await harness.aclose()
     assert all(provider._closed for provider in harness.providers)
