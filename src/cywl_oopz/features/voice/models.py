@@ -234,6 +234,10 @@ class VoiceRuntimeStats:
     late_audio_dropped: int = 0
     interrupted_transcripts_dropped: int = 0
     output_overflows: int = 0
+    task_control_calls: int = 0
+    task_control_failures: int = 0
+    last_task_control_ms: float = 0.0
+    max_task_control_ms: float = 0.0
     last_barge_in_flush_ms: float = 0.0
     max_barge_in_flush_ms: float = 0.0
 
@@ -246,6 +250,10 @@ class VoiceRuntimeStats:
             "voice_late_audio_dropped": self.late_audio_dropped,
             "voice_interrupted_transcripts_dropped": self.interrupted_transcripts_dropped,
             "voice_output_overflows": self.output_overflows,
+            "voice_task_control_calls": self.task_control_calls,
+            "voice_task_control_failures": self.task_control_failures,
+            "voice_last_task_control_ms": self.last_task_control_ms,
+            "voice_max_task_control_ms": self.max_task_control_ms,
             "voice_last_barge_in_flush_ms": self.last_barge_in_flush_ms,
             "voice_max_barge_in_flush_ms": self.max_barge_in_flush_ms,
         }

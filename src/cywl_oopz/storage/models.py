@@ -22,7 +22,7 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.types import Uuid
 
@@ -32,6 +32,12 @@ from cywl_oopz.core.lifecycle import (
     ModelSelectionSource,
     ToolEffect,
     ToolExecutionStatus,
+)
+from cywl_oopz.features.agent.delegation.models import (
+    DelegatedResultStyle,
+    DelegatedTaskLane,
+    DelegatedTaskNotificationState,
+    DelegatedTaskStatus,
 )
 from cywl_oopz.features.agent.skills.models import (
     SkillOwnershipKind,
@@ -170,6 +176,30 @@ VOICE_SESSION_STATUS_ENUM = Enum(
 VOICE_TURN_ROLE_ENUM = Enum(
     VoiceTurnRole,
     name="voice_turn_role",
+    values_callable=_enum_values,
+    validate_strings=True,
+)
+DELEGATED_RESULT_STYLE_ENUM = Enum(
+    DelegatedResultStyle,
+    name="delegated_result_style",
+    values_callable=_enum_values,
+    validate_strings=True,
+)
+DELEGATED_TASK_STATUS_ENUM = Enum(
+    DelegatedTaskStatus,
+    name="delegated_task_status",
+    values_callable=_enum_values,
+    validate_strings=True,
+)
+DELEGATED_TASK_LANE_ENUM = Enum(
+    DelegatedTaskLane,
+    name="delegated_task_lane",
+    values_callable=_enum_values,
+    validate_strings=True,
+)
+TASK_NOTIFICATION_STATE_ENUM = Enum(
+    DelegatedTaskNotificationState,
+    name="task_notification_state",
     values_callable=_enum_values,
     validate_strings=True,
 )
@@ -1383,4 +1413,145 @@ class VoiceTurnRecord(Base):
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, server_default=CURRENT_TIMESTAMP, nullable=False
+    )
+
+
+class DelegatedAgentTaskRecord(Base):
+    """Durable work envelope submitted by a realtime voice function call."""
+
+    __tablename__ = "delegated_agent_tasks"
+    __table_args__ = (
+        UniqueConstraint("origin_voice_session_id", "provider_call_id"),
+        UniqueConstraint("origin_voice_session_id", "session_sequence"),
+        Index("ix_delegated_tasks_owner_created", "owner_person_id", "created_at"),
+        Index(
+            "ix_delegated_tasks_worker_claim",
+            "status",
+            "next_attempt_at",
+            "created_at",
+            postgresql_where=text("status IN ('queued', 'waiting_retry')"),
+        ),
+        Index(
+            "ix_delegated_tasks_mailbox",
+            "origin_voice_session_id",
+            "notification_state",
+            "finished_at",
+            postgresql_where=text(
+                "status IN ('succeeded', 'failed', 'cancelled', 'interrupted') "
+                "AND notification_state IN ('pending', 'deferred')"
+            ),
+        ),
+        CheckConstraint("session_sequence > 0", name="ck_delegated_tasks_sequence_positive"),
+        CheckConstraint("retry_count >= 0", name="ck_delegated_tasks_retry_nonnegative"),
+        CheckConstraint(
+            "char_length(btrim(objective)) BETWEEN 1 AND 4000",
+            name="ck_delegated_tasks_objective_length",
+        ),
+        CheckConstraint(
+            "char_length(progress_stage) <= 64 AND char_length(progress_summary) <= 512",
+            name="ck_delegated_tasks_progress_length",
+        ),
+        CheckConstraint(
+            "char_length(result_summary) <= 1000 AND char_length(result_text) <= 16000",
+            name="ck_delegated_tasks_result_length",
+        ),
+        CheckConstraint(
+            "char_length(error_code) <= 128 AND char_length(error_message) <= 1000",
+            name="ck_delegated_tasks_error_length",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid, primary_key=True, default=uuid4, server_default=GENERATED_UUID
+    )
+    owner_person_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    area_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    text_channel_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    voice_channel_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    origin_voice_session_id: Mapped[UUID] = mapped_column(
+        ForeignKey("voice_sessions.id", ondelete="RESTRICT"), nullable=False
+    )
+    session_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    provider_call_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    objective: Mapped[str] = mapped_column(Text, nullable=False)
+    result_style: Mapped[DelegatedResultStyle] = mapped_column(
+        DELEGATED_RESULT_STYLE_ENUM,
+        default=DelegatedResultStyle.BRIEF,
+        server_default=text("'brief'"),
+        nullable=False,
+    )
+    status: Mapped[DelegatedTaskStatus] = mapped_column(
+        DELEGATED_TASK_STATUS_ENUM,
+        default=DelegatedTaskStatus.QUEUED,
+        server_default=text("'queued'"),
+        nullable=False,
+    )
+    lane: Mapped[DelegatedTaskLane] = mapped_column(
+        DELEGATED_TASK_LANE_ENUM,
+        default=DelegatedTaskLane.READ_PARALLEL,
+        server_default=text("'read_parallel'"),
+        nullable=False,
+    )
+    conflict_key: Mapped[str] = mapped_column(
+        String(256), default="", server_default=EMPTY_STRING, nullable=False
+    )
+    notification_state: Mapped[DelegatedTaskNotificationState] = mapped_column(
+        TASK_NOTIFICATION_STATE_ENUM,
+        default=DelegatedTaskNotificationState.PENDING,
+        server_default=text("'pending'"),
+        nullable=False,
+    )
+    agent_model_id: Mapped[UUID] = mapped_column(
+        ForeignKey("llm_models.id", ondelete="RESTRICT"), nullable=False
+    )
+    allowed_tool_names: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), default=list, server_default=text("'{}'::text[]"), nullable=False
+    )
+    agent_thread_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("agent_threads.id", ondelete="SET NULL"), nullable=True
+    )
+    agent_run_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("agent_runs.id", ondelete="SET NULL"), nullable=True
+    )
+    progress_stage: Mapped[str] = mapped_column(
+        String(64), default="", server_default=EMPTY_STRING, nullable=False
+    )
+    progress_summary: Mapped[str] = mapped_column(
+        String(512), default="", server_default=EMPTY_STRING, nullable=False
+    )
+    result_summary: Mapped[str] = mapped_column(
+        Text, default="", server_default=EMPTY_STRING, nullable=False
+    )
+    result_text: Mapped[str] = mapped_column(
+        Text, default="", server_default=EMPTY_STRING, nullable=False
+    )
+    error_code: Mapped[str] = mapped_column(
+        String(128), default="", server_default=EMPTY_STRING, nullable=False
+    )
+    error_message: Mapped[str] = mapped_column(
+        Text, default="", server_default=EMPTY_STRING, nullable=False
+    )
+    retry_count: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
+    )
+    worker_id: Mapped[str] = mapped_column(
+        String(128), default="", server_default=EMPTY_STRING, nullable=False
+    )
+    cancel_requested_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    presented_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, server_default=CURRENT_TIMESTAMP, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        server_default=CURRENT_TIMESTAMP,
+        server_onupdate=FetchedValue(),
+        nullable=False,
     )

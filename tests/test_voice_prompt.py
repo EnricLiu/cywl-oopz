@@ -11,7 +11,7 @@ from cywl_oopz.integrations.voice.fake import FakeVoiceConfigurationRepository
 
 
 @pytest.mark.asyncio
-async def test_voice_prompt_is_spoken_bounded_and_has_no_fake_tool_claims() -> None:
+async def test_voice_prompt_is_spoken_bounded_and_explains_task_delegation() -> None:
     configuration = await FakeVoiceConfigurationRepository().resolve_start_configuration(
         "person",
         VoiceChannelKey("area", "voice"),
@@ -22,7 +22,9 @@ async def test_voice_prompt_is_spoken_bounded_and_has_no_fake_tool_claims() -> N
     assert prompt == CYWL_VOICE_SYSTEM_PROMPT
     assert "初音未来" in prompt
     assert "一到三句" in prompt
-    assert "当前阶段没有可调用工具" in prompt
+    assert "delegate_agent_task" in prompt
+    assert "只代表已经排队，不代表" in prompt
+    assert "不要编造任务状态" in prompt
     assert "不要朗读 Markdown" in prompt
 
 

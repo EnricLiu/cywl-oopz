@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
@@ -25,6 +26,7 @@ from cywl_oopz.features.voice.events import (
     VoiceResponseStarted,
     VoiceSessionFinished,
     VoiceSessionReady,
+    VoiceToolCall,
     VoiceTranscriptFinal,
     VoiceUserSpeechStarted,
     VoiceUserSpeechStopped,
@@ -125,24 +127,32 @@ class QwenOmniConfig:
             (parsed.scheme, parsed.netloc, parsed.path, urlencode(query), parsed.fragment)
         )
 
-    def session_update(self, instructions: str, event_id: str) -> dict[str, Any]:
+    def session_update(
+        self,
+        instructions: str,
+        event_id: str,
+        tools: Sequence[Mapping[str, Any]] = (),
+    ) -> dict[str, Any]:
+        session: dict[str, Any] = {
+            "modalities": ["text", "audio"],
+            "voice": self.voice,
+            "instructions": instructions,
+            "input_audio_format": "pcm",
+            "output_audio_format": "pcm",
+            "input_audio_transcription": {"model": self.transcription_model},
+            "turn_detection": {
+                "type": self.turn_detection.value,
+                "threshold": self.vad_threshold,
+                "prefix_padding_ms": self.prefix_padding_ms,
+                "silence_duration_ms": self.silence_duration_ms,
+            },
+        }
+        if tools:
+            session["tools"] = [dict(tool) for tool in tools]
         return {
             "event_id": event_id,
             "type": "session.update",
-            "session": {
-                "modalities": ["text", "audio"],
-                "voice": self.voice,
-                "instructions": instructions,
-                "input_audio_format": "pcm",
-                "output_audio_format": "pcm",
-                "input_audio_transcription": {"model": self.transcription_model},
-                "turn_detection": {
-                    "type": self.turn_detection.value,
-                    "threshold": self.vad_threshold,
-                    "prefix_padding_ms": self.prefix_padding_ms,
-                    "silence_duration_ms": self.silence_duration_ms,
-                },
-            },
+            "session": session,
         }
 
 
@@ -158,6 +168,31 @@ def audio_append_event(pcm: bytes, event_id: str) -> dict[str, str]:
         "type": "input_audio_buffer.append",
         "audio": base64.b64encode(pcm).decode("ascii"),
     }
+
+
+def function_call_output_event(
+    call_id: str,
+    output: Mapping[str, object],
+    event_id: str,
+) -> dict[str, object]:
+    if not call_id.strip() or len(call_id) > 256:
+        raise VoiceProviderProtocolError("Qwen tool call identifier is invalid")
+    encoded = json.dumps(dict(output), ensure_ascii=False, separators=(",", ":"))
+    if len(encoded.encode("utf-8")) > 16_384:
+        raise VoiceProviderProtocolError("Qwen tool output exceeded the maximum size")
+    return {
+        "event_id": event_id,
+        "type": "conversation.item.create",
+        "item": {
+            "type": "function_call_output",
+            "call_id": call_id,
+            "output": encoded,
+        },
+    }
+
+
+def response_create_event(event_id: str) -> dict[str, str]:
+    return {"event_id": event_id, "type": "response.create"}
 
 
 def parse_server_event(raw: str | bytes) -> VoiceModelEvent | None:
@@ -194,6 +229,8 @@ def parse_server_event(raw: str | bytes) -> VoiceModelEvent | None:
         return _transcript(payload, "assistant")
     if event_type == "response.audio.delta":
         return _audio_delta(payload)
+    if event_type == "response.function_call_arguments.done":
+        return _tool_call(payload)
     if event_type == "response.done":
         response = payload.get("response")
         if not isinstance(response, dict):
@@ -219,6 +256,23 @@ def parse_server_event(raw: str | bytes) -> VoiceModelEvent | None:
         )
         return VoiceProviderFailed(code, retryable)
     return None
+
+
+def _tool_call(payload: dict[str, Any]) -> VoiceToolCall:
+    call_id = _required_identifier(payload, "call_id", "tool call")
+    name = _required_identifier(payload, "name", "tool")
+    if len(name) > 128:
+        raise VoiceProviderProtocolError("Qwen tool name is invalid")
+    encoded = payload.get("arguments")
+    if not isinstance(encoded, str) or len(encoded.encode("utf-8")) > 16_384:
+        raise VoiceProviderProtocolError("Qwen tool arguments are invalid")
+    try:
+        arguments = json.loads(encoded)
+    except json.JSONDecodeError as exc:
+        raise VoiceProviderProtocolError("Qwen tool arguments are malformed") from exc
+    if not isinstance(arguments, dict):
+        raise VoiceProviderProtocolError("Qwen tool arguments must be an object")
+    return VoiceToolCall(call_id, name, arguments)
 
 
 def _transcript(payload: dict[str, Any], role: str) -> VoiceTranscriptFinal | None:

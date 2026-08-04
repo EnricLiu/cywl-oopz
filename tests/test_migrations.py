@@ -8,7 +8,7 @@ def test_initial_schema_models_and_migration_head_are_present() -> None:
     config = Config("alembic.ini")
     revisions = ScriptDirectory.from_config(config)
 
-    assert revisions.get_current_head() == "20260804_19"
+    assert revisions.get_current_head() == "20260804_20"
     assert set(Base.metadata.tables) == {
         "agent_memory_items",
         "agent_memory_preferences",
@@ -21,6 +21,7 @@ def test_initial_schema_models_and_migration_head_are_present() -> None:
         "agent_tool_executions",
         "channel_settings",
         "conversation_sessions",
+        "delegated_agent_tasks",
         "llm_models",
         "llm_providers",
         "music_playlist_tracks",
@@ -87,3 +88,14 @@ def test_initial_schema_models_and_migration_head_are_present() -> None:
     voice_turns = Base.metadata.tables["voice_turns"]
     assert voice_turns.c.role.type.name == "voice_turn_role"
     assert voice_turns.c.created_at.server_default is not None
+    delegated_tasks = Base.metadata.tables["delegated_agent_tasks"]
+    assert delegated_tasks.c.id.server_default is not None
+    assert delegated_tasks.c.status.type.name == "delegated_task_status"
+    assert delegated_tasks.c.lane.type.name == "delegated_task_lane"
+    assert delegated_tasks.c.notification_state.type.name == "task_notification_state"
+    assert delegated_tasks.c.allowed_tool_names.server_default is not None
+    assert {index.name for index in delegated_tasks.indexes} >= {
+        "ix_delegated_tasks_owner_created",
+        "ix_delegated_tasks_worker_claim",
+        "ix_delegated_tasks_mailbox",
+    }

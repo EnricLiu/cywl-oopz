@@ -81,11 +81,19 @@ async def test_qwen_adapter_serializes_session_update_audio_and_finish() -> None
     provider = QwenOmniRealtimeProvider(
         config,
         "short prompt",
+        tool_schemas=(
+            {
+                "type": "function",
+                "name": "delegate_agent_task",
+                "parameters": {"type": "object"},
+            },
+        ),
         connector=connector,
     )
 
     session = await provider.connect(descriptor())
     await session.send_audio(PcmChunk(b"\x00" * 640, PROVIDER_INPUT_FORMAT, 20, 0))
+    await session.complete_tool_call("call-1", {"ok": True, "task": "T1"})
     await session.finish()
 
     assert len(connector.calls) == 1
@@ -96,9 +104,15 @@ async def test_qwen_adapter_serializes_session_update_audio_and_finish() -> None
     assert [payload["type"] for payload in sent] == [
         "session.update",
         "input_audio_buffer.append",
+        "conversation.item.create",
+        "response.create",
         "session.finish",
     ]
     assert sent[0]["session"]["instructions"] == "short prompt"
+    assert sent[0]["session"]["tools"][0]["name"] == "delegate_agent_task"
+    assert provider.capabilities.tool_calls is True
+    assert sent[2]["item"]["call_id"] == "call-1"
+    assert json.loads(sent[2]["item"]["output"])["task"] == "T1"
     assert "development-secret" not in "".join(websocket.sent)
     assert len(sent[1]["audio"]) == 856
 

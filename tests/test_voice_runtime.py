@@ -16,6 +16,7 @@ from cywl_oopz.features.voice.events import (
     VoiceResponseCompleted,
     VoiceResponseStarted,
     VoiceSessionReady,
+    VoiceToolCall,
     VoiceTranscriptFinal,
     VoiceUserSpeechStarted,
     VoiceUserSpeechStopped,
@@ -57,7 +58,7 @@ def settings(**overrides: str) -> VoiceSettings:
     )
 
 
-async def runtime_fixture():
+async def runtime_fixture(task_controls=None):
     access = FakeVoiceAccessGateway()
     channel = VoiceChannelKey("area", "voice")
     lease = await access.try_acquire(channel, "conversation:test")
@@ -91,6 +92,7 @@ async def runtime_fixture():
         media,
         sessions,
         build_provider,
+        task_controls,
     )
     return runtime, media, sessions, providers
 
@@ -152,6 +154,90 @@ async def test_realtime_runtime_streams_audio_and_persists_final_turns() -> None
     await runtime.aclose()
     assert media.closed is True
     assert providers[0].closed is True
+
+
+@pytest.mark.asyncio
+async def test_realtime_task_control_does_not_block_audio_or_duplicate_calls() -> None:
+    class GatedTaskControls:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+            self.calls = 0
+
+        async def execute(self, descriptor, call_id, name, arguments):
+            del descriptor, call_id, name, arguments
+            self.calls += 1
+            self.started.set()
+            await self.release.wait()
+            return {"ok": True, "accepted": True, "task": "T1"}
+
+    controls = GatedTaskControls()
+    runtime, media_gateway, _, providers = await runtime_fixture(controls)
+    starting = asyncio.create_task(runtime.start())
+    await wait_until(lambda: bool(providers and providers[0].sessions))
+    provider_session = providers[0].sessions[0]
+    await provider_session.emit(VoiceSessionReady())
+    await starting
+
+    call = VoiceToolCall("call-1", "delegate_agent_task", {"objective": "查演出"})
+    await provider_session.emit(call)
+    await provider_session.emit(call)
+    await controls.started.wait()
+
+    source = VoiceAudioFormat(48_000, 2, "f32le")
+    pcm = np.zeros((1_024, 2), dtype="<f4").tobytes()
+    await media_gateway.sessions[0].push_input(RemoteAudioFrame(pcm, source, 0, 1.0))
+    await media_gateway.sessions[0].push_input(RemoteAudioFrame(pcm, source, 1, 1.02))
+    await wait_until(lambda: bool(provider_session.sent_audio))
+    assert provider_session.tool_outputs == []
+    assert controls.calls == 1
+
+    controls.release.set()
+    await wait_until(lambda: bool(provider_session.tool_outputs))
+    assert provider_session.tool_outputs == [
+        ("call-1", {"ok": True, "accepted": True, "task": "T1"})
+    ]
+    assert runtime.stats.task_control_calls == 1
+    assert runtime.stats.task_control_failures == 0
+    await provider_session.emit(VoiceUserSpeechStarted())
+    await provider_session.emit(VoiceUserSpeechStopped())
+    await wait_until(lambda: runtime.state is VoiceSessionState.THINKING)
+
+    await runtime.request_stop(VoiceStopReason.COMMAND)
+    await runtime.wait_finished()
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_realtime_task_control_timeout_returns_error_without_ending_session() -> None:
+    class StuckTaskControls:
+        async def execute(self, descriptor, call_id, name, arguments):
+            del descriptor, call_id, name, arguments
+            await asyncio.Event().wait()
+
+    runtime, _, _, providers = await runtime_fixture(StuckTaskControls())
+    starting = asyncio.create_task(runtime.start())
+    await wait_until(lambda: bool(providers and providers[0].sessions))
+    provider_session = providers[0].sessions[0]
+    await provider_session.emit(VoiceSessionReady())
+    await starting
+
+    await provider_session.emit(VoiceToolCall("call-timeout", "get_agent_task", {"task": "T1"}))
+    async with asyncio.timeout(0.5):
+        while not provider_session.tool_outputs:
+            await asyncio.sleep(0.01)
+
+    assert provider_session.tool_outputs == [
+        ("call-timeout", {"ok": False, "code": "temporarily_unavailable"})
+    ]
+    assert runtime.state is VoiceSessionState.LISTENING
+    assert runtime.stats.task_control_failures == 1
+    assert 100 <= runtime.stats.last_task_control_ms < 300
+
+    await runtime.request_stop(VoiceStopReason.COMMAND)
+    result = await runtime.wait_finished()
+    assert result.metrics["voice_task_control_failures"] == 1
+    await runtime.aclose()
 
 
 @pytest.mark.asyncio

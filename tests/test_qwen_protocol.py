@@ -20,6 +20,7 @@ from cywl_oopz.features.voice.events import (
     VoiceResponseStarted,
     VoiceSessionFinished,
     VoiceSessionReady,
+    VoiceToolCall,
     VoiceTranscriptFinal,
     VoiceUserSpeechStarted,
     VoiceUserSpeechStopped,
@@ -39,7 +40,9 @@ from cywl_oopz.integrations.voice.qwen_protocol import (
     QwenTurnDetectionMode,
     audio_append_event,
     encode_client_event,
+    function_call_output_event,
     parse_server_event,
+    response_create_event,
 )
 
 
@@ -145,3 +148,43 @@ def test_qwen_codec_rejects_malformed_json_base64_and_input_alignment() -> None:
         parse_server_event('{"type":"response.audio.delta","delta":"%%%"}')
     with pytest.raises(VoiceProviderAudioFormatError):
         audio_append_event(b"\x00", "event-1")
+
+
+def test_qwen_function_call_contract_is_bounded_and_typed() -> None:
+    event = parse_server_event(
+        json.dumps(
+            {
+                "type": "response.function_call_arguments.done",
+                "call_id": "call-1",
+                "name": "delegate_agent_task",
+                "arguments": '{"objective":"查一下演出"}',
+            }
+        )
+    )
+
+    assert event == VoiceToolCall(
+        "call-1",
+        "delegate_agent_task",
+        {"objective": "查一下演出"},
+    )
+    output = function_call_output_event("call-1", {"ok": True, "task": "T1"}, "event-2")
+    assert output["type"] == "conversation.item.create"
+    assert output["item"]["type"] == "function_call_output"
+    assert json.loads(output["item"]["output"]) == {"ok": True, "task": "T1"}
+    assert response_create_event("event-3")["type"] == "response.create"
+    with pytest.raises(VoiceProviderProtocolError):
+        parse_server_event(
+            '{"type":"response.function_call_arguments.done",'
+            '"call_id":"c","name":"delegate_agent_task","arguments":"[]"}'
+        )
+    with pytest.raises(VoiceProviderProtocolError):
+        parse_server_event(
+            json.dumps(
+                {
+                    "type": "response.function_call_arguments.done",
+                    "call_id": "c",
+                    "name": "x" * 129,
+                    "arguments": "{}",
+                }
+            )
+        )

@@ -7,7 +7,7 @@ import logging
 import random
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass, replace
 
@@ -30,6 +30,7 @@ from .events import (
     VoiceResponseStarted,
     VoiceSessionFinished,
     VoiceSessionReady,
+    VoiceToolCall,
     VoiceTranscriptFinal,
     VoiceUserSpeechStarted,
     VoiceUserSpeechStopped,
@@ -52,6 +53,7 @@ from .ports import (
     VoiceSessionRuntime,
     VoiceSessionRuntimeContext,
     VoiceSessionRuntimeFactory,
+    VoiceTaskControlHandler,
 )
 from .settings import VoiceTurnRole
 
@@ -60,7 +62,10 @@ logger = logging.getLogger(__name__)
 ProviderBuilder = Callable[[VoiceSessionRuntimeContext], RealtimeVoiceProvider]
 _AUDIO_STAGING_CHUNKS = 8
 _CANCELLED_RESPONSE_HISTORY = 64
+_COMPLETED_TOOL_CALL_HISTORY = 128
 _INTERRUPT_TIMEOUT_SECONDS = 1.5
+_TASK_SUBMIT_TIMEOUT_SECONDS = 0.25
+_TASK_READ_TIMEOUT_SECONDS = 0.15
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,6 +105,15 @@ class _ResponseDrained:
 
 
 @dataclass(frozen=True, slots=True)
+class _ToolCallFinished:
+    session: RealtimeVoiceSession
+    call_id: str
+    name: str
+    output: Mapping[str, object]
+    elapsed_ms: float
+
+
+@dataclass(frozen=True, slots=True)
 class _AudioBarrier:
     response_id: str
     generation: int
@@ -123,6 +137,7 @@ _ControlEvent = (
     | _PumpFailed
     | _WatchdogExpired
     | _ResponseDrained
+    | _ToolCallFinished
 )
 
 
@@ -136,12 +151,14 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
         media_gateway: VoiceMediaGateway,
         sessions: VoiceSessionRepository,
         provider_builder: ProviderBuilder,
+        task_controls: VoiceTaskControlHandler | None = None,
     ) -> None:
         self._context = context
         self._settings = settings
         self._media_gateway = media_gateway
         self._sessions = sessions
         self._provider_builder = provider_builder
+        self._task_controls = task_controls
         self._control: asyncio.Queue[_ControlEvent] = asyncio.Queue(settings.event_queue_size)
         self._audio_events: asyncio.Queue[_AudioEvent] = asyncio.Queue(_AUDIO_STAGING_CHUNKS)
         self._input = VoiceInputQueue(settings.input_queue_ms)
@@ -157,6 +174,9 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
         self._active_response: _ActiveResponse | None = None
         self._cancelled_response_ids: deque[str] = deque()
         self._cancelled_response_set: set[str] = set()
+        self._tool_calls_in_flight: set[str] = set()
+        self._completed_tool_call_ids: deque[str] = deque()
+        self._completed_tool_call_set: set[str] = set()
         self._user_speaking = False
         self._turn_sequence = 0
         self._usage: dict[str, int | float] = {}
@@ -389,6 +409,9 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
             if isinstance(event, _ResponseDrained):
                 await self._handle_response_drained(event)
                 continue
+            if isinstance(event, _ToolCallFinished):
+                await self._handle_tool_call_finished(event)
+                continue
             if event.session is not self._provider_session:
                 continue
             model_event = event.event
@@ -453,6 +476,8 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                     ),
                     count_barge_in=False,
                 )
+            elif isinstance(model_event, VoiceToolCall):
+                self._start_tool_call(event.session, model_event)
             elif isinstance(model_event, VoiceProviderFailed):
                 if model_event.retryable and await self._recover_provider():
                     continue
@@ -463,6 +488,117 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                 self._state = VoiceSessionState.CLOSING
                 self._complete(VoiceStopReason.RUNTIME_ENDED)
                 return
+
+    def _start_tool_call(
+        self,
+        session: RealtimeVoiceSession,
+        event: VoiceToolCall,
+    ) -> None:
+        if (
+            event.call_id in self._tool_calls_in_flight
+            or event.call_id in self._completed_tool_call_set
+        ):
+            return
+        self._tool_calls_in_flight.add(event.call_id)
+        self._stats = replace(
+            self._stats,
+            task_control_calls=self._stats.task_control_calls + 1,
+        )
+        self._spawn(
+            self._execute_tool_call(session, event),
+            "voice-task-control",
+        )
+
+    async def _execute_tool_call(
+        self,
+        session: RealtimeVoiceSession,
+        event: VoiceToolCall,
+    ) -> None:
+        controls = self._task_controls
+        started_at = time.monotonic()
+        if controls is None:
+            output: Mapping[str, object] = {"ok": False, "code": "tool_not_available"}
+        else:
+            try:
+                timeout = (
+                    _TASK_SUBMIT_TIMEOUT_SECONDS
+                    if event.name == "delegate_agent_task"
+                    else _TASK_READ_TIMEOUT_SECONDS
+                )
+                async with asyncio.timeout(timeout):
+                    output = await controls.execute(
+                        self._context.descriptor,
+                        event.call_id,
+                        event.name,
+                        event.arguments,
+                    )
+            except asyncio.CancelledError:
+                raise
+            except TimeoutError:
+                output = {"ok": False, "code": "temporarily_unavailable"}
+            except Exception as exc:
+                logger.exception(
+                    "Voice task control handler failed: session=%s tool=%s error=%s",
+                    opaque_ref(str(self._context.descriptor.session_id)),
+                    event.name,
+                    exception_kind(exc),
+                )
+                output = {"ok": False, "code": "internal_error"}
+        await self._control.put(
+            _ToolCallFinished(
+                session,
+                event.call_id,
+                event.name,
+                dict(output),
+                (time.monotonic() - started_at) * 1000,
+            )
+        )
+
+    async def _handle_tool_call_finished(self, event: _ToolCallFinished) -> None:
+        self._tool_calls_in_flight.discard(event.call_id)
+        failed = event.output.get("ok") is not True
+        self._stats = replace(
+            self._stats,
+            task_control_failures=(
+                self._stats.task_control_failures + 1
+                if failed
+                else self._stats.task_control_failures
+            ),
+            last_task_control_ms=event.elapsed_ms,
+            max_task_control_ms=max(self._stats.max_task_control_ms, event.elapsed_ms),
+        )
+        if event.session is not self._provider_session:
+            return
+        try:
+            async with asyncio.timeout(_INTERRUPT_TIMEOUT_SECONDS):
+                await event.session.complete_tool_call(event.call_id, event.output)
+        except Exception as exc:
+            logger.warning(
+                "Voice tool result delivery failed: session=%s tool=%s error=%s",
+                opaque_ref(str(self._context.descriptor.session_id)),
+                event.name,
+                exception_kind(exc),
+            )
+            if not await self._recover_provider():
+                self._state = VoiceSessionState.FAILED
+                self._complete(VoiceStopReason.PROVIDER_FAILED)
+            return
+        self._remember_completed_tool_call(event.call_id)
+        logger.info(
+            "Voice task control completed: session=%s tool=%s call=%s elapsed_ms=%.1f ok=%s",
+            opaque_ref(str(self._context.descriptor.session_id)),
+            event.name,
+            opaque_ref(event.call_id),
+            event.elapsed_ms,
+            not failed,
+        )
+
+    def _remember_completed_tool_call(self, call_id: str) -> None:
+        if len(self._completed_tool_call_ids) >= _COMPLETED_TOOL_CALL_HISTORY:
+            expired = self._completed_tool_call_ids.popleft()
+            self._completed_tool_call_set.discard(expired)
+        self._completed_tool_call_ids.append(call_id)
+        self._completed_tool_call_set.add(call_id)
 
     async def _start_response(self, response_id: str) -> None:
         if response_id in self._cancelled_response_set:
@@ -938,11 +1074,13 @@ class RealtimeVoiceSessionRuntimeFactoryImpl(VoiceSessionRuntimeFactory):
         media_gateway: VoiceMediaGateway,
         sessions: VoiceSessionRepository,
         provider_builder: ProviderBuilder,
+        task_controls: VoiceTaskControlHandler | None = None,
     ) -> None:
         self._settings = settings
         self._media_gateway = media_gateway
         self._sessions = sessions
         self._provider_builder = provider_builder
+        self._task_controls = task_controls
 
     async def create(self, context: VoiceSessionRuntimeContext) -> VoiceSessionRuntime:
         return RealtimeVoiceSessionRuntimeImpl(
@@ -951,4 +1089,5 @@ class RealtimeVoiceSessionRuntimeFactoryImpl(VoiceSessionRuntimeFactory):
             self._media_gateway,
             self._sessions,
             self._provider_builder,
+            self._task_controls,
         )

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from uuid import uuid4
 
 from websockets.asyncio.client import ClientConnection, connect
@@ -39,8 +39,10 @@ from .qwen_protocol import (
     QwenOmniConfig,
     audio_append_event,
     encode_client_event,
+    function_call_output_event,
     parse_server_event,
     response_cancel_event,
+    response_create_event,
 )
 
 logger = logging.getLogger(__name__)
@@ -65,9 +67,14 @@ class QwenOmniRealtimeSession:
             raise ValueError("Qwen input requires mono s16le 16 kHz PCM")
         await self._send(audio_append_event(chunk.pcm, _event_id()))
 
-    async def configure(self, config: QwenOmniConfig, instructions: str) -> None:
+    async def configure(
+        self,
+        config: QwenOmniConfig,
+        instructions: str,
+        tools: Sequence[Mapping[str, object]],
+    ) -> None:
         """Send the one initial session update before the event reader starts."""
-        await self._send(config.session_update(instructions, _event_id()))
+        await self._send(config.session_update(instructions, _event_id(), tools))
 
     async def interrupt(self, cursor: PlaybackCursor) -> None:
         """Cancel generation; Qwen currently has no played-audio context truncate event."""
@@ -75,6 +82,15 @@ class QwenOmniRealtimeSession:
         if not self._active_response_id or self._closed or self._finishing:
             return
         await self._send(response_cancel_event(_event_id()))
+
+    async def complete_tool_call(
+        self,
+        call_id: str,
+        output: Mapping[str, object],
+    ) -> None:
+        """Return one function result and ask Qwen to continue the response."""
+        await self._send(function_call_output_event(call_id, output, _event_id()))
+        await self._send(response_create_event(_event_id()))
 
     async def events(self) -> AsyncIterator[VoiceModelEvent]:
         if self._events_started:
@@ -148,20 +164,22 @@ class QwenOmniRealtimeProvider:
         config: QwenOmniConfig,
         instructions: str,
         *,
+        tool_schemas: Sequence[Mapping[str, object]] = (),
         connector: QwenConnector = connect,
     ) -> None:
         self._config = config
         self._instructions = instructions
+        self._tool_schemas = tuple(tool_schemas)
         self._connector = connector
         self._sessions: set[QwenOmniRealtimeSession] = set()
         self._closed = False
 
     @property
     def capabilities(self) -> VoiceProviderCapabilities:
-        # I6 intentionally exposes no tools or out-of-band context injection.
         return VoiceProviderCapabilities(
             response_cancel=True,
             context_truncate_to_playout=False,
+            tool_calls=bool(self._tool_schemas),
         )
 
     async def connect(self, descriptor: VoiceSessionDescriptor) -> QwenOmniRealtimeSession:
@@ -200,7 +218,7 @@ class QwenOmniRealtimeProvider:
         session = QwenOmniRealtimeSession(websocket)
         self._sessions.add(session)
         try:
-            await session.configure(self._config, self._instructions)
+            await session.configure(self._config, self._instructions, self._tool_schemas)
         except BaseException:
             await session.aclose()
             self._sessions.discard(session)
@@ -219,14 +237,21 @@ class QwenOmniRealtimeProvider:
 class QwenOmniProviderBuilder:
     """Parse one pinned DB configuration and build its stateless Qwen adapter."""
 
-    def __init__(self, prompt_compiler: VoicePromptCompiler | None = None) -> None:
+    def __init__(
+        self,
+        prompt_compiler: VoicePromptCompiler | None = None,
+        *,
+        tool_schemas: Sequence[Mapping[str, object]] = (),
+    ) -> None:
         self._prompts = prompt_compiler or VoicePromptCompiler()
+        self._tool_schemas = tuple(tool_schemas)
 
     def __call__(self, context: VoiceSessionRuntimeContext) -> QwenOmniRealtimeProvider:
         configuration = context.configuration
         return QwenOmniRealtimeProvider(
             QwenOmniConfig.from_start_configuration(configuration),
             self._prompts.compile(configuration),
+            tool_schemas=self._tool_schemas,
         )
 
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from uuid import UUID
 
 from cywl_oopz.features.voice.errors import (
@@ -334,6 +334,7 @@ class FakeRealtimeVoiceSession:
         self.sent_audio: list[PcmChunk] = []
         self.interruptions: list[PlaybackCursor] = []
         self.interrupt_error: Exception | None = None
+        self.tool_outputs: list[tuple[str, dict[str, object]]] = []
         self._events: asyncio.Queue[VoiceModelEvent | None] = asyncio.Queue()
         self.finished = False
         self.closed = False
@@ -350,6 +351,13 @@ class FakeRealtimeVoiceSession:
         if self.interrupt_error is not None:
             raise self.interrupt_error
         self.interruptions.append(cursor)
+
+    async def complete_tool_call(
+        self,
+        call_id: str,
+        output: Mapping[str, object],
+    ) -> None:
+        self.tool_outputs.append((call_id, dict(output)))
 
     async def events(self) -> AsyncIterator[VoiceModelEvent]:
         while True:

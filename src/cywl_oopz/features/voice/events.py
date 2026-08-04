@@ -101,6 +101,21 @@ class VoiceProviderFailed:
     retryable: bool
 
 
+@dataclass(frozen=True, slots=True)
+class VoiceToolCall:
+    """One complete Provider function call awaiting a fast control result."""
+
+    call_id: str
+    name: str
+    arguments: Mapping[str, object] = field(default_factory=lambda: MappingProxyType({}))
+
+    def __post_init__(self) -> None:
+        _validate_identifier(self.call_id, "tool call")
+        if not self.name.strip() or len(self.name) > 128:
+            raise ValueError("Provider tool name is invalid")
+        object.__setattr__(self, "arguments", MappingProxyType(dict(self.arguments)))
+
+
 VoiceModelEvent = (
     VoiceSessionReady
     | VoiceSessionFinished
@@ -111,6 +126,7 @@ VoiceModelEvent = (
     | VoiceAssistantAudio
     | VoiceResponseCompleted
     | VoiceResponseCancelled
+    | VoiceToolCall
     | VoiceProviderFailed
 )
 

@@ -27,6 +27,11 @@ from .features.agent.commands import (
     ToolsCommand,
 )
 from .features.agent.context import AgentContextBuilder
+from .features.agent.delegation.repository import SqlAlchemyDelegatedTaskRepository
+from .features.agent.delegation.service import (
+    InProcessDelegatedTaskWakeup,
+    VoiceDelegatedTaskService,
+)
 from .features.agent.direct_tools import DirectToolService
 from .features.agent.memory import MemoryService
 from .features.agent.memory_repository import SqlAlchemyMemoryRepository
@@ -119,6 +124,7 @@ from .features.voice.repository import (
 )
 from .features.voice.runtime import RealtimeVoiceSessionRuntimeFactoryImpl
 from .features.voice.service import VoiceConversationService
+from .features.voice.task_tools import VoiceTaskControlTools
 from .features.web.browser import BrowserSessionManager
 from .features.web.errors import BrowserError
 from .features.web.service import WebSearchService
@@ -453,11 +459,21 @@ class BotApplication:
             self.database.session_factory
         )
         self.voice_sessions = SqlAlchemyVoiceSessionRepository(self.database.session_factory)
+        self.delegated_task_repository = SqlAlchemyDelegatedTaskRepository(
+            self.database.session_factory
+        )
+        self.delegated_task_wakeup = InProcessDelegatedTaskWakeup()
+        self.voice_delegated_tasks = VoiceDelegatedTaskService(
+            self.delegated_task_repository,
+            self.delegated_task_wakeup,
+        )
+        self.voice_task_tools = VoiceTaskControlTools(self.voice_delegated_tasks)
         self.voice_runtimes = RealtimeVoiceSessionRuntimeFactoryImpl(
             settings.voice,
             self.voice_media,
             self.voice_sessions,
-            QwenOmniProviderBuilder(),
+            QwenOmniProviderBuilder(tool_schemas=self.voice_task_tools.schemas()),
+            self.voice_task_tools,
         )
         self.voice_conversations = VoiceConversationService(
             settings.voice,

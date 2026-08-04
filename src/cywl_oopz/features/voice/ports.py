@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol
 from uuid import UUID
@@ -86,6 +86,12 @@ class RealtimeVoiceSession(Protocol):
 
     async def interrupt(self, cursor: PlaybackCursor) -> None: ...
 
+    async def complete_tool_call(
+        self,
+        call_id: str,
+        output: Mapping[str, object],
+    ) -> None: ...
+
     def events(self) -> AsyncIterator[VoiceModelEvent]: ...
 
     async def finish(self) -> None: ...
@@ -135,6 +141,18 @@ class VoiceSessionRuntimeFactory(Protocol):
     """Build a session runtime from pinned identity and lease resources."""
 
     async def create(self, context: VoiceSessionRuntimeContext) -> VoiceSessionRuntime: ...
+
+
+class VoiceTaskControlHandler(Protocol):
+    """Execute only bounded realtime task-control operations."""
+
+    async def execute(
+        self,
+        descriptor: VoiceSessionDescriptor,
+        call_id: str,
+        name: str,
+        arguments: Mapping[str, object],
+    ) -> Mapping[str, object]: ...
 
 
 class VoiceConfigurationRepository(Protocol):
