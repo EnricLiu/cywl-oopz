@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 from datetime import UTC, datetime, timedelta
+from time import monotonic
 from uuid import uuid4
 
 import pytest
@@ -238,6 +239,16 @@ async def test_delegated_task_migration_repository_and_state_machine_on_postgres
         assert recovery.requeued == 0
         assert recovery.cancelled == 0
         assert recovery.interrupted == 0
+
+        submit_latencies = []
+        for index in range(20):
+            started = monotonic()
+            await repository.submit(
+                _submission(voice_session_id, agent_model_id, f"latency-{index}")
+            )
+            submit_latencies.append(monotonic() - started)
+        p95_index = int(len(submit_latencies) * 0.95) - 1
+        assert sorted(submit_latencies)[p95_index] < 0.25
 
         await _migrate(test_engine, "downgrade", "20260804_19")
         async with test_engine.connect() as connection:
