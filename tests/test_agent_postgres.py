@@ -970,6 +970,8 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
                 heartbeat_at=now,
             )
         )
+        heartbeat_at = now + timedelta(milliseconds=500)
+        assert await run_repository.heartbeat(run_id, heartbeat_at) is True
         tool_execution_repository = SqlAlchemyToolExecutionRepository(sessions)
         tool_execution = ToolExecution(
             id=uuid4(),
@@ -1017,6 +1019,7 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
         assert completed is not None
         assert completed.status == AgentRunStatus.SUCCEEDED
         assert completed.stop_reason == AgentStopReason.COMPLETED
+        assert await run_repository.heartbeat(run_id, now + timedelta(seconds=2)) is False
         with pytest.raises(DBAPIError):
             async with test_engine.begin() as connection:
                 await connection.execute(

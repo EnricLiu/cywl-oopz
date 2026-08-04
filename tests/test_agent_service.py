@@ -22,6 +22,7 @@ from cywl_oopz.features.agent.models import (
     ModelSelectionCandidates,
     ProviderProtocol,
 )
+from cywl_oopz.features.agent.run_service import AgentRunService
 from cywl_oopz.features.agent.selection import ProviderSelectionService
 from cywl_oopz.features.agent.service import AgentConversationService
 from cywl_oopz.features.agent.skills.availability import SkillAvailabilityService
@@ -201,6 +202,10 @@ class InMemoryRuns:
     ) -> None:
         self.states[state.run_id] = state
 
+    async def heartbeat(self, run_id: UUID, now) -> bool:
+        del now
+        return run_id in self.states and self.states[run_id].status is AgentRunStatus.RUNNING
+
     async def abandon_stale(self, before, now) -> int:
         return 0
 
@@ -356,12 +361,11 @@ async def build_service(
     service = AgentConversationService(
         agent_settings(),
         chat_settings,
-        engine or RecordingEngine(),
+        AgentRunService(engine or RecordingEngine(), runs, messages),
         catalog,
         ProviderSelectionService(catalog, selections),
         selections,
         threads,
-        runs,
         messages,
         tool_availability,
         skill_repository,

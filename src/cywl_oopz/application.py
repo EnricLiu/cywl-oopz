@@ -46,6 +46,7 @@ from .features.agent.repository import (
     SqlAlchemyProviderCatalogRepository,
     SqlAlchemyToolExecutionRepository,
 )
+from .features.agent.run_service import AgentRunService
 from .features.agent.selection import ProviderSelectionService
 from .features.agent.service import AgentConversationService
 from .features.agent.skills.availability import SkillAvailabilityService
@@ -416,15 +417,24 @@ class BotApplication:
             self.agent_models,
             self.agent_tool_executor,
         )
+        self.agent_run_service = AgentRunService(
+            self.agent_engine,
+            self.agent_runs,
+            self.agent_messages,
+            heartbeat_interval_seconds=max(
+                1.0,
+                min(10.0, settings.agent.stale_run_after_seconds / 3),
+            ),
+            health=self.health,
+        )
         self.agent_chat = AgentConversationService(
             settings.agent,
             settings.chat,
-            self.agent_engine,
+            self.agent_run_service,
             self.agent_catalog,
             self.agent_selection,
             selection_repository,
             self.agent_threads,
-            self.agent_runs,
             self.agent_messages,
             self.agent_tool_availability,
             self.agent_skill_repository if settings.agent.skills_enabled else None,
