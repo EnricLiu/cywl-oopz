@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from uuid import UUID
 
+from cywl_oopz.features.voice.errors import (
+    VoiceModelSelectionError,
+    VoiceSpeakerSelectionError,
+)
 from cywl_oopz.features.voice.events import VoiceModelEvent
 from cywl_oopz.features.voice.models import (
     PcmChunk,
@@ -19,6 +24,157 @@ from cywl_oopz.features.voice.models import (
     VoiceStopReason,
 )
 from cywl_oopz.features.voice.ports import VoiceSessionRuntimeContext
+from cywl_oopz.features.voice.settings import (
+    PersistedVoiceSessionStatus,
+    SelectableVoiceModel,
+    VoiceChannelConfiguration,
+    VoiceModelConfiguration,
+    VoiceModelMode,
+    VoiceProviderConfiguration,
+    VoiceProviderProtocol,
+    VoiceStartConfiguration,
+    VoiceTurnRole,
+    VoiceUserSelection,
+)
+
+_FAKE_PROVIDER_ID = UUID("10000000-0000-0000-0000-000000000001")
+_FAKE_MODEL_ID = UUID("20000000-0000-0000-0000-000000000001")
+
+
+class FakeVoiceConfigurationRepository:
+    """Fresh-read compatible catalog fake with mutable test configuration."""
+
+    def __init__(self) -> None:
+        self.resolve_calls: list[tuple[str, VoiceChannelKey]] = []
+        self.selections: dict[str, VoiceUserSelection] = {}
+        self.model = SelectableVoiceModel(
+            _FAKE_MODEL_ID,
+            "fake",
+            "realtime",
+            "Fake realtime",
+            VoiceModelMode.NATIVE_REALTIME,
+        )
+
+    async def resolve_start_configuration(
+        self,
+        owner_person_id: str,
+        channel: VoiceChannelKey,
+    ) -> VoiceStartConfiguration:
+        self.resolve_calls.append((owner_person_id, channel))
+        selection = self.selections.get(owner_person_id, VoiceUserSelection())
+        return VoiceStartConfiguration(
+            provider=VoiceProviderConfiguration(
+                _FAKE_PROVIDER_ID,
+                "fake",
+                "Fake",
+                VoiceProviderProtocol.QWEN_OMNI_REALTIME_WS,
+                "wss://voice.invalid/realtime",
+                {"api_key": "fake"},
+                {},
+            ),
+            model=VoiceModelConfiguration(
+                _FAKE_MODEL_ID,
+                _FAKE_PROVIDER_ID,
+                "realtime",
+                "fake-realtime",
+                "Fake realtime",
+                VoiceModelMode.NATIVE_REALTIME,
+                {},
+                {},
+                {},
+                {},
+            ),
+            channel=VoiceChannelConfiguration(channel, "voice_readonly_v1", 300),
+            voice_id=selection.voice_id,
+            duplex_mode=selection.duplex_mode,
+            delegated_agent_model_id=selection.delegated_agent_model_id,
+        )
+
+    async def list_selectable_models(
+        self,
+        owner_person_id: str,
+    ) -> tuple[SelectableVoiceModel, ...]:
+        selected = self.selections.get(owner_person_id, VoiceUserSelection())
+        return (
+            SelectableVoiceModel(
+                self.model.id,
+                self.model.provider_alias,
+                self.model.model_alias,
+                self.model.display_name,
+                self.model.mode,
+                selected.preferred_model_id == self.model.id,
+            ),
+        )
+
+    async def user_selection(self, owner_person_id: str) -> VoiceUserSelection:
+        return self.selections.get(owner_person_id, VoiceUserSelection())
+
+    async def set_user_model(
+        self,
+        owner_person_id: str,
+        selector: str,
+    ) -> SelectableVoiceModel:
+        if selector != self.model.selector:
+            raise VoiceModelSelectionError
+        current = await self.user_selection(owner_person_id)
+        self.selections[owner_person_id] = VoiceUserSelection(
+            self.model.id,
+            current.voice_id,
+            current.duplex_mode,
+            current.delegated_agent_model_id,
+        )
+        return SelectableVoiceModel(
+            self.model.id,
+            self.model.provider_alias,
+            self.model.model_alias,
+            self.model.display_name,
+            self.model.mode,
+            True,
+        )
+
+    async def set_user_voice(self, owner_person_id: str, voice_id: str) -> None:
+        if not voice_id.strip() or len(voice_id.strip()) > 128:
+            raise VoiceSpeakerSelectionError
+        current = await self.user_selection(owner_person_id)
+        self.selections[owner_person_id] = VoiceUserSelection(
+            current.preferred_model_id,
+            voice_id,
+            current.duplex_mode,
+            current.delegated_agent_model_id,
+        )
+
+
+class FakeVoiceSessionRepository:
+    """Capture durable lifecycle calls without a database."""
+
+    def __init__(self) -> None:
+        self.created: list[tuple[VoiceSessionDescriptor, VoiceStartConfiguration]] = []
+        self.active: list[UUID] = []
+        self.finished: list[tuple[UUID, PersistedVoiceSessionStatus, str]] = []
+        self.turns: list[tuple[UUID, int, VoiceTurnRole, str]] = []
+
+    async def create(self, descriptor, configuration) -> None:
+        self.created.append((descriptor, configuration))
+
+    async def mark_active(self, session_id: UUID) -> None:
+        self.active.append(session_id)
+
+    async def finish(self, session_id, status, stop_reason, *, usage=None, summary="") -> None:
+        del usage, summary
+        self.finished.append((session_id, status, stop_reason))
+
+    async def append_final_turn(
+        self,
+        session_id,
+        sequence,
+        role,
+        transcript,
+        *,
+        provider_item_id="",
+        usage=None,
+    ) -> None:
+        del provider_item_id, usage
+        self.turns.append((session_id, sequence, role, transcript))
 
 
 class FakeVoiceLease:

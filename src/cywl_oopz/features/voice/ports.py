@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
+from uuid import UUID
 
 from .events import VoiceModelEvent
 from .models import (
@@ -17,6 +18,13 @@ from .models import (
     VoiceRuntimeResult,
     VoiceSessionDescriptor,
     VoiceStopReason,
+)
+from .settings import (
+    PersistedVoiceSessionStatus,
+    SelectableVoiceModel,
+    VoiceStartConfiguration,
+    VoiceTurnRole,
+    VoiceUserSelection,
 )
 
 
@@ -98,6 +106,7 @@ class VoiceSessionRuntimeContext:
 
     descriptor: VoiceSessionDescriptor
     lease: VoiceLease
+    configuration: VoiceStartConfiguration
 
 
 class VoiceSessionRuntime(Protocol):
@@ -116,3 +125,57 @@ class VoiceSessionRuntimeFactory(Protocol):
     """Build a session runtime from pinned identity and lease resources."""
 
     async def create(self, context: VoiceSessionRuntimeContext) -> VoiceSessionRuntime: ...
+
+
+class VoiceConfigurationRepository(Protocol):
+    """Fresh-read voice catalog and user preference operations."""
+
+    async def resolve_start_configuration(
+        self,
+        owner_person_id: str,
+        channel: VoiceChannelKey,
+    ) -> VoiceStartConfiguration: ...
+
+    async def list_selectable_models(
+        self,
+        owner_person_id: str,
+    ) -> tuple[SelectableVoiceModel, ...]: ...
+
+    async def user_selection(self, owner_person_id: str) -> VoiceUserSelection: ...
+
+    async def set_user_model(self, owner_person_id: str, selector: str) -> SelectableVoiceModel: ...
+
+    async def set_user_voice(self, owner_person_id: str, voice_id: str) -> None: ...
+
+
+class VoiceSessionRepository(Protocol):
+    """Persist session lifecycle and final transcript turns."""
+
+    async def create(
+        self,
+        descriptor: VoiceSessionDescriptor,
+        configuration: VoiceStartConfiguration,
+    ) -> None: ...
+
+    async def mark_active(self, session_id: UUID) -> None: ...
+
+    async def finish(
+        self,
+        session_id: UUID,
+        status: PersistedVoiceSessionStatus,
+        stop_reason: str,
+        *,
+        usage: dict[str, Any] | None = None,
+        summary: str = "",
+    ) -> None: ...
+
+    async def append_final_turn(
+        self,
+        session_id: UUID,
+        sequence: int,
+        role: VoiceTurnRole,
+        transcript: str,
+        *,
+        provider_item_id: str = "",
+        usage: dict[str, Any] | None = None,
+    ) -> None: ...

@@ -7,6 +7,7 @@ from oopz_sdk.events.context import EventContext
 
 from cywl_oopz.core.observability import opaque_ref
 from cywl_oopz.features.voice.models import VoiceChannelKey, VoiceSessionState, VoiceSessionStatus
+from cywl_oopz.features.voice.settings import SelectableVoiceModel, VoiceUserSelection
 
 from .voice_lease import (
     OopzVoiceLeaseManager,
@@ -78,12 +79,40 @@ class OopzVoiceCommandPresenter:
     async def error(self, context: EventContext, message: str) -> None:
         await context.reply(f"⚠️ **语音** {message}")
 
+    async def models(
+        self,
+        context: EventContext,
+        models: tuple[SelectableVoiceModel, ...],
+    ) -> None:
+        if not models:
+            await context.reply("🎙️ **语音模型** · 暂无可选模型")
+            return
+        lines = ["🎙️ **语音模型**"]
+        lines.extend(
+            f"{'✅' if model.selected else '▫️'} {model.selector} · {model.display_name}"
+            for model in models
+        )
+        await context.reply("\n".join(lines))
+
+    async def model_selected(self, context: EventContext, model: SelectableVoiceModel) -> None:
+        await context.reply(f"✅ **语音模型** {model.selector} · 下次会话生效")
+
+    async def voice_selected(
+        self,
+        context: EventContext,
+        selection: VoiceUserSelection,
+    ) -> None:
+        voice = selection.voice_id or "模型默认音色"
+        await context.reply(f"🎵 **语音音色** {voice} · 下次会话生效")
+
     async def usage(self, context: EventContext, prefix: str) -> None:
         await context.reply(
             "语音命令：\n"
             f"{prefix}voice start · 开始语音对话\n"
             f"{prefix}voice stop · 结束语音对话\n"
-            f"{prefix}voice status · 查看当前状态"
+            f"{prefix}voice status · 查看当前状态\n"
+            f"{prefix}voice model [provider/model] · 查看或选择模型\n"
+            f"{prefix}voice voice [音色] · 查看或选择音色"
         )
 
     @classmethod

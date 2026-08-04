@@ -13,18 +13,24 @@ from cywl_oopz.core.observability import exception_kind, opaque_ref
 from .errors import (
     VoiceBackendBusyError,
     VoiceChannelContextRequiredError,
+    VoiceChannelDisabledError,
+    VoiceConfigurationUnavailableError,
     VoiceConversationError,
     VoiceFeatureDisabledError,
+    VoiceModelSelectionError,
     VoiceRuntimeUnavailableError,
     VoiceSessionAlreadyActiveError,
     VoiceSessionNotActiveError,
     VoiceSessionOwnershipError,
     VoiceSessionStartCancelledError,
     VoiceSessionStartTimeoutError,
+    VoiceSpeakerSelectionError,
     VoiceUserNotInChannelError,
 )
 from .models import VoiceSessionStatus, VoiceStartRequest, VoiceTextAddress
+from .ports import VoiceConfigurationRepository
 from .service import VoiceConversationService
+from .settings import SelectableVoiceModel, VoiceUserSelection
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +43,18 @@ class VoiceCommandPresenter(Protocol):
     async def stopped(self, context: EventContext, status: VoiceSessionStatus) -> None: ...
 
     async def status(self, context: EventContext, status: VoiceSessionStatus) -> None: ...
+
+    async def models(
+        self,
+        context: EventContext,
+        models: tuple[SelectableVoiceModel, ...],
+    ) -> None: ...
+
+    async def model_selected(self, context: EventContext, model: SelectableVoiceModel) -> None: ...
+
+    async def voice_selected(
+        self, context: EventContext, selection: VoiceUserSelection
+    ) -> None: ...
 
     async def error(self, context: EventContext, message: str) -> None: ...
 
@@ -52,16 +70,21 @@ class VoiceCommand:
     def __init__(
         self,
         conversations: VoiceConversationService,
+        configurations: VoiceConfigurationRepository,
         presenter: VoiceCommandPresenter,
         command_prefix: str,
     ) -> None:
         self._conversations = conversations
+        self._configurations = configurations
         self._presenter = presenter
         self._prefix = command_prefix
 
     async def execute(self, command: ParsedCommand, context: EventContext) -> None:
         action = command.arguments[0].casefold() if command.arguments else ""
-        if action not in {"start", "stop", "status"} or len(command.arguments) != 1:
+        valid = (action in {"start", "stop", "status"} and len(command.arguments) == 1) or (
+            action in {"model", "voice"} and len(command.arguments) in {1, 2}
+        )
+        if not valid:
             await self._presenter.usage(context, self._prefix)
             return
         try:
@@ -72,8 +95,31 @@ class VoiceCommand:
             elif action == "stop":
                 status = await self._conversations.stop(owner)
                 await self._presenter.stopped(context, status)
-            else:
+            elif action == "status":
                 await self._presenter.status(context, await self._conversations.status())
+            elif action == "model":
+                if len(command.arguments) == 1:
+                    await self._presenter.models(
+                        context,
+                        await self._configurations.list_selectable_models(owner),
+                    )
+                else:
+                    selected = await self._configurations.set_user_model(
+                        owner,
+                        command.arguments[1],
+                    )
+                    await self._presenter.model_selected(context, selected)
+            elif len(command.arguments) == 1:
+                await self._presenter.voice_selected(
+                    context,
+                    await self._configurations.user_selection(owner),
+                )
+            else:
+                await self._configurations.set_user_voice(owner, command.arguments[1])
+                await self._presenter.voice_selected(
+                    context,
+                    await self._configurations.user_selection(owner),
+                )
         except VoiceConversationError as exc:
             logger.info(
                 "Voice command rejected: action=%s owner=%s error=%s",
@@ -126,6 +172,14 @@ class VoiceCommand:
             return "请在服务器文字频道中使用语音命令。"
         if isinstance(error, VoiceUserNotInChannelError):
             return "你需要先加入当前区域的一个语音频道。"
+        if isinstance(error, VoiceChannelDisabledError):
+            return "当前语音频道尚未启用实时对话。"
+        if isinstance(error, VoiceConfigurationUnavailableError):
+            return "当前没有可用的实时语音模型配置。"
+        if isinstance(error, VoiceModelSelectionError):
+            return "未找到该语音模型，请使用 provider/model 格式重新选择。"
+        if isinstance(error, VoiceSpeakerSelectionError):
+            return "音色名称不能为空，且最多 128 个字符。"
         if isinstance(error, VoiceBackendBusyError):
             return "语音频道正被音乐或另一场对话占用，请稍后再试。"
         if isinstance(error, VoiceSessionAlreadyActiveError):

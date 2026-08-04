@@ -113,6 +113,10 @@ from .features.music.playlist_repository import SqlAlchemyMusicPlaylistRepositor
 from .features.music.playlists import MusicPlaylistService
 from .features.music.service import MusicRequestService
 from .features.voice.commands import VoiceCommand
+from .features.voice.repository import (
+    SqlAlchemyVoiceConfigurationRepository,
+    SqlAlchemyVoiceSessionRepository,
+)
 from .features.voice.service import VoiceConversationService
 from .features.web.browser import BrowserSessionManager
 from .features.web.errors import BrowserError
@@ -444,10 +448,16 @@ class BotApplication:
             self.agent_presenters,
             self.chat_invocations,
         )
+        self.voice_configurations = SqlAlchemyVoiceConfigurationRepository(
+            self.database.session_factory
+        )
+        self.voice_sessions = SqlAlchemyVoiceSessionRepository(self.database.session_factory)
         self.voice_conversations = VoiceConversationService(
             settings.voice,
             OopzConversationVoiceAccess(self.bot, self.voice_leases),
             UnavailableVoiceSessionRuntimeFactory(),
+            self.voice_configurations,
+            self.voice_sessions,
         )
         self._register_commands()
         self.bot.on_ready(self._on_ready)
@@ -536,6 +546,7 @@ class BotApplication:
             self.commands.register(
                 VoiceCommand(
                     self.voice_conversations,
+                    self.voice_configurations,
                     OopzVoiceCommandPresenter(),
                     self.settings.command_prefix,
                 )

@@ -62,3 +62,19 @@ class VoiceMediaTransportError(VoiceConversationError):
         super().__init__(f"Voice media operation failed: {operation}")
         self.operation = operation
         self.error_kind = error_kind
+
+
+class VoiceChannelDisabledError(VoiceConversationError):
+    """Realtime voice is not enabled for the resolved area voice channel."""
+
+
+class VoiceConfigurationUnavailableError(VoiceConversationError):
+    """No usable Provider/model selection can start a realtime session."""
+
+
+class VoiceModelSelectionError(VoiceConversationError):
+    """A requested voice model is unknown, disabled, or not user selectable."""
+
+
+class VoiceSpeakerSelectionError(VoiceConversationError):
+    """A requested Provider voice identifier is malformed."""

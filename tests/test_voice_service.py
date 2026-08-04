@@ -19,8 +19,11 @@ from cywl_oopz.features.voice.models import (
     VoiceTextAddress,
 )
 from cywl_oopz.features.voice.service import VoiceConversationService
+from cywl_oopz.features.voice.settings import PersistedVoiceSessionStatus
 from cywl_oopz.integrations.voice.fake import (
     FakeVoiceAccessGateway,
+    FakeVoiceConfigurationRepository,
+    FakeVoiceSessionRepository,
     FakeVoiceSessionRuntime,
     FakeVoiceSessionRuntimeFactory,
 )
@@ -46,7 +49,17 @@ def service():
     access = FakeVoiceAccessGateway()
     access.channels[("area", "person")] = "voice"
     runtimes = FakeVoiceSessionRuntimeFactory()
-    return VoiceConversationService(settings(), access, runtimes), access, runtimes
+    return (
+        VoiceConversationService(
+            settings(),
+            access,
+            runtimes,
+            FakeVoiceConfigurationRepository(),
+            FakeVoiceSessionRepository(),
+        ),
+        access,
+        runtimes,
+    )
 
 
 @pytest.mark.asyncio
@@ -74,6 +87,28 @@ async def test_voice_service_runs_fake_session_then_stops_and_releases_everythin
 
 
 @pytest.mark.asyncio
+async def test_voice_service_pins_fresh_configuration_and_persists_lifecycle() -> None:
+    access = FakeVoiceAccessGateway()
+    access.channels[("area", "person")] = "voice"
+    runtimes = FakeVoiceSessionRuntimeFactory()
+    configurations = FakeVoiceConfigurationRepository()
+    sessions = FakeVoiceSessionRepository()
+    conversations = VoiceConversationService(settings(), access, runtimes, configurations, sessions)
+
+    active = await conversations.start(request())
+
+    assert len(configurations.resolve_calls) == 1
+    assert sessions.created[0][0].session_id == active.session_id
+    assert sessions.active == [active.session_id]
+    assert runtimes.contexts[0].configuration is sessions.created[0][1]
+
+    await conversations.stop("person")
+
+    assert sessions.finished == [(active.session_id, PersistedVoiceSessionStatus.ENDED, "command")]
+    await conversations.aclose()
+
+
+@pytest.mark.asyncio
 async def test_voice_service_rejects_second_session_and_non_owner_stop() -> None:
     conversations, access, _ = service()
     access.channels[("area", "other")] = "voice"
@@ -91,7 +126,13 @@ async def test_voice_service_rejects_second_session_and_non_owner_stop() -> None
 @pytest.mark.asyncio
 async def test_voice_service_reports_missing_channel_and_busy_backend() -> None:
     access = FakeVoiceAccessGateway()
-    conversations = VoiceConversationService(settings(), access, FakeVoiceSessionRuntimeFactory())
+    conversations = VoiceConversationService(
+        settings(),
+        access,
+        FakeVoiceSessionRuntimeFactory(),
+        FakeVoiceConfigurationRepository(),
+        FakeVoiceSessionRepository(),
+    )
 
     with pytest.raises(VoiceUserNotInChannelError):
         await conversations.start(request())
@@ -113,6 +154,8 @@ async def test_voice_service_releases_lease_when_runtime_is_unavailable() -> Non
         settings(),
         access,
         UnavailableVoiceSessionRuntimeFactory(),
+        FakeVoiceConfigurationRepository(),
+        FakeVoiceSessionRepository(),
     )
 
     with pytest.raises(VoiceRuntimeUnavailableError):
@@ -169,7 +212,13 @@ async def test_voice_service_stop_during_startup_cancels_generation_and_releases
             return await self.delegate.create(context)
 
     factory = BlockingFactory()
-    conversations = VoiceConversationService(settings(), access, factory)
+    conversations = VoiceConversationService(
+        settings(),
+        access,
+        factory,
+        FakeVoiceConfigurationRepository(),
+        FakeVoiceSessionRepository(),
+    )
     starting = asyncio.create_task(conversations.start(request()))
     await factory.entered.wait()
 
@@ -212,6 +261,8 @@ async def test_voice_service_forces_bounded_cleanup_when_runtime_ignores_stop() 
         settings(CYWL_VOICE_START_TIMEOUT_SECONDS="0.01"),
         access,
         factory,
+        FakeVoiceConfigurationRepository(),
+        FakeVoiceSessionRepository(),
     )
     await conversations.start(request())
 

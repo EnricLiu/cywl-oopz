@@ -33,11 +33,14 @@ from .models import (
 )
 from .ports import (
     VoiceAccessGateway,
+    VoiceConfigurationRepository,
     VoiceLease,
+    VoiceSessionRepository,
     VoiceSessionRuntime,
     VoiceSessionRuntimeContext,
     VoiceSessionRuntimeFactory,
 )
+from .settings import PersistedVoiceSessionStatus, VoiceStartConfiguration
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +54,8 @@ class _ActiveVoiceSession:
     voice_channel: VoiceChannelKey | None = None
     lease: VoiceLease | None = None
     runtime: VoiceSessionRuntime | None = None
+    configuration: VoiceStartConfiguration | None = None
+    persisted: bool = False
     startup_task: asyncio.Task[object] | None = None
     task: asyncio.Task[None] | None = None
     stop_requested: bool = False
@@ -66,10 +71,14 @@ class VoiceConversationService:
         settings: VoiceSettings,
         access: VoiceAccessGateway,
         runtimes: VoiceSessionRuntimeFactory,
+        configurations: VoiceConfigurationRepository,
+        sessions: VoiceSessionRepository,
     ) -> None:
         self._settings = settings
         self._access = access
         self._runtimes = runtimes
+        self._configurations = configurations
+        self._sessions = sessions
         self._lock = asyncio.Lock()
         self._active: _ActiveVoiceSession | None = None
         self._closed = False
@@ -104,6 +113,13 @@ class VoiceConversationService:
                 channel = VoiceChannelKey(request.origin.area_id, channel_id)
                 await self._update_startup(slot, VoiceSessionState.ACQUIRING_VOICE, channel)
 
+                configuration = await self._configurations.resolve_start_configuration(
+                    request.owner_person_id,
+                    channel,
+                )
+                slot.configuration = configuration
+                await self._ensure_starting(slot)
+
                 lease = await self._access.try_acquire(
                     channel,
                     owner_key=f"conversation:{slot.session_id}",
@@ -119,11 +135,17 @@ class VoiceConversationService:
                     channel,
                     request.origin,
                 )
+                await self._sessions.create(descriptor, configuration)
+                slot.persisted = True
+                await self._ensure_starting(slot)
                 await self._update_startup(slot, VoiceSessionState.CONNECTING_PROVIDER)
-                runtime = await self._runtimes.create(VoiceSessionRuntimeContext(descriptor, lease))
+                runtime = await self._runtimes.create(
+                    VoiceSessionRuntimeContext(descriptor, lease, configuration)
+                )
                 slot.runtime = runtime
                 await self._ensure_starting(slot)
                 await runtime.start()
+                await self._sessions.mark_active(slot.session_id)
 
                 async with self._lock:
                     self._raise_if_start_cancelled(slot)
@@ -285,6 +307,24 @@ class VoiceConversationService:
                 except Exception as exc:
                     logger.warning(
                         "Voice runtime cleanup failed: session=%s error=%s",
+                        opaque_ref(str(slot.session_id)),
+                        exception_kind(exc),
+                    )
+            if slot.persisted:
+                persisted_status = (
+                    PersistedVoiceSessionStatus.FAILED
+                    if state is VoiceSessionState.FAILED
+                    else PersistedVoiceSessionStatus.ENDED
+                )
+                try:
+                    await self._sessions.finish(
+                        slot.session_id,
+                        persisted_status,
+                        reason.value,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Voice session persistence cleanup failed: session=%s error=%s",
                         opaque_ref(str(slot.session_id)),
                         exception_kind(exc),
                     )
