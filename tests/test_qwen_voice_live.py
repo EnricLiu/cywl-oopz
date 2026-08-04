@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import time
 import wave
@@ -22,10 +23,11 @@ from cywl_oopz.features.voice.models import (
     VoiceAudioFormat,
     VoiceChannelKey,
     VoiceSessionDescriptor,
+    VoiceSessionState,
     VoiceStopReason,
     VoiceTextAddress,
 )
-from cywl_oopz.features.voice.ports import VoiceSessionRuntimeContext
+from cywl_oopz.features.voice.ports import VoiceLease, VoiceSessionRuntimeContext
 from cywl_oopz.features.voice.runtime import RealtimeVoiceSessionRuntimeImpl
 from cywl_oopz.features.voice.settings import (
     VoiceChannelConfiguration,
@@ -40,6 +42,7 @@ from cywl_oopz.integrations.voice.fake import (
     FakeVoiceAccessGateway,
     FakeVoiceConfigurationRepository,
     FakeVoiceMediaGateway,
+    FakeVoiceMediaSession,
     FakeVoiceSessionRepository,
 )
 from cywl_oopz.integrations.voice.qwen_omni import QwenOmniRealtimeProvider
@@ -49,6 +52,18 @@ from cywl_oopz.storage.models import VoiceModelRecord, VoiceProviderRecord
 from cywl_oopz.storage.url import normalize_asyncpg_url
 
 _LIVE_FRAME_SAMPLES = 1_024
+logger = logging.getLogger(__name__)
+
+
+def _bounded_live_integer(name: str, default: int, maximum: int) -> int:
+    raw = os.getenv(name, str(default)).strip()
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+    if not 1 <= value <= maximum:
+        raise ValueError(f"{name} must be between 1 and {maximum}")
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,6 +119,81 @@ class _LiveWavReplay:
         return sequence
 
 
+@dataclass(slots=True)
+class _QwenLiveRuntimeHarness:
+    """Own one paid Provider runtime and all deterministic local media resources."""
+
+    runtime: RealtimeVoiceSessionRuntimeImpl
+    media: FakeVoiceMediaSession
+    sessions: FakeVoiceSessionRepository
+    providers: list[QwenOmniRealtimeProvider]
+    lease: VoiceLease
+
+    @classmethod
+    async def create(
+        cls,
+        config: QwenOmniConfig,
+        instructions: str,
+    ) -> _QwenLiveRuntimeHarness:
+        access = FakeVoiceAccessGateway()
+        channel = VoiceChannelKey("live-test-area", "live-test-voice")
+        lease = await access.try_acquire(channel, "qwen-live-runtime")
+        assert lease is not None
+        configuration = await FakeVoiceConfigurationRepository().resolve_start_configuration(
+            "live-test-person", channel
+        )
+        descriptor = VoiceSessionDescriptor(
+            uuid4(),
+            "live-test-person",
+            channel,
+            VoiceTextAddress("live-test-area", "live-test-text"),
+        )
+        media_gateway = FakeVoiceMediaGateway()
+        sessions = FakeVoiceSessionRepository()
+        providers: list[QwenOmniRealtimeProvider] = []
+
+        def build_provider(context):
+            del context
+            provider = QwenOmniRealtimeProvider(config, instructions)
+            providers.append(provider)
+            return provider
+
+        runtime = RealtimeVoiceSessionRuntimeImpl(
+            VoiceSessionRuntimeContext(descriptor, lease, configuration),
+            VoiceSettings.from_mapping(
+                {
+                    "CYWL_VOICE_ENABLED": "true",
+                    "CYWL_VOICE_START_TIMEOUT_SECONDS": "30",
+                    "CYWL_VOICE_STOP_TIMEOUT_SECONDS": "1.5",
+                    "CYWL_VOICE_IDLE_TIMEOUT_SECONDS": "300",
+                    "CYWL_VOICE_MAX_SESSION_SECONDS": "1800",
+                    "CYWL_VOICE_INPUT_QUEUE_MS": "1000",
+                    "CYWL_VOICE_OUTPUT_QUEUE_MS": "2000",
+                }
+            ),
+            media_gateway,
+            sessions,
+            build_provider,
+        )
+        try:
+            await runtime.start()
+        except BaseException:
+            await runtime.aclose()
+            await lease.release()
+            raise
+        return cls(runtime, media_gateway.sessions[0], sessions, providers, lease)
+
+    async def stop(self) -> None:
+        await self.runtime.request_stop(VoiceStopReason.COMMAND)
+        async with asyncio.timeout(2):
+            result = await self.runtime.wait_finished()
+        assert result.reason is VoiceStopReason.COMMAND
+
+    async def aclose(self) -> None:
+        await self.runtime.aclose()
+        await self.lease.release()
+
+
 def test_live_wav_replay_loads_bounded_pcm_fixture(tmp_path: Path) -> None:
     path = tmp_path / "speech.wav"
     samples = np.zeros(3_200, dtype="<i2")
@@ -118,6 +208,15 @@ def test_live_wav_replay_loads_bounded_pcm_fixture(tmp_path: Path) -> None:
     assert replay.format == VoiceAudioFormat(16_000, 1, "f32le")
     assert len(replay.chunks) == 4
     assert sum(len(chunk) for chunk in replay.chunks) == 3_200 * 4
+
+
+def test_qwen_live_counts_are_bounded(monkeypatch) -> None:
+    monkeypatch.setenv("CYWL_QWEN_LIVE_ROUNDS", "20")
+    assert _bounded_live_integer("CYWL_QWEN_LIVE_ROUNDS", 10, 20) == 20
+
+    monkeypatch.setenv("CYWL_QWEN_LIVE_BARGE_INS", "0")
+    with pytest.raises(ValueError, match="between 1 and 20"):
+        _bounded_live_integer("CYWL_QWEN_LIVE_BARGE_INS", 20, 20)
 
 
 async def _load_live_config() -> QwenOmniConfig:
@@ -234,84 +333,95 @@ async def test_qwen_live_runtime_replays_multiple_audio_turns() -> None:
     wav_path = os.getenv("CYWL_QWEN_LIVE_INPUT_WAV", "").strip()
     if not wav_path:
         pytest.skip("set CYWL_QWEN_LIVE_INPUT_WAV to a local spoken PCM WAV")
-    try:
-        rounds = int(os.getenv("CYWL_QWEN_LIVE_ROUNDS", "10"))
-    except ValueError:
-        pytest.fail("CYWL_QWEN_LIVE_ROUNDS must be an integer")
-    if not 1 <= rounds <= 20:
-        pytest.fail("CYWL_QWEN_LIVE_ROUNDS must be between 1 and 20")
+    rounds = _bounded_live_integer("CYWL_QWEN_LIVE_ROUNDS", 10, 20)
     replay = _LiveWavReplay.load(Path(wav_path))
     config = await _load_live_config()
-    access = FakeVoiceAccessGateway()
-    channel = VoiceChannelKey("live-test-area", "live-test-voice")
-    lease = await access.try_acquire(channel, "qwen-live-runtime")
-    assert lease is not None
-    configuration = await FakeVoiceConfigurationRepository().resolve_start_configuration(
-        "live-test-person", channel
-    )
-    descriptor = VoiceSessionDescriptor(
-        uuid4(),
-        "live-test-person",
-        channel,
-        VoiceTextAddress("live-test-area", "live-test-text"),
-    )
-    media_gateway = FakeVoiceMediaGateway()
-    sessions = FakeVoiceSessionRepository()
-    providers: list[QwenOmniRealtimeProvider] = []
-
-    def build_provider(context):
-        del context
-        provider = QwenOmniRealtimeProvider(
-            config,
-            "你正在执行实时语音多轮测试。听清用户后，每次只用一句简短中文回答。",
-        )
-        providers.append(provider)
-        return provider
-
-    runtime = RealtimeVoiceSessionRuntimeImpl(
-        VoiceSessionRuntimeContext(descriptor, lease, configuration),
-        VoiceSettings.from_mapping(
-            {
-                "CYWL_VOICE_ENABLED": "true",
-                "CYWL_VOICE_START_TIMEOUT_SECONDS": "30",
-                "CYWL_VOICE_STOP_TIMEOUT_SECONDS": "1.5",
-                "CYWL_VOICE_IDLE_TIMEOUT_SECONDS": "300",
-                "CYWL_VOICE_MAX_SESSION_SECONDS": "900",
-                "CYWL_VOICE_INPUT_QUEUE_MS": "1000",
-                "CYWL_VOICE_OUTPUT_QUEUE_MS": "2000",
-            }
-        ),
-        media_gateway,
-        sessions,
-        build_provider,
+    harness = await _QwenLiveRuntimeHarness.create(
+        config,
+        "你正在执行实时语音多轮测试。听清用户后，每次只用一句简短中文回答。",
     )
     try:
-        await runtime.start()
-        media = media_gateway.sessions[0]
         sequence = 0
         for expected in range(1, rounds + 1):
-            sequence = await replay.replay(media, sequence, trailing_silence_ms=1_200)
+            sequence = await replay.replay(
+                harness.media,
+                sequence,
+                trailing_silence_ms=1_200,
+            )
             async with asyncio.timeout(60):
-                while runtime.stats.responses_drained < expected:
+                while harness.runtime.stats.responses_drained < expected:
                     await asyncio.sleep(0.05)
 
-        user_turns = sum(turn[2] is VoiceTurnRole.USER for turn in sessions.turns)
-        assistant_turns = sum(turn[2] is VoiceTurnRole.ASSISTANT for turn in sessions.turns)
-        assert runtime.stats.responses_started >= rounds
-        assert runtime.stats.responses_drained >= rounds
-        assert runtime.stats.first_final_transcript_ms > 0
-        assert runtime.stats.first_provider_audio_ms > 0
-        assert runtime.stats.first_oopz_output_ms > 0
-        assert len(media.outputs) >= rounds
+        user_turns = sum(turn[2] is VoiceTurnRole.USER for turn in harness.sessions.turns)
+        assistant_turns = sum(turn[2] is VoiceTurnRole.ASSISTANT for turn in harness.sessions.turns)
+        assert harness.runtime.stats.responses_started >= rounds
+        assert harness.runtime.stats.responses_drained >= rounds
+        assert harness.runtime.stats.first_final_transcript_ms > 0
+        assert harness.runtime.stats.first_provider_audio_ms > 0
+        assert harness.runtime.stats.first_oopz_output_ms > 0
+        assert len(harness.media.outputs) >= rounds
         assert user_turns >= rounds
         assert assistant_turns >= rounds
 
-        await runtime.request_stop(VoiceStopReason.COMMAND)
-        async with asyncio.timeout(2):
-            result = await runtime.wait_finished()
-        assert result.reason is VoiceStopReason.COMMAND
+        await harness.stop()
     finally:
-        await runtime.aclose()
-        await lease.release()
-    assert media_gateway.sessions[0].closed is True
-    assert all(provider._closed for provider in providers)
+        await harness.aclose()
+    assert harness.media.closed is True
+    assert all(provider._closed for provider in harness.providers)
+
+
+@pytest.mark.asyncio
+async def test_qwen_live_runtime_survives_repeated_barge_in() -> None:
+    load_dotenv(find_dotenv(usecwd=True), override=False)
+    if os.getenv("CYWL_RUN_LIVE_QWEN_TESTS") != "1":
+        pytest.skip("set CYWL_RUN_LIVE_QWEN_TESTS=1 to run the Qwen realtime smoke")
+    wav_path = os.getenv("CYWL_QWEN_LIVE_INPUT_WAV", "").strip()
+    if not wav_path:
+        pytest.skip("set CYWL_QWEN_LIVE_INPUT_WAV to a local spoken PCM WAV")
+    barge_ins = _bounded_live_integer("CYWL_QWEN_LIVE_BARGE_INS", 20, 20)
+    replay = _LiveWavReplay.load(Path(wav_path))
+    config = await _load_live_config()
+    harness = await _QwenLiveRuntimeHarness.create(
+        config,
+        (
+            "你正在执行实时语音打断测试。每次听到用户后，用中文从一数到一百，"
+            "保持自然语速并持续说至少十秒；被打断后立刻停止，再对新的话重新开始。"
+        ),
+    )
+    try:
+        sequence = await replay.replay(harness.media, 0, trailing_silence_ms=1_000)
+        async with asyncio.timeout(60):
+            while harness.runtime.state is not VoiceSessionState.SPEAKING:
+                await asyncio.sleep(0.01)
+
+        for expected in range(1, barge_ins + 1):
+            sequence = await replay.replay(
+                harness.media,
+                sequence,
+                trailing_silence_ms=1_000,
+            )
+            async with asyncio.timeout(60):
+                while harness.runtime.stats.barge_in_count < expected:
+                    await asyncio.sleep(0.01)
+            if expected < barge_ins:
+                async with asyncio.timeout(60):
+                    while not (
+                        harness.runtime.stats.responses_started >= expected + 1
+                        and harness.runtime.state is VoiceSessionState.SPEAKING
+                    ):
+                        await asyncio.sleep(0.01)
+
+        assert harness.runtime.stats.barge_in_count == barge_ins
+        assert len(harness.media.flushes) >= barge_ins
+        assert harness.runtime.stats.max_barge_in_flush_ms < 200
+        logger.info(
+            "Qwen live barge-in gate: count=%s max_local_flush_ms=%.1f responses=%s",
+            barge_ins,
+            harness.runtime.stats.max_barge_in_flush_ms,
+            harness.runtime.stats.responses_started,
+        )
+        await harness.stop()
+    finally:
+        await harness.aclose()
+    assert harness.media.closed is True
+    assert all(provider._closed for provider in harness.providers)
