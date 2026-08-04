@@ -76,6 +76,7 @@ def test_voice_status_renderer_keeps_terminal_statistics_compact() -> None:
                 "voice_task_control_calls": 4,
                 "voice_task_notifications_presented": 3,
                 "voice_provider_reconnects": 1,
+                "voice_media_reconnects": 1,
             },
             usage={"total_tokens": 12_400},
         )
@@ -83,7 +84,7 @@ def test_voice_status_renderer_keeps_terminal_statistics_compact() -> None:
 
     assert rendered == (
         "🎵 **语音会话结束** · Qwen3.5 Flash\n"
-        "08:32 · 17 轮 · 后台调用 4 · 通知 3 · 重连 1 · 12.4k tokens"
+        "08:32 · 17 轮 · 后台调用 4 · 通知 3 · 重连 2 · 12.4k tokens"
     )
     assert len(rendered) < 2000
 

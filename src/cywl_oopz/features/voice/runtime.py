@@ -106,8 +106,22 @@ class _StopRequested:
 
 @dataclass(frozen=True, slots=True)
 class _MediaEnded:
+    generation: int
     reason: VoiceMediaEndReason
     error_kind: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _MediaRecovered:
+    generation: int
+    media: VoiceMediaSession
+
+
+@dataclass(frozen=True, slots=True)
+class _MediaRecoveryFailed:
+    generation: int
+    reason: VoiceMediaEndReason
+    error_kind: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,6 +129,7 @@ class _PumpFailed:
     pump: str
     error_kind: str
     retryable_provider: bool = False
+    media_generation: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,6 +196,8 @@ _ControlEvent = (
     _ProviderEvent
     | _StopRequested
     | _MediaEnded
+    | _MediaRecovered
+    | _MediaRecoveryFailed
     | _PumpFailed
     | _WatchdogExpired
     | _ResponseDrained
@@ -219,6 +236,11 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
         self._provider_ready = asyncio.Event()
         self._result: asyncio.Future[VoiceRuntimeResult] | None = None
         self._media: VoiceMediaSession | None = None
+        self._pending_media: VoiceMediaSession | None = None
+        self._media_generation = 0
+        self._media_tasks: set[asyncio.Task[None]] = set()
+        self._media_recovery_task: asyncio.Task[None] | None = None
+        self._media_recovery_started_at: float | None = None
         self._provider: RealtimeVoiceProvider | None = None
         self._provider_session: RealtimeVoiceSession | None = None
         self._tasks: set[asyncio.Task[None]] = set()
@@ -277,11 +299,9 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
             )
             await self._connect_provider()
             self._spawn(self._control_loop(), "voice-control")
-            self._spawn(self._oopz_input_pump(), "voice-oopz-input")
+            self._start_media_pumps(self._require_media(), self._media_generation)
             self._spawn(self._provider_input_sender(), "voice-provider-input")
             self._spawn(self._provider_audio_router(), "voice-provider-audio")
-            self._spawn(self._oopz_output_pump(), "voice-oopz-output")
-            self._spawn(self._media_terminal_watcher(), "voice-media-terminal")
             self._spawn(self._watchdog(), "voice-watchdog")
             if self._task_mailbox is not None:
                 self._spawn(self._mailbox_listener(), "voice-task-mailbox")
@@ -404,22 +424,33 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
 
     async def _close_media_transport(self) -> None:
         media = self._media
-        if media is None:
+        pending = self._pending_media
+        self._pending_media = None
+        candidates: list[VoiceMediaSession] = []
+        if media is not None:
+            candidates.append(media)
+        if pending is not None and pending is not media:
+            candidates.append(pending)
+        if not candidates:
             return
-        try:
-            async with asyncio.timeout(min(0.25, self._settings.stop_timeout_seconds / 4)):
-                await media.flush_output()
-        except TimeoutError:
-            logger.warning(
-                "Voice output flush exceeded cleanup budget: session=%s",
-                opaque_ref(str(self._context.descriptor.session_id)),
-            )
-        except Exception as exc:
-            logger.warning(
-                "Voice output flush failed during cleanup: session=%s error=%s",
-                opaque_ref(str(self._context.descriptor.session_id)),
-                exception_kind(exc),
-            )
+        if media is not None:
+            try:
+                async with asyncio.timeout(min(0.25, self._settings.stop_timeout_seconds / 4)):
+                    await media.flush_output()
+            except TimeoutError:
+                logger.warning(
+                    "Voice output flush exceeded cleanup budget: session=%s",
+                    opaque_ref(str(self._context.descriptor.session_id)),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Voice output flush failed during cleanup: session=%s error=%s",
+                    opaque_ref(str(self._context.descriptor.session_id)),
+                    exception_kind(exc),
+                )
+        await asyncio.gather(*(self._close_one_media(candidate) for candidate in candidates))
+
+    async def _close_one_media(self, media: VoiceMediaSession) -> None:
         try:
             await media.aclose()
         except Exception as exc:
@@ -537,6 +568,163 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
         self._spawn(self._provider_event_pump(session), "voice-provider-events-recovered")
         return True
 
+    async def _begin_media_recovery(self, event: _MediaEnded) -> None:
+        recovery = self._media_recovery_task
+        if recovery is not None and not recovery.done():
+            return
+        self._media_recovery_started_at = time.monotonic()
+        self._user_speaking = False
+        if self._active_response is not None:
+            recovered = await self._interrupt_active_response(
+                notify_provider=True,
+                target_state=VoiceSessionState.RECOVERING,
+                count_barge_in=False,
+            )
+            if not recovered or (self._result is not None and self._result.done()):
+                return
+        else:
+            self._set_state(VoiceSessionState.RECOVERING)
+            await self._output.flush()
+            media = self._media
+            if media is not None:
+                with suppress(Exception):
+                    await media.flush_output()
+        try:
+            await self._sessions.mark_recovering(self._context.descriptor.session_id)
+        except Exception as exc:
+            logger.warning(
+                "Could not persist voice media recovery state: session=%s error=%s",
+                opaque_ref(str(self._context.descriptor.session_id)),
+                exception_kind(exc),
+            )
+        await self._cancel_media_pumps()
+        task = self._spawn(
+            self._recover_media(event.generation, event.reason, self._require_media()),
+            "voice-media-recovery",
+        )
+        self._media_recovery_task = task
+        logger.info(
+            "Voice owner media recovery started: session=%s generation=%d "
+            "grace_seconds=%d reason=%s",
+            opaque_ref(str(self._context.descriptor.session_id)),
+            event.generation,
+            self._settings.owner_leave_grace_seconds,
+            event.reason.value,
+        )
+
+    async def _recover_media(
+        self,
+        generation: int,
+        reason: VoiceMediaEndReason,
+        old_media: VoiceMediaSession,
+    ) -> None:
+        replacement: VoiceMediaSession | None = None
+        try:
+            async with asyncio.timeout(self._settings.owner_leave_grace_seconds):
+                await old_media.aclose()
+                replacement = await self._media_gateway.open(
+                    self._context.descriptor,
+                    self._context.lease,
+                )
+            self._pending_media = replacement
+            await self._control.put(_MediaRecovered(generation, replacement))
+        except asyncio.CancelledError:
+            if replacement is not None:
+                await self._discard_replacement_media(replacement)
+                if self._pending_media is replacement:
+                    self._pending_media = None
+            raise
+        except TimeoutError:
+            if replacement is not None:
+                await self._discard_replacement_media(replacement)
+            await self._control.put(_MediaRecoveryFailed(generation, reason, "timeout"))
+        except Exception as exc:
+            if replacement is not None:
+                await self._discard_replacement_media(replacement)
+            await self._control.put(_MediaRecoveryFailed(generation, reason, exception_kind(exc)))
+
+    async def _discard_replacement_media(self, media: VoiceMediaSession) -> None:
+        try:
+            async with asyncio.timeout(min(0.25, self._settings.stop_timeout_seconds / 4)):
+                await media.aclose()
+        except TimeoutError:
+            logger.warning(
+                "Replacement voice media close exceeded cleanup budget: session=%s",
+                opaque_ref(str(self._context.descriptor.session_id)),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Replacement voice media close failed: session=%s error=%s",
+                opaque_ref(str(self._context.descriptor.session_id)),
+                exception_kind(exc),
+            )
+
+    async def _handle_media_recovered(self, event: _MediaRecovered) -> None:
+        if event.generation != self._media_generation or self._closed:
+            if self._pending_media is event.media:
+                self._pending_media = None
+            self._spawn(self._close_one_media(event.media), "voice-stale-media-close")
+            return
+        self._pending_media = None
+        self._media = event.media
+        self._media_generation += 1
+        self._media_recovery_task = None
+        recovered_at = time.monotonic()
+        started_at = self._media_recovery_started_at
+        recovery_ms = (recovered_at - started_at) * 1000 if started_at is not None else 0.0
+        self._media_recovery_started_at = None
+        self._last_activity = recovered_at
+        self._stats = replace(
+            self._stats,
+            media_reconnects=self._stats.media_reconnects + 1,
+            last_media_recovery_ms=recovery_ms,
+            max_media_recovery_ms=max(self._stats.max_media_recovery_ms, recovery_ms),
+        )
+        self._start_media_pumps(event.media, self._media_generation)
+        self._set_state(
+            VoiceSessionState.LISTENING
+            if self._provider_ready.is_set()
+            else VoiceSessionState.RECOVERING
+        )
+        if self._provider_ready.is_set():
+            try:
+                await self._sessions.mark_active(self._context.descriptor.session_id)
+            except Exception as exc:
+                logger.warning(
+                    "Could not persist recovered voice media state: session=%s error=%s",
+                    opaque_ref(str(self._context.descriptor.session_id)),
+                    exception_kind(exc),
+                )
+        logger.info(
+            "Voice owner media recovered: session=%s generation=%d recovery_ms=%.1f",
+            opaque_ref(str(self._context.descriptor.session_id)),
+            self._media_generation,
+            recovery_ms,
+        )
+
+    def _handle_media_recovery_failed(self, event: _MediaRecoveryFailed) -> None:
+        if event.generation != self._media_generation:
+            return
+        self._media_recovery_task = None
+        self._media_recovery_started_at = None
+        self._stats = replace(
+            self._stats,
+            media_recovery_failures=self._stats.media_recovery_failures + 1,
+        )
+        logger.info(
+            "Voice owner media recovery ended: session=%s generation=%d error=%s",
+            opaque_ref(str(self._context.descriptor.session_id)),
+            event.generation,
+            event.error_kind,
+        )
+        self._set_state(VoiceSessionState.CLOSING)
+        self._complete(
+            VoiceStopReason.OWNER_LEFT
+            if event.reason
+            in {VoiceMediaEndReason.OWNER_LEFT, VoiceMediaEndReason.OWNER_UNPUBLISHED}
+            else VoiceStopReason.MEDIA_ENDED
+        )
+
     async def _control_loop(self) -> None:
         while not self._closed:
             event = await self._control.get()
@@ -549,6 +737,15 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                 self._complete(event.reason)
                 return
             if isinstance(event, _MediaEnded):
+                if event.generation != self._media_generation:
+                    continue
+                if (
+                    event.reason
+                    in {VoiceMediaEndReason.OWNER_LEFT, VoiceMediaEndReason.OWNER_UNPUBLISHED}
+                    and self._settings.owner_leave_grace_seconds > 0
+                ):
+                    await self._begin_media_recovery(event)
+                    continue
                 self._set_state(VoiceSessionState.CLOSING)
                 reason = (
                     VoiceStopReason.OWNER_LEFT
@@ -561,7 +758,20 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                 )
                 self._complete(reason)
                 return
+            if isinstance(event, _MediaRecovered):
+                await self._handle_media_recovered(event)
+                continue
+            if isinstance(event, _MediaRecoveryFailed):
+                if event.generation != self._media_generation:
+                    continue
+                self._handle_media_recovery_failed(event)
+                return
             if isinstance(event, _PumpFailed):
+                if (
+                    event.media_generation is not None
+                    and event.media_generation != self._media_generation
+                ):
+                    continue
                 if event.retryable_provider and await self._recover_provider():
                     if event.pump == "provider_input":
                         self._spawn(
@@ -636,13 +846,17 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                     recovery_ms,
                 )
                 self._set_state(
-                    VoiceSessionState.USER_SPEAKING
-                    if self._user_speaking
-                    else VoiceSessionState.LISTENING
+                    VoiceSessionState.RECOVERING
+                    if self._media_recovery_started_at is not None
+                    else (
+                        VoiceSessionState.USER_SPEAKING
+                        if self._user_speaking
+                        else VoiceSessionState.LISTENING
+                    )
                 )
                 self._provider_ready.set()
                 self._handle_mailbox_available()
-                if self._started:
+                if self._started and self._media_recovery_started_at is None:
                     try:
                         await self._sessions.mark_active(self._context.descriptor.session_id)
                     except Exception as exc:
@@ -1418,8 +1632,11 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
         for key, value in usage.items():
             self._usage[key] = self._usage.get(key, 0) + value
 
-    async def _oopz_input_pump(self) -> None:
-        media = self._require_media()
+    async def _oopz_input_pump(
+        self,
+        media: VoiceMediaSession,
+        generation: int,
+    ) -> None:
         ingress = VoiceAudioIngress()
         try:
             async for frame in media.input_frames():
@@ -1452,7 +1669,13 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            await self._control.put(_PumpFailed("oopz_input", exception_kind(exc)))
+            await self._control.put(
+                _PumpFailed(
+                    "oopz_input",
+                    exception_kind(exc),
+                    media_generation=generation,
+                )
+            )
 
     async def _provider_input_sender(self) -> None:
         try:
@@ -1544,8 +1767,11 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                 _PumpFailed("provider_events", exception_kind(exc), retryable_provider=True)
             )
 
-    async def _oopz_output_pump(self) -> None:
-        media = self._require_media()
+    async def _oopz_output_pump(
+        self,
+        media: VoiceMediaSession,
+        generation: int,
+    ) -> None:
         try:
             while True:
                 chunk = await self._output.get()
@@ -1574,17 +1800,31 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            await self._control.put(_PumpFailed("oopz_output", exception_kind(exc)))
+            await self._control.put(
+                _PumpFailed(
+                    "oopz_output",
+                    exception_kind(exc),
+                    media_generation=generation,
+                )
+            )
 
-    async def _media_terminal_watcher(self) -> None:
+    async def _media_terminal_watcher(
+        self,
+        media: VoiceMediaSession,
+        generation: int,
+    ) -> None:
         try:
-            terminal = await self._require_media().wait_input_closed()
-            await self._control.put(_MediaEnded(terminal.reason, terminal.error_kind))
+            terminal = await media.wait_input_closed()
+            await self._control.put(_MediaEnded(generation, terminal.reason, terminal.error_kind))
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             await self._control.put(
-                _MediaEnded(VoiceMediaEndReason.TRANSPORT_LOST, exception_kind(exc))
+                _MediaEnded(
+                    generation,
+                    VoiceMediaEndReason.TRANSPORT_LOST,
+                    exception_kind(exc),
+                )
             )
 
     async def _watchdog(self) -> None:
@@ -1598,6 +1838,34 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
             if now - self._last_activity >= idle_seconds:
                 await self._control.put(_WatchdogExpired(VoiceStopReason.IDLE_TIMEOUT))
                 return
+
+    def _start_media_pumps(self, media: VoiceMediaSession, generation: int) -> None:
+        self._spawn_media(
+            self._oopz_input_pump(media, generation),
+            "voice-oopz-input",
+        )
+        self._spawn_media(
+            self._oopz_output_pump(media, generation),
+            "voice-oopz-output",
+        )
+        self._spawn_media(
+            self._media_terminal_watcher(media, generation),
+            "voice-media-terminal",
+        )
+
+    async def _cancel_media_pumps(self) -> None:
+        current = asyncio.current_task()
+        tasks = tuple(task for task in self._media_tasks if task is not current)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    def _spawn_media(self, coroutine, label: str) -> asyncio.Task[None]:
+        task = self._spawn(coroutine, label)
+        self._media_tasks.add(task)
+        task.add_done_callback(self._media_tasks.discard)
+        return task
 
     def _spawn(self, coroutine, label: str) -> asyncio.Task[None]:
         task = asyncio.create_task(

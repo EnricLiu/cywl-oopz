@@ -110,6 +110,7 @@ async def runtime_fixture(
     task_mailbox=None,
     capabilities=None,
     status_sink=None,
+    settings_overrides: dict[str, str] | None = None,
 ):
     access = FakeVoiceAccessGateway()
     channel = VoiceChannelKey("area", "voice")
@@ -140,7 +141,7 @@ async def runtime_fixture(
 
     runtime = RealtimeVoiceSessionRuntimeImpl(
         context,
-        settings(),
+        settings(**(settings_overrides or {})),
         media,
         sessions,
         build_provider,
@@ -1053,8 +1054,52 @@ async def test_realtime_runtime_reconnects_with_only_confirmed_bounded_context(
 
 
 @pytest.mark.asyncio
-async def test_realtime_runtime_ends_when_owner_leaves() -> None:
-    runtime, media, _, providers = await runtime_fixture()
+async def test_realtime_runtime_recovers_owner_media_within_grace() -> None:
+    runtime, media, _, providers = await runtime_fixture(
+        settings_overrides={"CYWL_VOICE_OWNER_LEAVE_GRACE_SECONDS": "1"}
+    )
+    starting = asyncio.create_task(runtime.start())
+    await wait_until(lambda: bool(providers and providers[0].sessions))
+    provider_session = providers[0].sessions[0]
+    await provider_session.emit(VoiceSessionReady())
+    await starting
+    first_media = media.sessions[0]
+
+    await first_media.end_input(VoiceMediaEndReason.OWNER_UNPUBLISHED)
+    await wait_until(lambda: len(media.sessions) == 2)
+    await wait_until(lambda: runtime.state is VoiceSessionState.LISTENING)
+    recovered_media = media.sessions[1]
+    source = VoiceAudioFormat(48_000, 2, "f32le")
+    frame_pcm = np.zeros((1_024, 2), dtype="<f4").tobytes()
+    await recovered_media.push_input(RemoteAudioFrame(frame_pcm, source, 1, 1.0))
+    await recovered_media.push_input(RemoteAudioFrame(frame_pcm, source, 2, 1.02))
+    await wait_until(lambda: bool(provider_session.sent_audio))
+    await provider_session.emit(VoiceResponseStarted("response-after-media-recovery"))
+    await provider_session.emit(
+        VoiceAssistantAudio(
+            PcmChunk(b"\x00" * 960, PROVIDER_OUTPUT_FORMAT, 20, generation=0),
+            "response-after-media-recovery",
+            "item-after-media-recovery",
+        )
+    )
+    await wait_until(lambda: bool(recovered_media.outputs))
+
+    assert first_media.closed is True
+    assert not first_media.outputs
+    assert len(providers) == 1
+    assert runtime.stats.media_reconnects == 1
+    assert runtime.stats.media_recovery_failures == 0
+    assert runtime.stats.last_media_recovery_ms > 0
+    await runtime.request_stop(VoiceStopReason.COMMAND)
+    assert (await runtime.wait_finished()).reason is VoiceStopReason.COMMAND
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_realtime_runtime_owner_leave_is_immediate_when_grace_is_disabled() -> None:
+    runtime, media, _, providers = await runtime_fixture(
+        settings_overrides={"CYWL_VOICE_OWNER_LEAVE_GRACE_SECONDS": "0"}
+    )
     starting = asyncio.create_task(runtime.start())
     await wait_until(lambda: bool(providers and providers[0].sessions))
     await providers[0].sessions[0].emit(VoiceSessionReady())
@@ -1063,6 +1108,117 @@ async def test_realtime_runtime_ends_when_owner_leaves() -> None:
     await media.sessions[0].end_input(VoiceMediaEndReason.OWNER_LEFT)
 
     assert (await runtime.wait_finished()).reason is VoiceStopReason.OWNER_LEFT
+    assert len(media.sessions) == 1
+    assert runtime.stats.media_reconnects == 0
+    assert runtime.stats.media_recovery_failures == 0
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_realtime_runtime_ends_when_owner_media_grace_expires() -> None:
+    runtime, media, _, providers = await runtime_fixture(
+        settings_overrides={"CYWL_VOICE_OWNER_LEAVE_GRACE_SECONDS": "1"}
+    )
+    starting = asyncio.create_task(runtime.start())
+    await wait_until(lambda: bool(providers and providers[0].sessions))
+    await providers[0].sessions[0].emit(VoiceSessionReady())
+    await starting
+    reopen_cancelled = asyncio.Event()
+    never = asyncio.Event()
+
+    async def stalled_open(descriptor, lease):
+        del descriptor, lease
+        try:
+            await never.wait()
+        finally:
+            reopen_cancelled.set()
+
+    media.open = stalled_open
+    await media.sessions[0].end_input(VoiceMediaEndReason.OWNER_LEFT)
+
+    async with asyncio.timeout(2):
+        result = await runtime.wait_finished()
+    assert result.reason is VoiceStopReason.OWNER_LEFT
+    assert reopen_cancelled.is_set()
+    assert runtime.stats.media_reconnects == 0
+    assert runtime.stats.media_recovery_failures == 1
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_realtime_runtime_stop_preempts_owner_media_recovery() -> None:
+    runtime, media, _, providers = await runtime_fixture(
+        settings_overrides={"CYWL_VOICE_OWNER_LEAVE_GRACE_SECONDS": "10"}
+    )
+    starting = asyncio.create_task(runtime.start())
+    await wait_until(lambda: bool(providers and providers[0].sessions))
+    await providers[0].sessions[0].emit(VoiceSessionReady())
+    await starting
+    reopen_started = asyncio.Event()
+    reopen_cancelled = asyncio.Event()
+    never = asyncio.Event()
+
+    async def stalled_open(descriptor, lease):
+        del descriptor, lease
+        reopen_started.set()
+        try:
+            await never.wait()
+        finally:
+            reopen_cancelled.set()
+
+    media.open = stalled_open
+    await media.sessions[0].end_input(VoiceMediaEndReason.OWNER_LEFT)
+    await reopen_started.wait()
+    await wait_until(lambda: runtime.state is VoiceSessionState.RECOVERING)
+
+    await runtime.request_stop(VoiceStopReason.COMMAND)
+    assert (await runtime.wait_finished()).reason is VoiceStopReason.COMMAND
+    async with asyncio.timeout(2):
+        await runtime.aclose()
+
+    assert reopen_cancelled.is_set()
+    assert runtime._pending_media is None
+    assert not runtime._tasks
+
+
+@pytest.mark.asyncio
+async def test_realtime_runtime_waits_for_media_and_provider_when_both_recover() -> None:
+    runtime, media, sessions, providers = await runtime_fixture(
+        settings_overrides={"CYWL_VOICE_OWNER_LEAVE_GRACE_SECONDS": "2"}
+    )
+    starting = asyncio.create_task(runtime.start())
+    await wait_until(lambda: bool(providers and providers[0].sessions))
+    first_provider_session = providers[0].sessions[0]
+    await first_provider_session.emit(VoiceSessionReady())
+    await starting
+    original_open = media.open
+    reopen_started = asyncio.Event()
+    allow_reopen = asyncio.Event()
+
+    async def delayed_open(descriptor, lease):
+        reopen_started.set()
+        await allow_reopen.wait()
+        return await original_open(descriptor, lease)
+
+    media.open = delayed_open
+    await media.sessions[0].end_input(VoiceMediaEndReason.OWNER_UNPUBLISHED)
+    await reopen_started.wait()
+    await first_provider_session.emit(VoiceProviderFailed("connection_closed", True))
+    await wait_until(lambda: len(providers) == 2 and bool(providers[1].sessions))
+    await providers[1].sessions[0].emit(VoiceSessionReady())
+    await wait_until(lambda: runtime._provider_ready.is_set())
+
+    assert runtime.state is VoiceSessionState.RECOVERING
+    assert not sessions.active
+    allow_reopen.set()
+    await wait_until(lambda: len(media.sessions) == 2)
+    await wait_until(lambda: runtime.state is VoiceSessionState.LISTENING)
+    assert runtime.stats.provider_reconnects == 1
+    assert runtime.stats.media_reconnects == 1
+    assert sessions.active == [runtime._context.descriptor.session_id]
+
+    await runtime.request_stop(VoiceStopReason.COMMAND)
+    await runtime.wait_finished()
     await runtime.aclose()
 
 
