@@ -90,6 +90,10 @@ class PcmChunk:
             raise ValueError("PCM chunk must contain aligned samples")
         if self.duration_ms <= 0 or self.generation < 0:
             raise ValueError("PCM duration must be positive and generation non-negative")
+        sample_count = len(self.pcm) // self.format.frame_width_bytes
+        duration_error = abs(sample_count * 1000 - self.format.sample_rate * self.duration_ms)
+        if duration_error * 2 > self.format.sample_rate:
+            raise ValueError("PCM byte length must match its rounded duration")
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +113,13 @@ class PlaybackCursor:
             raise ValueError("Playback cursor sample counts must not be negative")
         if self.rendered_samples > self.accepted_samples:
             raise ValueError("Rendered samples cannot exceed accepted samples")
+        if self.rendered_samples + self.buffered_samples > self.accepted_samples:
+            raise ValueError("Rendered and buffered samples cannot exceed accepted samples")
+
+    @property
+    def rendered_ms(self) -> int:
+        """Return the real playout position rounded down to milliseconds."""
+        return self.rendered_samples * 1000 // self.sample_rate
 
 
 class VoiceSessionState(StrEnum):

@@ -45,3 +45,11 @@ class VoiceSessionStartTimeoutError(VoiceConversationError):
 
 class VoiceSessionStartCancelledError(VoiceConversationError):
     """The owner stopped a session while it was still starting."""
+
+
+class VoiceAudioQueueClosedError(VoiceConversationError):
+    """A media pump attempted to use a closed transit queue."""
+
+
+class VoiceOutputBackpressureError(VoiceConversationError):
+    """Provider output could not make progress before its hard timeout."""
