@@ -21,6 +21,7 @@ from cywl_oopz.features.voice.models import (
     VoiceProviderCapabilities,
     VoiceRuntimeResult,
     VoiceSessionDescriptor,
+    VoiceSessionState,
     VoiceStopReason,
 )
 from cywl_oopz.features.voice.ports import VoiceSessionRuntimeContext
@@ -150,7 +151,9 @@ class FakeVoiceSessionRepository:
     def __init__(self) -> None:
         self.created: list[tuple[VoiceSessionDescriptor, VoiceStartConfiguration]] = []
         self.active: list[UUID] = []
+        self.recovering: list[UUID] = []
         self.finished: list[tuple[UUID, PersistedVoiceSessionStatus, str]] = []
+        self.finished_usage: list[dict[str, object]] = []
         self.turns: list[tuple[UUID, int, VoiceTurnRole, str]] = []
 
     async def create(self, descriptor, configuration) -> None:
@@ -159,9 +162,13 @@ class FakeVoiceSessionRepository:
     async def mark_active(self, session_id: UUID) -> None:
         self.active.append(session_id)
 
+    async def mark_recovering(self, session_id: UUID) -> None:
+        self.recovering.append(session_id)
+
     async def finish(self, session_id, status, stop_reason, *, usage=None, summary="") -> None:
-        del usage, summary
+        del summary
         self.finished.append((session_id, status, stop_reason))
+        self.finished_usage.append(dict(usage or {}))
 
     async def append_final_turn(
         self,
@@ -298,6 +305,20 @@ class FakeVoiceMediaSession:
         await self._inputs.put(None)
 
 
+class FakeVoiceMediaGateway:
+    """Open a fresh inspectable media session for each runtime."""
+
+    def __init__(self) -> None:
+        self.opens: list[tuple[VoiceSessionDescriptor, object]] = []
+        self.sessions: list[FakeVoiceMediaSession] = []
+
+    async def open(self, descriptor, lease) -> FakeVoiceMediaSession:
+        session = FakeVoiceMediaSession()
+        self.opens.append((descriptor, lease))
+        self.sessions.append(session)
+        return session
+
+
 class FakeRealtimeVoiceSession:
     """Record Provider input and yield explicitly emitted model events."""
 
@@ -367,9 +388,16 @@ class FakeVoiceSessionRuntime:
         self.stop_requests: list[VoiceStopReason] = []
         self._finished = asyncio.Event()
         self._result = VoiceRuntimeResult(VoiceStopReason.RUNTIME_ENDED)
+        self.usage: dict[str, object] = {}
+        self._state = VoiceSessionState.STARTING
+
+    @property
+    def state(self) -> VoiceSessionState:
+        return self._state
 
     async def start(self) -> None:
         self.started = True
+        self._state = VoiceSessionState.LISTENING
 
     async def wait_finished(self) -> VoiceRuntimeResult:
         await self._finished.wait()
@@ -377,17 +405,20 @@ class FakeVoiceSessionRuntime:
 
     async def request_stop(self, reason: VoiceStopReason) -> None:
         self.stop_requests.append(reason)
-        self._result = VoiceRuntimeResult(reason)
+        self._state = VoiceSessionState.CLOSING
+        self._result = VoiceRuntimeResult(reason, dict(self.usage))
         self._finished.set()
 
     async def finish(self, reason: VoiceStopReason = VoiceStopReason.RUNTIME_ENDED) -> None:
-        self._result = VoiceRuntimeResult(reason)
+        self._result = VoiceRuntimeResult(reason, dict(self.usage))
+        self._state = VoiceSessionState.CLOSED
         self._finished.set()
 
     async def aclose(self) -> None:
         if self.closed:
             return
         self.closed = True
+        self._state = VoiceSessionState.CLOSED
         self._finished.set()
 
 

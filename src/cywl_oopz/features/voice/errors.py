@@ -78,3 +78,31 @@ class VoiceModelSelectionError(VoiceConversationError):
 
 class VoiceSpeakerSelectionError(VoiceConversationError):
     """A requested Provider voice identifier is malformed."""
+
+
+class VoiceProviderError(VoiceConversationError):
+    """Base class for sanitized realtime Provider failures."""
+
+
+class VoiceProviderConfigurationError(VoiceProviderError):
+    """Pinned Provider configuration cannot be used by its adapter."""
+
+
+class VoiceProviderAuthenticationError(VoiceProviderError):
+    """Provider rejected the configured credentials."""
+
+
+class VoiceProviderRateLimitedError(VoiceProviderError):
+    """Provider temporarily rejected the session or audio stream."""
+
+
+class VoiceProviderProtocolError(VoiceProviderError):
+    """Provider sent malformed or internally inconsistent wire data."""
+
+
+class VoiceProviderDisconnectedError(VoiceProviderError):
+    """Provider WebSocket disconnected before a clean session finish."""
+
+
+class VoiceProviderAudioFormatError(VoiceProviderProtocolError):
+    """Provider audio is malformed or incompatible with the pinned format."""

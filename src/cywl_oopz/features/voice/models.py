@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
 
@@ -147,6 +147,11 @@ class VoiceStopReason(StrEnum):
     SHUTDOWN = "shutdown"
     RUNTIME_ENDED = "runtime_ended"
     START_FAILED = "start_failed"
+    IDLE_TIMEOUT = "idle_timeout"
+    MAX_DURATION = "max_duration"
+    OWNER_LEFT = "owner_left"
+    MEDIA_ENDED = "media_ended"
+    PROVIDER_FAILED = "provider_failed"
 
 
 class VoiceMediaEndReason(StrEnum):
@@ -214,6 +219,7 @@ class VoiceRuntimeResult:
     """Terminal result returned by a session runtime."""
 
     reason: VoiceStopReason
+    usage: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

@@ -117,6 +117,7 @@ from .features.voice.repository import (
     SqlAlchemyVoiceConfigurationRepository,
     SqlAlchemyVoiceSessionRepository,
 )
+from .features.voice.runtime import RealtimeVoiceSessionRuntimeFactoryImpl
 from .features.voice.service import VoiceConversationService
 from .features.web.browser import BrowserSessionManager
 from .features.web.errors import BrowserError
@@ -135,7 +136,7 @@ from .integrations.oopz.voice_conversation import (
 )
 from .integrations.oopz.voice_lease import OopzVoiceLeaseManager
 from .integrations.oopz.voice_media import OopzVoiceMediaGateway
-from .integrations.voice.unavailable import UnavailableVoiceSessionRuntimeFactory
+from .integrations.voice.qwen_omni import QwenOmniProviderBuilder
 from .integrations.web.agent_browser_mcp import AgentBrowserMcpGateway
 from .integrations.web.duckduckgo import DuckDuckGoSearchGateway
 from .settings import (
@@ -452,10 +453,16 @@ class BotApplication:
             self.database.session_factory
         )
         self.voice_sessions = SqlAlchemyVoiceSessionRepository(self.database.session_factory)
+        self.voice_runtimes = RealtimeVoiceSessionRuntimeFactoryImpl(
+            settings.voice,
+            self.voice_media,
+            self.voice_sessions,
+            QwenOmniProviderBuilder(),
+        )
         self.voice_conversations = VoiceConversationService(
             settings.voice,
             OopzConversationVoiceAccess(self.bot, self.voice_leases),
-            UnavailableVoiceSessionRuntimeFactory(),
+            self.voice_runtimes,
             self.voice_configurations,
             self.voice_sessions,
         )

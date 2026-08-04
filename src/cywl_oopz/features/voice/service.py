@@ -7,6 +7,7 @@ import logging
 import time
 from contextlib import suppress
 from dataclasses import dataclass, field
+from typing import Any
 from uuid import UUID, uuid4
 
 from cywl_oopz.core.observability import exception_kind, opaque_ref
@@ -56,6 +57,7 @@ class _ActiveVoiceSession:
     runtime: VoiceSessionRuntime | None = None
     configuration: VoiceStartConfiguration | None = None
     persisted: bool = False
+    usage: dict[str, Any] = field(default_factory=dict)
     startup_task: asyncio.Task[object] | None = None
     task: asyncio.Task[None] | None = None
     stop_requested: bool = False
@@ -236,6 +238,9 @@ class VoiceConversationService:
         try:
             result = await runtime.wait_finished()
             reason = result.reason
+            slot.usage = dict(result.usage)
+            if reason in {VoiceStopReason.PROVIDER_FAILED, VoiceStopReason.MEDIA_ENDED}:
+                state = VoiceSessionState.FAILED
         except asyncio.CancelledError:
             reason = VoiceStopReason.SHUTDOWN
             raise
@@ -321,6 +326,7 @@ class VoiceConversationService:
                         slot.session_id,
                         persisted_status,
                         reason.value,
+                        usage=slot.usage,
                     )
                 except Exception as exc:
                     logger.warning(
@@ -356,11 +362,12 @@ class VoiceConversationService:
         *,
         active: bool = True,
     ) -> VoiceSessionStatus:
+        runtime_state = slot.runtime.state if active and slot.runtime is not None else slot.state
         return VoiceSessionStatus(
             active=active,
             session_id=slot.session_id,
             owner_person_id=slot.request.owner_person_id,
             voice_channel=slot.voice_channel,
-            state=slot.state,
+            state=runtime_state,
             elapsed_seconds=max(0.0, time.monotonic() - slot.started_at_monotonic),
         )

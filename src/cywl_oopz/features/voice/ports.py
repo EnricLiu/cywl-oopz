@@ -17,6 +17,7 @@ from .models import (
     VoiceProviderCapabilities,
     VoiceRuntimeResult,
     VoiceSessionDescriptor,
+    VoiceSessionState,
     VoiceStopReason,
 )
 from .settings import (
@@ -112,6 +113,9 @@ class VoiceSessionRuntimeContext:
 class VoiceSessionRuntime(Protocol):
     """Coordinator runtime controlled by the single-active-session facade."""
 
+    @property
+    def state(self) -> VoiceSessionState: ...
+
     async def start(self) -> None: ...
 
     async def wait_finished(self) -> VoiceRuntimeResult: ...
@@ -158,6 +162,8 @@ class VoiceSessionRepository(Protocol):
     ) -> None: ...
 
     async def mark_active(self, session_id: UUID) -> None: ...
+
+    async def mark_recovering(self, session_id: UUID) -> None: ...
 
     async def finish(
         self,

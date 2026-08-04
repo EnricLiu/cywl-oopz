@@ -300,6 +300,14 @@ class SqlAlchemyVoiceSessionRepository:
             "mark voice session active",
         )
 
+    async def mark_recovering(self, session_id: UUID) -> None:
+        await self._update_session(
+            update(VoiceSessionRecord)
+            .where(VoiceSessionRecord.id == session_id)
+            .values(status=PersistedVoiceSessionStatus.RECOVERING),
+            "mark voice session recovering",
+        )
+
     async def finish(
         self,
         session_id: UUID,

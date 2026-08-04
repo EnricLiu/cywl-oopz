@@ -101,10 +101,12 @@ async def test_voice_service_pins_fresh_configuration_and_persists_lifecycle() -
     assert sessions.created[0][0].session_id == active.session_id
     assert sessions.active == [active.session_id]
     assert runtimes.contexts[0].configuration is sessions.created[0][1]
+    runtimes.runtimes[0].usage = {"input_tokens": 4, "output_tokens": 2}
 
     await conversations.stop("person")
 
     assert sessions.finished == [(active.session_id, PersistedVoiceSessionStatus.ENDED, "command")]
+    assert sessions.finished_usage == [{"input_tokens": 4, "output_tokens": 2}]
     await conversations.aclose()
 
 
@@ -180,6 +182,35 @@ async def test_voice_service_cleans_up_after_runtime_ends_without_stop_command()
     assert (await conversations.status()).active is False
     assert access.release_count == 1
     assert runtimes.runtimes[0].closed is True
+    await conversations.aclose()
+
+
+@pytest.mark.asyncio
+async def test_voice_service_persists_provider_terminal_as_failed_with_usage() -> None:
+    access = FakeVoiceAccessGateway()
+    access.channels[("area", "person")] = "voice"
+    runtimes = FakeVoiceSessionRuntimeFactory()
+    sessions = FakeVoiceSessionRepository()
+    conversations = VoiceConversationService(
+        settings(),
+        access,
+        runtimes,
+        FakeVoiceConfigurationRepository(),
+        sessions,
+    )
+    active = await conversations.start(request())
+    runtimes.runtimes[0].usage = {"total_tokens": 7}
+
+    await runtimes.runtimes[0].finish(VoiceStopReason.PROVIDER_FAILED)
+    for _ in range(10):
+        if not (await conversations.status()).active:
+            break
+        await asyncio.sleep(0)
+
+    assert sessions.finished == [
+        (active.session_id, PersistedVoiceSessionStatus.FAILED, "provider_failed")
+    ]
+    assert sessions.finished_usage == [{"total_tokens": 7}]
     await conversations.aclose()
 
 
