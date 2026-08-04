@@ -989,6 +989,91 @@ async def test_realtime_runtime_counts_exhausted_provider_recovery() -> None:
 
 
 @pytest.mark.asyncio
+async def test_realtime_runtime_bounds_the_whole_provider_recovery_attempt() -> None:
+    runtime, _, _, providers = await runtime_fixture(
+        settings_overrides={
+            "CYWL_VOICE_START_TIMEOUT_SECONDS": "0.05",
+            "CYWL_VOICE_PROVIDER_CONNECT_ATTEMPTS": "5",
+        }
+    )
+    starting = asyncio.create_task(runtime.start())
+    await wait_until(lambda: bool(providers and providers[0].sessions))
+    first_session = providers[0].sessions[0]
+    await first_session.emit(VoiceSessionReady())
+    await starting
+    connect_cancelled = asyncio.Event()
+    stalled_providers: list[FakeRealtimeVoiceProvider] = []
+
+    class StalledProvider(FakeRealtimeVoiceProvider):
+        async def connect(self, descriptor):
+            del descriptor
+            try:
+                await asyncio.Event().wait()
+            finally:
+                connect_cancelled.set()
+
+    def build_stalled_provider(context):
+        del context
+        provider = StalledProvider()
+        stalled_providers.append(provider)
+        return provider
+
+    runtime._provider_builder = build_stalled_provider
+    started_at = time.monotonic()
+    await first_session.emit(VoiceProviderFailed("connection_closed", True))
+
+    async with asyncio.timeout(0.5):
+        result = await runtime.wait_finished()
+    assert time.monotonic() - started_at < 0.5
+    assert result.reason is VoiceStopReason.PROVIDER_FAILED
+    assert connect_cancelled.is_set()
+    assert all(provider.closed for provider in stalled_providers)
+    assert runtime.stats.provider_reconnects == 0
+    assert runtime.stats.provider_recovery_failures == 1
+    assert runtime.stats.provider_connect_attempts == 2
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_realtime_runtime_stop_preempts_provider_recovery() -> None:
+    runtime, _, _, providers = await runtime_fixture(
+        settings_overrides={
+            "CYWL_VOICE_START_TIMEOUT_SECONDS": "10",
+            "CYWL_VOICE_PROVIDER_CONNECT_ATTEMPTS": "5",
+        }
+    )
+    starting = asyncio.create_task(runtime.start())
+    await wait_until(lambda: bool(providers and providers[0].sessions))
+    first_session = providers[0].sessions[0]
+    await first_session.emit(VoiceSessionReady())
+    await starting
+    connect_started = asyncio.Event()
+    connect_cancelled = asyncio.Event()
+
+    class StalledProvider(FakeRealtimeVoiceProvider):
+        async def connect(self, descriptor):
+            del descriptor
+            connect_started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                connect_cancelled.set()
+
+    runtime._provider_builder = lambda context: StalledProvider()
+    await first_session.emit(VoiceProviderFailed("connection_closed", True))
+    await connect_started.wait()
+    await runtime.request_stop(VoiceStopReason.COMMAND)
+
+    async with asyncio.timeout(0.5):
+        result = await runtime.wait_finished()
+    assert result.reason is VoiceStopReason.COMMAND
+    assert connect_cancelled.is_set()
+    assert runtime.state is VoiceSessionState.CLOSING
+    assert runtime.stats.provider_recovery_failures == 0
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
 async def test_realtime_runtime_reconnects_with_only_confirmed_bounded_context(
     monkeypatch,
 ) -> None:

@@ -235,6 +235,7 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
         self._state = VoiceSessionState.STARTING
         self._provider_ready = asyncio.Event()
         self._result: asyncio.Future[VoiceRuntimeResult] | None = None
+        self._stop_signal: asyncio.Future[VoiceStopReason] | None = None
         self._media: VoiceMediaSession | None = None
         self._pending_media: VoiceMediaSession | None = None
         self._media_generation = 0
@@ -292,7 +293,9 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                 return
             if self._closed:
                 raise RuntimeError("Voice runtime is closed")
-            self._result = asyncio.get_running_loop().create_future()
+            loop = asyncio.get_running_loop()
+            self._result = loop.create_future()
+            self._stop_signal = loop.create_future()
             self._media = await self._media_gateway.open(
                 self._context.descriptor,
                 self._context.lease,
@@ -339,6 +342,9 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
     async def request_stop(self, reason: VoiceStopReason) -> None:
         if self._closed:
             return
+        signal = self._stop_signal
+        if signal is not None and not signal.done():
+            signal.set_result(reason)
         await self._control.put(_StopRequested(reason))
 
     async def aclose(self) -> None:
@@ -549,7 +555,7 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
             with suppress(Exception):
                 await old_provider.aclose()
         try:
-            await self._connect_provider()
+            connected = await self._connect_provider_with_recovery_budget()
         except Exception as exc:
             self._stats = replace(
                 self._stats,
@@ -557,16 +563,58 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
             )
             self._recovery_started_at = None
             logger.warning(
-                "Voice Provider recovery exhausted: session=%s error=%s",
+                "Voice Provider recovery exhausted: session=%s budget_seconds=%.2f error=%s",
                 opaque_ref(str(self._context.descriptor.session_id)),
+                self._settings.start_timeout_seconds,
                 exception_kind(exc),
             )
+            return False
+        if not connected:
+            self._recovery_started_at = None
+            signal = self._stop_signal
+            reason = (
+                signal.result()
+                if signal is not None and signal.done() and not signal.cancelled()
+                else VoiceStopReason.COMMAND
+            )
+            logger.info(
+                "Voice Provider recovery preempted: session=%s reason=%s",
+                opaque_ref(str(self._context.descriptor.session_id)),
+                reason.value,
+            )
+            self._set_state(VoiceSessionState.CLOSING)
+            self._complete(reason)
             return False
         session = self._provider_session
         if session is None:  # pragma: no cover - guarded by _connect_provider
             return False
         self._spawn(self._provider_event_pump(session), "voice-provider-events-recovered")
         return True
+
+    async def _connect_provider_with_recovery_budget(self) -> bool:
+        """Race the bounded reconnect sequence against an explicit runtime stop."""
+        connect_task = asyncio.create_task(
+            self._connect_provider(),
+            name=f"voice-provider-reconnect:{self._context.descriptor.session_id}",
+        )
+        signal = self._stop_signal
+        try:
+            async with asyncio.timeout(self._settings.start_timeout_seconds):
+                if signal is None:  # pragma: no cover - start ordering invariant
+                    await connect_task
+                    return True
+                done, _ = await asyncio.wait(
+                    {connect_task, signal},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if signal in done:
+                    return False
+                await connect_task
+                return True
+        finally:
+            if not connect_task.done():
+                connect_task.cancel()
+            await asyncio.gather(connect_task, return_exceptions=True)
 
     async def _begin_media_recovery(self, event: _MediaEnded) -> None:
         recovery = self._media_recovery_task
@@ -772,18 +820,21 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                     and event.media_generation != self._media_generation
                 ):
                     continue
-                if event.retryable_provider and await self._recover_provider():
-                    if event.pump == "provider_input":
-                        self._spawn(
-                            self._provider_input_sender(),
-                            "voice-provider-input-recovered",
-                        )
-                    elif event.pump == "provider_output_backpressure":
-                        self._spawn(
-                            self._provider_audio_router(),
-                            "voice-provider-audio-recovered",
-                        )
-                    continue
+                if event.retryable_provider:
+                    if await self._recover_provider():
+                        if event.pump == "provider_input":
+                            self._spawn(
+                                self._provider_input_sender(),
+                                "voice-provider-input-recovered",
+                            )
+                        elif event.pump == "provider_output_backpressure":
+                            self._spawn(
+                                self._provider_audio_router(),
+                                "voice-provider-audio-recovered",
+                            )
+                        continue
+                    if self._result is not None and self._result.done():
+                        return
                 self._set_state(VoiceSessionState.FAILED)
                 reason = (
                     VoiceStopReason.PROVIDER_FAILED
@@ -927,6 +978,8 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                     await self._defer_pending_proactive_notifications()
                 if model_event.retryable and await self._recover_provider():
                     continue
+                if self._result is not None and self._result.done():
+                    return
                 self._set_state(VoiceSessionState.FAILED)
                 self._complete(VoiceStopReason.PROVIDER_FAILED)
                 return
@@ -1320,6 +1373,8 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                 exception_kind(exc),
             )
             if not await self._recover_provider():
+                if self._result is not None and self._result.done():
+                    return
                 self._set_state(VoiceSessionState.FAILED)
                 self._complete(VoiceStopReason.PROVIDER_FAILED)
             return
@@ -1580,6 +1635,8 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                     )
                     if await self._recover_provider(playout_flushed=True):
                         return True
+                    if self._result is not None and self._result.done():
+                        return False
                     self._set_state(VoiceSessionState.FAILED)
                     self._complete(VoiceStopReason.PROVIDER_FAILED)
                     return False
