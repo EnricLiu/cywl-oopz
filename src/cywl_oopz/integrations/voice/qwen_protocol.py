@@ -21,6 +21,7 @@ from cywl_oopz.features.voice.events import (
     VoiceAssistantAudio,
     VoiceModelEvent,
     VoiceProviderFailed,
+    VoiceProviderErrorEvent,
     VoiceResponseCancelled,
     VoiceResponseCompleted,
     VoiceResponseStarted,
@@ -50,7 +51,7 @@ class QwenOmniConfig:
     endpoint: str
     api_key: str = field(repr=False)
     model: str = ""
-    voice: str = "Cherry"
+    voice: str = "Tina"
     turn_detection: QwenTurnDetectionMode = QwenTurnDetectionMode.SEMANTIC_VAD
     vad_threshold: float = 0.5
     prefix_padding_ms: int = 300
@@ -98,7 +99,7 @@ class QwenOmniConfig:
         connect_timeout = _number(model.limits, "connect_timeout_seconds", 10.0)
         if connect_timeout <= 0 or connect_timeout > 60:
             raise VoiceProviderConfigurationError("Qwen connect timeout is outside 0-60 seconds")
-        voice = configuration.voice_id or _string(provider.config, "default_voice", "Cherry")
+        voice = configuration.voice_id or _string(provider.config, "default_voice", "Tina")
         if not voice or len(voice) > 128:
             raise VoiceProviderConfigurationError("Qwen voice identifier is invalid")
         return cls(
@@ -265,13 +266,16 @@ def parse_server_event(raw: str | bytes) -> VoiceModelEvent | None:
     if event_type == "error":
         error = payload.get("error")
         error = error if isinstance(error, dict) else {}
-        code = str(error.get("code", "provider_error"))[:128]
+        typ = str(error.get("type", "anonymous_error_type"))
+        code = str(error.get("code", "anonymous_error_code"))
+        msg = str(error.get("message", "Qwen sent an unknown error"))
+        param = str(error.get("param", ""))
         normalized = code.casefold()
         retryable = any(
             marker in normalized
             for marker in ("rate", "limit", "timeout", "overload", "server", "unavailable")
         )
-        return VoiceProviderFailed(code, retryable)
+        return VoiceProviderErrorEvent(typ, code, msg, param, retryable)
     return None
 
 

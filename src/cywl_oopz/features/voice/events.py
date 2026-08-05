@@ -99,6 +99,16 @@ class VoiceProviderFailed:
 
     error_kind: str
     retryable: bool
+    
+@dataclass(frozen=True, slots=True)
+class VoiceProviderErrorEvent:
+    """A sanitized typed Provider error."""
+
+    error_type: str
+    error_code: str
+    error_message: str
+    error_param: str
+    retryable: bool
 
 
 @dataclass(frozen=True, slots=True)

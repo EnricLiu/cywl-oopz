@@ -293,6 +293,10 @@ class VoiceOutputTransitQueue:
         return self._buffered_duration_ms
 
     @property
+    def max_chunk_duration_ms(self) -> int:
+        return self._max_duration_ms
+
+    @property
     def stats(self) -> VoiceOutputQueueStats:
         return self._stats
 

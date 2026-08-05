@@ -25,6 +25,7 @@ from .errors import (
 from .events import (
     VoiceAssistantAudio,
     VoiceModelEvent,
+    VoiceProviderErrorEvent,
     VoiceProviderFailed,
     VoiceResponseCancelled,
     VoiceResponseCompleted,
@@ -86,6 +87,24 @@ _NOTIFICATION_COOLDOWN_SECONDS = 5.0
 _NOTIFICATION_BATCH_LIMIT = 3
 _NOTIFICATION_PERSIST_ATTEMPTS = 3
 _NOTIFICATION_PERSIST_RETRY_SECONDS = 0.05
+
+
+def _split_pcm_chunk(chunk: PcmChunk, maximum_duration_ms: int) -> tuple[PcmChunk, ...]:
+    """Split a Provider delta so no piece can exceed the transit queue bound."""
+    if chunk.duration_ms <= maximum_duration_ms:
+        return (chunk,)
+    maximum_samples = max(1, chunk.format.sample_rate * maximum_duration_ms // 1_000)
+    frame_width_bytes = chunk.format.frame_width_bytes
+    chunks = []
+    for start_sample in range(0, len(chunk.pcm) // frame_width_bytes, maximum_samples):
+        pcm = chunk.pcm[
+            start_sample * frame_width_bytes : (start_sample + maximum_samples) * frame_width_bytes
+        ]
+        duration_ms = round(
+            (len(pcm) // frame_width_bytes) * 1_000 / chunk.format.sample_rate
+        )
+        chunks.append(PcmChunk(pcm, chunk.format, duration_ms, chunk.generation))
+    return tuple(chunks)
 
 
 def _compact_recovery_text(text: str, limit: int) -> str:
@@ -402,6 +421,7 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                 "Voice task notification defer failed during cleanup: session=%s error=%s",
                 opaque_ref(str(self._context.descriptor.session_id)),
                 exception_kind(exc),
+                exc_info=True,
             )
 
     async def _close_provider_transport(self) -> None:
@@ -420,6 +440,7 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                     "Voice Provider finish failed during cleanup: session=%s error=%s",
                     opaque_ref(str(self._context.descriptor.session_id)),
                     exception_kind(exc),
+                    exc_info=True,
                 )
         provider = self._provider
         if provider is not None:
@@ -430,6 +451,7 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                     "Voice Provider close failed during cleanup: session=%s error=%s",
                     opaque_ref(str(self._context.descriptor.session_id)),
                     exception_kind(exc),
+                    exc_info=True,
                 )
 
     async def _close_media_transport(self) -> None:
@@ -457,6 +479,7 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                     "Voice output flush failed during cleanup: session=%s error=%s",
                     opaque_ref(str(self._context.descriptor.session_id)),
                     exception_kind(exc),
+                    exc_info=True,
                 )
         await asyncio.gather(*(self._close_one_media(candidate) for candidate in candidates))
 
@@ -468,6 +491,7 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                 "Voice media close failed during cleanup: session=%s error=%s",
                 opaque_ref(str(self._context.descriptor.session_id)),
                 exception_kind(exc),
+                exc_info=True,
             )
 
     async def _connect_provider(self) -> None:
@@ -496,6 +520,13 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                 last_error = exc
                 with suppress(Exception):
                     await provider.aclose()
+                logger.warning(
+                    "Voice Provider connect failed: session=%s attempt=%d error=%s",
+                    opaque_ref(str(self._context.descriptor.session_id)),
+                    attempt,
+                    exception_kind(exc),
+                    exc_info=True,
+                )
                 if (
                     isinstance(
                         exc,
@@ -545,6 +576,7 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                 "Could not persist voice recovery state: session=%s error=%s",
                 opaque_ref(str(self._context.descriptor.session_id)),
                 exception_kind(exc),
+                exc_info=True,
             )
         if not playout_flushed:
             await self._output.flush()
@@ -571,6 +603,7 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                 opaque_ref(str(self._context.descriptor.session_id)),
                 self._settings.start_timeout_seconds,
                 exception_kind(exc),
+                exc_info=True,
             )
             return False
         if not connected:
@@ -648,6 +681,7 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                 "Could not persist voice media recovery state: session=%s error=%s",
                 opaque_ref(str(self._context.descriptor.session_id)),
                 exception_kind(exc),
+                exc_info=True,
             )
         await self._cancel_media_pumps()
         task = self._spawn(
@@ -693,6 +727,14 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
         except Exception as exc:
             if replacement is not None:
                 await self._discard_replacement_media(replacement)
+            logger.warning(
+                "Voice media recovery failed: session=%s generation=%d reason=%s error=%s",
+                opaque_ref(str(self._context.descriptor.session_id)),
+                generation,
+                reason.value,
+                exception_kind(exc),
+                exc_info=True,
+            )
             await self._control.put(_MediaRecoveryFailed(generation, reason, exception_kind(exc)))
 
     async def _discard_replacement_media(self, media: VoiceMediaSession) -> None:
@@ -709,6 +751,7 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                 "Replacement voice media close failed: session=%s error=%s",
                 opaque_ref(str(self._context.descriptor.session_id)),
                 exception_kind(exc),
+                exc_info=True,
             )
 
     async def _handle_media_recovered(self, event: _MediaRecovered) -> None:
@@ -746,6 +789,7 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                     "Could not persist recovered voice media state: session=%s error=%s",
                     opaque_ref(str(self._context.descriptor.session_id)),
                     exception_kind(exc),
+                    exc_info=True,
                 )
         logger.info(
             "Voice owner media recovered: session=%s generation=%d recovery_ms=%.1f",
@@ -781,15 +825,33 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
         while not self._closed:
             event = await self._control.get()
             if isinstance(event, _StopRequested):
+                logger.info(
+                    "Voice runtime stop requested: session=%s reason=%s",
+                    opaque_ref(str(self._context.descriptor.session_id)),
+                    event.reason.value,
+                )
                 self._set_state(VoiceSessionState.CLOSING)
                 self._complete(event.reason)
                 return
             if isinstance(event, _WatchdogExpired):
+                logger.info(
+                    "Voice runtime watchdog expired: session=%s reason=%s",
+                    opaque_ref(str(self._context.descriptor.session_id)),
+                    event.reason.value,
+                )
                 self._set_state(VoiceSessionState.CLOSING)
                 self._complete(event.reason)
                 return
             if isinstance(event, _MediaEnded):
                 if event.generation != self._media_generation:
+                    logger.debug(
+                        "Ignoring stale voice media terminal event: session=%s event_generation=%d "
+                        "current_generation=%d reason=%s",
+                        opaque_ref(str(self._context.descriptor.session_id)),
+                        event.generation,
+                        self._media_generation,
+                        event.reason.value,
+                    )
                     continue
                 if (
                     event.reason
@@ -798,6 +860,19 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                 ):
                     await self._begin_media_recovery(event)
                     continue
+                log = (
+                    logger.info
+                    if event.reason
+                    in {VoiceMediaEndReason.OWNER_LEFT, VoiceMediaEndReason.OWNER_UNPUBLISHED}
+                    else logger.warning
+                )
+                log(
+                    "Voice media ended: session=%s generation=%d reason=%s error=%s",
+                    opaque_ref(str(self._context.descriptor.session_id)),
+                    event.generation,
+                    event.reason.value,
+                    event.error_kind or "none",
+                )
                 self._set_state(VoiceSessionState.CLOSING)
                 reason = (
                     VoiceStopReason.OWNER_LEFT
@@ -823,8 +898,22 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                     event.media_generation is not None
                     and event.media_generation != self._media_generation
                 ):
+                    logger.debug(
+                        "Ignoring stale voice pump failure: session=%s pump=%s "
+                        "event_generation=%d current_generation=%d",
+                        opaque_ref(str(self._context.descriptor.session_id)),
+                        event.pump,
+                        event.media_generation,
+                        self._media_generation,
+                    )
                     continue
                 if event.retryable_provider:
+                    logger.warning(
+                        "Voice Provider pump failed; recovering: session=%s pump=%s error=%s",
+                        opaque_ref(str(self._context.descriptor.session_id)),
+                        event.pump,
+                        event.error_kind,
+                    )
                     if await self._recover_provider():
                         if event.pump == "provider_input":
                             self._spawn(
@@ -839,6 +928,15 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                         continue
                     if self._result is not None and self._result.done():
                         return
+                logger.error(
+                    "Voice runtime pump failed; ending session: session=%s pump=%s error=%s "
+                    "retryable_provider=%s media_generation=%s",
+                    opaque_ref(str(self._context.descriptor.session_id)),
+                    event.pump,
+                    event.error_kind,
+                    event.retryable_provider,
+                    event.media_generation,
+                )
                 self._set_state(VoiceSessionState.FAILED)
                 reason = (
                     VoiceStopReason.PROVIDER_FAILED
@@ -863,6 +961,11 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                 self._handle_mailbox_presented(event)
                 continue
             if event.session is not self._provider_session:
+                logger.debug(
+                    "Ignoring event from stale Voice Provider session: session=%s event=%s",
+                    opaque_ref(str(self._context.descriptor.session_id)),
+                    type(event.event).__name__,
+                )
                 continue
             model_event = event.event
             self._last_activity = time.monotonic()
@@ -919,6 +1022,7 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                             "Could not persist recovered voice active state: session=%s error=%s",
                             opaque_ref(str(self._context.descriptor.session_id)),
                             exception_kind(exc),
+                            exc_info=True,
                         )
             elif isinstance(model_event, VoiceUserSpeechStarted):
                 if self._user_speaking:
@@ -977,9 +1081,15 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                 )
             elif isinstance(model_event, VoiceToolCall):
                 self._start_tool_call(event.session, model_event)
-            elif isinstance(model_event, VoiceProviderFailed):
+            elif isinstance(model_event, (VoiceProviderFailed, VoiceProviderErrorEvent)):
                 if self._proactive_task_notices:
                     await self._defer_pending_proactive_notifications()
+                log = logger.warning if model_event.retryable else logger.error
+                log(
+                    "Voice Provider reported failure: session=%s error=%s",
+                    opaque_ref(str(self._context.descriptor.session_id)),
+                    model_event,
+                )
                 if model_event.retryable and await self._recover_provider():
                     continue
                 if self._result is not None and self._result.done():
@@ -988,6 +1098,10 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                 self._complete(VoiceStopReason.PROVIDER_FAILED)
                 return
             elif isinstance(model_event, VoiceSessionFinished):
+                logger.info(
+                    "Voice Provider session finished: session=%s",
+                    opaque_ref(str(self._context.descriptor.session_id)),
+                )
                 self._set_state(VoiceSessionState.CLOSING)
                 self._complete(VoiceStopReason.RUNTIME_ENDED)
                 return
@@ -1037,6 +1151,12 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
             raise
         except Exception as exc:
             error_kind = exception_kind(exc)
+            logger.warning(
+                "Voice task mailbox claim failed: session=%s error=%s",
+                opaque_ref(str(self._context.descriptor.session_id)),
+                error_kind,
+                exc_info=True,
+            )
             await self._control.put(_MailboxClaimed((), error_kind))
 
     async def _handle_mailbox_claimed(self, event: _MailboxClaimed) -> None:
@@ -1114,6 +1234,13 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
             )
             raise
         except Exception as exc:
+            logger.warning(
+                "Voice proactive task notification request failed: session=%s tasks=%s error=%s",
+                opaque_ref(str(self._context.descriptor.session_id)),
+                len(notices),
+                exception_kind(exc),
+                exc_info=True,
+            )
             await self._proactive_request_failed(notices, exception_kind(exc))
 
     async def _proactive_request_failed(
@@ -1158,6 +1285,7 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                     len(notices),
                     attempt,
                     exception_kind(exc),
+                    exc_info=True,
                 )
                 if attempt < _NOTIFICATION_PERSIST_ATTEMPTS:
                     await asyncio.sleep(_NOTIFICATION_PERSIST_RETRY_SECONDS * attempt)
@@ -1197,6 +1325,7 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                 opaque_ref(str(self._context.descriptor.session_id)),
                 len(task_ids),
                 exception_kind(exc),
+                exc_info=True,
             )
 
     async def _present_text_notifications(
@@ -1218,6 +1347,7 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                 opaque_ref(str(self._context.descriptor.session_id)),
                 len(notices),
                 exception_kind(exc),
+                exc_info=True,
             )
             await self._defer_notifications(tuple(item.task_id for item in notices))
         else:
@@ -1375,6 +1505,7 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                 opaque_ref(str(self._context.descriptor.session_id)),
                 event.name,
                 exception_kind(exc),
+                exc_info=True,
             )
             if not await self._recover_provider():
                 if self._result is not None and self._result.done():
@@ -1523,6 +1654,7 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                 opaque_ref(str(self._context.descriptor.session_id)),
                 self._turn_sequence,
                 exception_kind(exc),
+                exc_info=True,
             )
 
     async def _complete_response_playout(
@@ -1561,6 +1693,14 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            logger.error(
+                "Voice output drain failed: session=%s response=%s generation=%d error=%s",
+                opaque_ref(str(self._context.descriptor.session_id)),
+                opaque_ref(response_id),
+                generation,
+                exception_kind(exc),
+                exc_info=True,
+            )
             await self._control.put(_PumpFailed("oopz_output_drain", exception_kind(exc)))
 
     async def _handle_response_drained(self, event: _ResponseDrained) -> None:
@@ -1623,6 +1763,7 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                 "Voice local playout flush failed: session=%s error=%s",
                 opaque_ref(str(self._context.descriptor.session_id)),
                 exception_kind(exc),
+                exc_info=True,
             )
             self._set_state(VoiceSessionState.FAILED)
             self._complete(VoiceStopReason.MEDIA_ENDED)
@@ -1647,6 +1788,7 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                         opaque_ref(str(self._context.descriptor.session_id)),
                         opaque_ref(active.response_id),
                         exception_kind(exc),
+                        exc_info=True,
                     )
                     if await self._recover_provider(playout_flushed=True):
                         return True
@@ -1755,6 +1897,13 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            logger.error(
+                "Voice media input pump failed: session=%s generation=%d error=%s",
+                opaque_ref(str(self._context.descriptor.session_id)),
+                generation,
+                exception_kind(exc),
+                exc_info=True,
+            )
             await self._control.put(
                 _PumpFailed(
                     "oopz_input",
@@ -1777,6 +1926,12 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            logger.warning(
+                "Voice Provider input pump failed: session=%s error=%s",
+                opaque_ref(str(self._context.descriptor.session_id)),
+                exception_kind(exc),
+                exc_info=True,
+            )
             await self._control.put(
                 _PumpFailed("provider_input", exception_kind(exc), retryable_provider=True)
             )
@@ -1802,19 +1957,23 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                         )
                         continue
                     chunk = event.chunk
-                    accepted = await self._output.put(
-                        PcmChunk(
-                            chunk.pcm,
-                            chunk.format,
-                            chunk.duration_ms,
-                            active.generation,
-                        )
+                    routed_chunk = PcmChunk(
+                        chunk.pcm,
+                        chunk.format,
+                        chunk.duration_ms,
+                        active.generation,
                     )
-                    if not accepted:
-                        self._stats = replace(
-                            self._stats,
-                            late_audio_dropped=self._stats.late_audio_dropped + 1,
-                        )
+                    for output_chunk in _split_pcm_chunk(
+                        routed_chunk,
+                        self._output.max_chunk_duration_ms,
+                    ):
+                        accepted = await self._output.put(output_chunk)
+                        if not accepted:
+                            self._stats = replace(
+                                self._stats,
+                                late_audio_dropped=self._stats.late_audio_dropped + 1,
+                            )
+                            break
                     else:
                         self._stats = replace(
                             self._stats,
@@ -1830,6 +1989,12 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            logger.warning(
+                "Voice output routing failed: session=%s error=%s",
+                opaque_ref(str(self._context.descriptor.session_id)),
+                exception_kind(exc),
+                exc_info=True,
+            )
             await self._control.put(
                 _PumpFailed(
                     "provider_output_backpressure",
@@ -1849,6 +2014,12 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            logger.warning(
+                "Voice Provider event pump failed: session=%s error=%s",
+                opaque_ref(str(self._context.descriptor.session_id)),
+                exception_kind(exc),
+                exc_info=True,
+            )
             await self._control.put(
                 _PumpFailed("provider_events", exception_kind(exc), retryable_provider=True)
             )
@@ -1886,6 +2057,13 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            logger.error(
+                "Voice media output pump failed: session=%s generation=%d error=%s",
+                opaque_ref(str(self._context.descriptor.session_id)),
+                generation,
+                exception_kind(exc),
+                exc_info=True,
+            )
             await self._control.put(
                 _PumpFailed(
                     "oopz_output",
@@ -1905,6 +2083,13 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            logger.warning(
+                "Voice media terminal watcher failed: session=%s generation=%d error=%s",
+                opaque_ref(str(self._context.descriptor.session_id)),
+                generation,
+                exception_kind(exc),
+                exc_info=True,
+            )
             await self._control.put(
                 _MediaEnded(
                     generation,
@@ -1950,8 +2135,13 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
     def _spawn_media(self, coroutine, label: str) -> asyncio.Task[None]:
         task = self._spawn(coroutine, label)
         self._media_tasks.add(task)
-        task.add_done_callback(self._media_tasks.discard)
+        task.remove_done_callback(self._task_done)
+        task.add_done_callback(self._media_task_done)
         return task
+
+    def _media_task_done(self, task: asyncio.Task[None]) -> None:
+        self._media_tasks.discard(task)
+        self._task_done(task)
 
     def _spawn(self, coroutine, label: str) -> asyncio.Task[None]:
         task = asyncio.create_task(
@@ -1964,16 +2154,28 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
 
     def _task_done(self, task: asyncio.Task[None]) -> None:
         self._tasks.discard(task)
+        task_name = task.get_name().split(":", 1)[0]
         if task.cancelled():
+            logger.debug(
+                "Voice runtime background task cancelled: session=%s task=%s",
+                opaque_ref(str(self._context.descriptor.session_id)),
+                task_name,
+            )
             return
         error = task.exception()
         if error is None:
+            logger.debug(
+                "Voice runtime background task completed: session=%s task=%s",
+                opaque_ref(str(self._context.descriptor.session_id)),
+                task_name,
+            )
             return
         logger.error(
             "Voice runtime task failed unexpectedly: session=%s task=%s error=%s",
             opaque_ref(str(self._context.descriptor.session_id)),
-            task.get_name().split(":", 1)[0],
+            task_name,
             exception_kind(error),
+            exc_info=(type(error), error, error.__traceback__),
         )
         self._set_state(VoiceSessionState.FAILED)
         self._complete(VoiceStopReason.PROVIDER_FAILED)
@@ -1993,6 +2195,7 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                 "Voice runtime status sink failed: session=%s error=%s",
                 opaque_ref(str(self._context.descriptor.session_id)),
                 exception_kind(exc),
+                exc_info=True,
             )
 
     def _complete(self, reason: VoiceStopReason) -> None:

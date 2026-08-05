@@ -239,6 +239,37 @@ async def test_realtime_runtime_streams_audio_and_persists_final_turns() -> None
 
 
 @pytest.mark.asyncio
+async def test_realtime_runtime_splits_provider_audio_larger_than_output_queue() -> None:
+    runtime, media_gateway, _, providers = await runtime_fixture()
+    starting = asyncio.create_task(runtime.start())
+    await wait_until(lambda: bool(providers and providers[0].sessions))
+    provider_session = providers[0].sessions[0]
+    await provider_session.emit(VoiceSessionReady())
+    await starting
+
+    response_id = "response-large-audio"
+    await provider_session.emit(VoiceResponseStarted(response_id))
+    await provider_session.emit(
+        VoiceAssistantAudio(
+            PcmChunk(b"\x00" * 19_200, PROVIDER_OUTPUT_FORMAT, 400, generation=0),
+            response_id,
+            "assistant-large-audio",
+        )
+    )
+    await provider_session.emit(VoiceResponseCompleted(response_id))
+
+    await wait_until(lambda: len(media_gateway.sessions[0].outputs) == 2)
+    await wait_until(lambda: runtime.state is VoiceSessionState.LISTENING)
+
+    assert [chunk.duration_ms for chunk in media_gateway.sessions[0].outputs] == [300, 100]
+    assert len(providers) == 1
+
+    await runtime.request_stop(VoiceStopReason.COMMAND)
+    await runtime.wait_finished()
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
 async def test_realtime_runtime_terminal_result_survives_cancelled_waiter() -> None:
     runtime, _, _, providers = await runtime_fixture()
     starting = asyncio.create_task(runtime.start())
