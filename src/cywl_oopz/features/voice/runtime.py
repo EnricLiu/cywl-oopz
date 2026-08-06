@@ -74,7 +74,7 @@ from .settings import VoiceTurnRole
 logger = logging.getLogger(__name__)
 
 ProviderBuilder = Callable[[VoiceSessionRuntimeContext], RealtimeVoiceProvider]
-_AUDIO_STAGING_CHUNKS = 8
+_AUDIO_STAGING_CHUNKS = 128
 _CANCELLED_RESPONSE_HISTORY = 64
 _RESPONSE_USAGE_HISTORY = 64
 _COMPLETED_TOOL_CALL_HISTORY = 128
