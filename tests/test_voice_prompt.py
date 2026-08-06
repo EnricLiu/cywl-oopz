@@ -32,6 +32,13 @@ async def test_voice_prompt_is_spoken_bounded_and_explains_task_delegation() -> 
     assert "只代表已经排队，不代表" in prompt
     assert "不要编造任务状态" in prompt
     assert "不要朗读 Markdown" in prompt
+    assert "实时语音对话的前台" in prompt
+    assert "后台文字 Agent" in prompt
+    assert "多步骤工具处理" in prompt
+    assert "今天有什么和初音未来有关的新消息" in prompt
+    assert "建一个叫深夜电台的歌单" in prompt
+    assert "把 T2 的详细结果讲给我听" in prompt
+    assert "你喜欢什么音乐" in prompt
 
 
 @pytest.mark.asyncio
