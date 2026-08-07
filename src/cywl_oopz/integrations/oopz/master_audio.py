@@ -5,6 +5,7 @@ from __future__ import annotations
 from oopz_sdk import OopzBot, PcmFormat, VoicePcmOutputStream, VoicePlaybackCursor
 
 from cywl_oopz.features.audio.models import MASTER_AUDIO_FORMAT, MasterPlaybackCursor
+from cywl_oopz.settings import AudioMixerSettings
 
 MASTER_PREBUFFER_MS = 40
 MASTER_MAX_BUFFER_MS = 160
@@ -80,3 +81,15 @@ class OopzMasterPcmOutputFactory:
             max_buffer_ms=self._max_buffer_ms,
         )
         return OopzMasterPcmOutput(stream)
+
+    @classmethod
+    def from_settings(
+        cls,
+        bot: OopzBot,
+        settings: AudioMixerSettings,
+    ) -> OopzMasterPcmOutputFactory:
+        return cls(
+            bot,
+            prebuffer_ms=settings.master_prebuffer_ms,
+            max_buffer_ms=settings.master_max_buffer_ms,
+        )

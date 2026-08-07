@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from typing import Protocol
 
-from .models import MasterPlaybackCursor
+from .models import DecodedAudioBlock, MasterPlaybackCursor
 
 
 class MasterPcmOutput(Protocol):
@@ -18,5 +19,13 @@ class MasterPcmOutput(Protocol):
     async def flush(self) -> MasterPlaybackCursor: ...
 
     async def drain(self) -> MasterPlaybackCursor: ...
+
+    async def aclose(self) -> None: ...
+
+
+class AudioDecoder(Protocol):
+    """Supervised canonical PCM decoder owned by one track playback."""
+
+    def __aiter__(self) -> AsyncIterator[DecodedAudioBlock]: ...
 
     async def aclose(self) -> None: ...

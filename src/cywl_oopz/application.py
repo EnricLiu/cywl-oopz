@@ -182,7 +182,7 @@ class BotApplication:
             self.bot,
             allow_mixed_participants=False,
         )
-        self.voice_media = OopzVoiceMediaGateway(self.bot, settings.voice)
+        self.voice_media = OopzVoiceMediaGateway(self.bot, settings.voice, settings.audio)
         self.chat_invocations = OopzChatInvocationFactory(settings.oopz.person_uid)
         self.editable_messages = OopzEditableMessageGateway(self.bot)
         self.agent_presenters = OopzAgentPresenterFactory(
@@ -247,12 +247,18 @@ class BotApplication:
             enabled_agent_tools = tuple(
                 name for name in enabled_agent_tools if name not in SKILL_AGENT_TOOLS
             )
+        self.music_voice: OopzMusicVoiceGateway | None = None
         if settings.music.enabled:
             self.music_catalog = NeteaseMusicCatalog(settings.music)
+            self.music_voice = OopzMusicVoiceGateway(
+                self.bot,
+                self.voice_channel_sessions,
+                settings.audio,
+            )
             self.music = MusicRequestService(
                 settings.music,
                 self.music_catalog,
-                OopzMusicVoiceGateway(self.bot, self.voice_channel_sessions),
+                self.music_voice,
             )
             self.music_playlists = MusicPlaylistService(
                 settings.music,
@@ -649,6 +655,8 @@ class BotApplication:
                     "OOPZ realtime voice SDK contract validated: feature_version=%s",
                     self.bot.voice.capabilities.feature_version,
                 )
+            if self.music_voice is not None:
+                await self.music_voice.validate_capabilities()
             try:
                 await self.database.start()
             except DatabaseError:

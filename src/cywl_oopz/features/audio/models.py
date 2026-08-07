@@ -169,6 +169,25 @@ class AudioBlock:
 
 
 @dataclass(frozen=True, slots=True)
+class DecodedAudioBlock:
+    """Canonical decoder output before a playback source assigns identity."""
+
+    valid_frames: int
+    samples: np.ndarray
+
+    def __post_init__(self) -> None:
+        if not 1 <= self.valid_frames <= AUDIO_BLOCK_FRAMES:
+            raise ValueError("Decoded audio block valid frame count is out of range")
+        object.__setattr__(
+            self,
+            "samples",
+            _readonly_audio_array(self.samples, exact_frames=AUDIO_BLOCK_FRAMES),
+        )
+        if self.valid_frames < AUDIO_BLOCK_FRAMES and np.any(self.samples[self.valid_frames :]):
+            raise AudioFormatError("Decoded audio block padding must be silent")
+
+
+@dataclass(frozen=True, slots=True)
 class SourceSlice:
     """A variable canonical source range aligned within one master segment."""
 

@@ -656,6 +656,75 @@ class MusicSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class AudioMixerSettings:
+    """Shared PCM master and external decoder rollout settings."""
+
+    enabled: bool
+    ffmpeg_path: str
+    master_prebuffer_ms: int
+    master_target_buffer_ms: int
+    master_max_buffer_ms: int
+    music_queue_ms: int
+    voice_queue_ms: int
+    decoder_start_timeout_seconds: float
+    decoder_read_timeout_seconds: float
+    decoder_stop_timeout_seconds: float
+
+    @classmethod
+    def from_mapping(cls, values: Mapping[str, str]) -> AudioMixerSettings:
+        settings = cls(
+            enabled=_boolean(values, "CYWL_AUDIO_MIXER_ENABLED", False),
+            ffmpeg_path=values.get("CYWL_FFMPEG_PATH", "ffmpeg").strip() or "ffmpeg",
+            master_prebuffer_ms=_positive_integer(
+                values,
+                "CYWL_AUDIO_MASTER_PREBUFFER_MS",
+                40,
+                allow_zero=True,
+            ),
+            master_target_buffer_ms=_positive_integer(
+                values,
+                "CYWL_AUDIO_MASTER_TARGET_BUFFER_MS",
+                60,
+            ),
+            master_max_buffer_ms=_positive_integer(
+                values,
+                "CYWL_AUDIO_MASTER_MAX_BUFFER_MS",
+                160,
+            ),
+            music_queue_ms=_positive_integer(values, "CYWL_AUDIO_MUSIC_QUEUE_MS", 500),
+            voice_queue_ms=_positive_integer(values, "CYWL_AUDIO_VOICE_QUEUE_MS", 60),
+            decoder_start_timeout_seconds=_positive_float(
+                values,
+                "CYWL_AUDIO_DECODER_START_TIMEOUT_SECONDS",
+                8.0,
+            ),
+            decoder_read_timeout_seconds=_positive_float(
+                values,
+                "CYWL_AUDIO_DECODER_READ_TIMEOUT_SECONDS",
+                10.0,
+            ),
+            decoder_stop_timeout_seconds=_positive_float(
+                values,
+                "CYWL_AUDIO_DECODER_STOP_TIMEOUT_SECONDS",
+                1.0,
+            ),
+        )
+        if not (
+            settings.master_prebuffer_ms
+            <= settings.master_target_buffer_ms
+            < settings.master_max_buffer_ms
+        ):
+            raise ConfigurationError(
+                "Audio master buffers must satisfy prebuffer <= target < max buffer"
+            )
+        if settings.music_queue_ms < 20 or settings.voice_queue_ms < 20:
+            raise ConfigurationError("Audio source queues must hold at least one 20 ms block")
+        if settings.master_max_buffer_ms > 2_000:
+            raise ConfigurationError("CYWL_AUDIO_MASTER_MAX_BUFFER_MS must not exceed 2000")
+        return settings
+
+
+@dataclass(frozen=True, slots=True)
 class VoiceSettings:
     """Runtime bounds for the optional realtime voice conversation feature."""
 
@@ -923,6 +992,7 @@ class AppSettings:
     chat: ChatSettings
     agent: AgentSettings
     music: MusicSettings
+    audio: AudioMixerSettings
     voice: VoiceSettings
     web: WebToolsSettings
     command_prefix: str = "/"
@@ -958,6 +1028,7 @@ class AppSettings:
             chat=ChatSettings.from_mapping(values),
             agent=AgentSettings.from_mapping(values),
             music=MusicSettings.from_mapping(values),
+            audio=AudioMixerSettings.from_mapping(values),
             voice=VoiceSettings.from_mapping(values),
             web=WebToolsSettings.from_mapping(values),
             command_prefix=command_prefix,

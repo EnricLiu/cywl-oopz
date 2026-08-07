@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 
+import numpy as np
 import pytest
 from oopz_sdk import (
     VoicePlaybackEndReason,
@@ -10,13 +11,18 @@ from oopz_sdk import (
 )
 
 from cywl_oopz.features.audio.models import (
+    AUDIO_BLOCK_FRAMES,
+    AUDIO_CHANNELS,
     AudioChannelKey,
+    DecodedAudioBlock,
     VoiceParticipantKind,
     VoiceParticipantRequest,
 )
 from cywl_oopz.features.music.models import MusicPlaybackEndReason, VoiceChannelKey
+from cywl_oopz.integrations.audio.fake import FakeMasterPcmOutput
 from cywl_oopz.integrations.oopz.music import OopzMusicVoiceGateway
 from cywl_oopz.integrations.oopz.voice_channel_session import OopzVoiceChannelSessionManager
+from cywl_oopz.settings import AudioMixerSettings
 
 
 class FakeChannels:
@@ -106,6 +112,63 @@ class FakeBot:
         self.voice = FakeVoice()
 
 
+class FakeDecoder:
+    def __init__(self) -> None:
+        self._delivered = False
+        self.closed = False
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self) -> DecodedAudioBlock:
+        if self._delivered:
+            raise StopAsyncIteration
+        self._delivered = True
+        return DecodedAudioBlock(
+            AUDIO_BLOCK_FRAMES,
+            np.full(
+                (AUDIO_BLOCK_FRAMES, AUDIO_CHANNELS),
+                0.25,
+                dtype=np.float32,
+            ),
+        )
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+class FakeDecoderFactory:
+    def __init__(self) -> None:
+        self.validations = 0
+        self.urls: list[str] = []
+        self.decoders: list[FakeDecoder] = []
+
+    async def validate(self) -> None:
+        self.validations += 1
+
+    async def open(self, stream_url: str) -> FakeDecoder:
+        self.urls.append(stream_url)
+        decoder = FakeDecoder()
+        self.decoders.append(decoder)
+        return decoder
+
+
+class FakeMasterFactory:
+    max_buffer_ms = 160
+
+    def __init__(self) -> None:
+        self.outputs: list[FakeMasterPcmOutput] = []
+
+    async def open(self) -> FakeMasterPcmOutput:
+        output = FakeMasterPcmOutput(max_buffer_frames=AUDIO_BLOCK_FRAMES * 10)
+        self.outputs.append(output)
+        return output
+
+
+def pcm_settings() -> AudioMixerSettings:
+    return AudioMixerSettings.from_mapping({"CYWL_AUDIO_MIXER_ENABLED": "true"})
+
+
 @pytest.mark.asyncio
 async def test_oopz_music_gateway_reuses_one_lease_and_typed_playback() -> None:
     bot = FakeBot()
@@ -141,6 +204,48 @@ async def test_oopz_music_gateway_reuses_one_lease_and_typed_playback() -> None:
     await gateway.aclose()
     await leases.aclose()
     assert bot.voice.leaves == 1
+
+
+@pytest.mark.asyncio
+async def test_oopz_music_gateway_reuses_one_pcm_master_across_tracks() -> None:
+    bot = FakeBot()
+    sessions = OopzVoiceChannelSessionManager(bot)
+    decoders = FakeDecoderFactory()
+    masters = FakeMasterFactory()
+    gateway = OopzMusicVoiceGateway(
+        bot,
+        sessions,
+        pcm_settings(),
+        decoder_factory=decoders,
+        master_factory=masters,
+    )
+    channel = VoiceChannelKey("area", "voice")
+
+    await gateway.validate_capabilities()
+    assert await gateway.acquire(channel) is True
+    first = await gateway.start_playback(channel, "https://music.example/one.mp3")
+    first_result = await first.wait_finished()
+    second = await gateway.start_playback(channel, "https://music.example/two.mp3")
+    second_result = await second.wait_finished()
+
+    assert first_result.end_reason is MusicPlaybackEndReason.FINISHED
+    assert second_result.end_reason is MusicPlaybackEndReason.FINISHED
+    assert decoders.validations == 1
+    assert decoders.urls == [
+        "https://music.example/one.mp3",
+        "https://music.example/two.mp3",
+    ]
+    assert all(decoder.closed for decoder in decoders.decoders)
+    assert len(masters.outputs) == 1
+    assert len(masters.outputs[0].writes) == 2
+    assert bot.voice.urls == []
+    assert bot.voice.volumes == []
+
+    assert await gateway.release(channel) is True
+    assert masters.outputs[0].closed is True
+    assert bot.voice.leaves == 1
+    await gateway.aclose()
+    await sessions.aclose()
 
 
 @pytest.mark.asyncio

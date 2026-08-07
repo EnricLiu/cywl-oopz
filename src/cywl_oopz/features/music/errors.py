@@ -33,6 +33,14 @@ class MusicPlaybackError(MusicError):
     """Raised when the OOPZ voice backend cannot perform a requested action."""
 
 
+class MusicDecoderError(MusicPlaybackError):
+    """FFmpeg could not produce a valid bounded canonical PCM stream."""
+
+
+class MusicDecoderUnavailableError(MusicDecoderError):
+    """The configured FFmpeg executable is absent or incompatible."""
+
+
 class MusicVoiceBusyError(MusicPlaybackError):
     """Raised when music cannot reserve the backend without preempting its owner."""
 

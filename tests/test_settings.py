@@ -7,6 +7,7 @@ from cywl_oopz.core.errors import ConfigurationError
 from cywl_oopz.settings import (
     AgentMode,
     AppSettings,
+    AudioMixerSettings,
     ChatSettings,
     DatabaseSettings,
     MusicSettings,
@@ -100,6 +101,8 @@ def test_app_settings_use_the_injected_oopz_credentials(monkeypatch) -> None:
     assert settings.agent.max_skill_resource_characters == 12000
     assert settings.agent.max_skill_context_characters == 24000
     assert settings.music.enabled is False
+    assert settings.audio.enabled is False
+    assert settings.audio.master_target_buffer_ms == 60
     assert settings.voice.enabled is False
     assert settings.voice.experimental is True
     assert settings.voice.stop_timeout_seconds == 1.5
@@ -271,6 +274,41 @@ def test_enabled_music_requires_http_catalog_and_loads_bounds() -> None:
     assert settings.search_limit == 7
     assert settings.max_queue_length == 12
     assert settings.max_playlist_tracks == 1000
+
+
+def test_audio_mixer_settings_load_and_validate_pcm_bounds() -> None:
+    settings = AudioMixerSettings.from_mapping(
+        {
+            "CYWL_AUDIO_MIXER_ENABLED": "true",
+            "CYWL_FFMPEG_PATH": "/opt/ffmpeg",
+            "CYWL_AUDIO_MASTER_PREBUFFER_MS": "20",
+            "CYWL_AUDIO_MASTER_TARGET_BUFFER_MS": "40",
+            "CYWL_AUDIO_MASTER_MAX_BUFFER_MS": "120",
+            "CYWL_AUDIO_MUSIC_QUEUE_MS": "400",
+            "CYWL_AUDIO_VOICE_QUEUE_MS": "80",
+            "CYWL_AUDIO_DECODER_START_TIMEOUT_SECONDS": "4",
+            "CYWL_AUDIO_DECODER_READ_TIMEOUT_SECONDS": "5",
+            "CYWL_AUDIO_DECODER_STOP_TIMEOUT_SECONDS": "0.5",
+        }
+    )
+
+    assert settings.enabled is True
+    assert settings.ffmpeg_path == "/opt/ffmpeg"
+    assert settings.master_prebuffer_ms == 20
+    assert settings.master_target_buffer_ms == 40
+    assert settings.master_max_buffer_ms == 120
+    assert settings.music_queue_ms == 400
+    assert settings.voice_queue_ms == 80
+    assert settings.decoder_stop_timeout_seconds == 0.5
+
+    with pytest.raises(ConfigurationError, match="prebuffer <= target < max"):
+        AudioMixerSettings.from_mapping(
+            {
+                "CYWL_AUDIO_MASTER_PREBUFFER_MS": "100",
+                "CYWL_AUDIO_MASTER_TARGET_BUFFER_MS": "80",
+                "CYWL_AUDIO_MASTER_MAX_BUFFER_MS": "120",
+            }
+        )
 
 
 def test_voice_settings_load_runtime_bounds() -> None:

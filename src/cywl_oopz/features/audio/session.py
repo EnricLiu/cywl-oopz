@@ -44,14 +44,29 @@ class SharedAudioMixerBus:
         blocks: tuple[AudioBlock, ...],
     ) -> dict[SourceKey, SourcePlaybackCursor]:
         """Mix and synchronously submit ordered VOICE blocks to the master."""
+        return await self._write_blocks(blocks, music=False)
+
+    async def write_music(
+        self,
+        blocks: tuple[AudioBlock, ...],
+    ) -> dict[SourceKey, SourcePlaybackCursor]:
+        """Mix and synchronously submit ordered MUSIC blocks to the master."""
+        return await self._write_blocks(blocks, music=True)
+
+    async def _write_blocks(
+        self,
+        blocks: tuple[AudioBlock, ...],
+        *,
+        music: bool,
+    ) -> dict[SourceKey, SourcePlaybackCursor]:
         async with self._operation_lock:
             self._require_healthy()
             cursors = self._ledger.source_cursors()
             for block in blocks:
                 mixed = self._mixer.mix(
-                    None,
-                    block,
-                    DuckingSnapshot(conversation_active=True),
+                    block if music else None,
+                    None if music else block,
+                    DuckingSnapshot(conversation_active=not music),
                 )
                 entry_id = self._ledger.register_pending(mixed)
                 try:
@@ -64,6 +79,10 @@ class SharedAudioMixerBus:
 
     async def flush_voice(self, discard: frozenset[SourceKey]) -> RemixPlan:
         """Flush one master epoch and discard selected VOICE generations."""
+        return await self.flush_source(discard)
+
+    async def flush_source(self, discard: frozenset[SourceKey]) -> RemixPlan:
+        """Flush one solo-source epoch and discard its invalid generations."""
         async with self._operation_lock:
             self._require_healthy()
             try:
@@ -74,7 +93,7 @@ class SharedAudioMixerBus:
                 raise
             if plan.survivors:
                 self._failed = True
-                raise AudioLedgerError("Voice-only bus cannot replay another active source")
+                raise AudioLedgerError("Solo-source bus cannot replay another active source")
             self._mixer.reset_dynamics()
             return plan
 

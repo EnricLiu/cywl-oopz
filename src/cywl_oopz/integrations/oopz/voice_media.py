@@ -28,7 +28,7 @@ from cywl_oopz.features.voice.models import (
 )
 from cywl_oopz.features.voice.ports import VoiceLease
 from cywl_oopz.integrations.audio.voice import VoicePcmSourceOutput
-from cywl_oopz.settings import VoiceSettings
+from cywl_oopz.settings import AudioMixerSettings, VoiceSettings
 
 from .master_audio import OopzMasterPcmOutputFactory
 
@@ -173,10 +173,18 @@ class OopzVoiceMediaSession:
 class OopzVoiceMediaGateway:
     """Open only the session owner's audio and the bounded bot PCM output."""
 
-    def __init__(self, bot: OopzBot, settings: VoiceSettings) -> None:
+    def __init__(
+        self,
+        bot: OopzBot,
+        settings: VoiceSettings,
+        audio_settings: AudioMixerSettings | None = None,
+    ) -> None:
         self._bot = bot
         self._settings = settings
-        self._master_outputs = OopzMasterPcmOutputFactory(bot)
+        self._master_outputs = OopzMasterPcmOutputFactory.from_settings(
+            bot,
+            audio_settings or AudioMixerSettings.from_mapping({}),
+        )
 
     async def open(
         self,
