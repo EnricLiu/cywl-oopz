@@ -393,7 +393,7 @@ async def test_oopz_media_maps_input_and_output_failures_without_sdk_leakage() -
     with pytest.raises(VoiceMediaTransportError) as output_failure:
         await media.write_output(long_output_chunk())
     assert output_failure.value.operation == "write_output"
-    assert output_failure.value.error_kind == "RuntimeError"
+    assert output_failure.value.error_kind == "AudioBusFailedError"
     await media.aclose()
 
 

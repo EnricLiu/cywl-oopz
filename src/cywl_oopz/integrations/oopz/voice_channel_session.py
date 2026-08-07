@@ -11,7 +11,7 @@ from typing import Protocol
 from oopz_sdk import OopzBot
 
 from cywl_oopz.core.observability import exception_kind, opaque_ref
-from cywl_oopz.features.audio.errors import AudioSessionClosedError
+from cywl_oopz.features.audio.errors import AudioBusFailedError, AudioSessionClosedError
 from cywl_oopz.features.audio.mixer import AudioMixer
 from cywl_oopz.features.audio.models import (
     AUDIO_BLOCK_FRAMES,
@@ -142,7 +142,17 @@ class SharedVoiceChannelSession:
                 return self._bus
             if self._bus is not None and not self._bus.closed:
                 await self._bus.aclose()
-            master = await factory.open()
+            try:
+                master = await factory.open()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error(
+                    "Could not open shared audio master: channel=%s error=%s",
+                    opaque_ref(self.channel.area_id, self.channel.channel_id),
+                    exception_kind(exc),
+                )
+                raise AudioBusFailedError("Could not open shared audio master") from exc
             self._bus = SharedAudioMixerBus(
                 master,
                 max_buffer_frames=(
@@ -301,6 +311,20 @@ class OopzVoiceChannelSessionManager:
                     (self._pending_request,),
                 )
             return None
+
+    def participant_active(
+        self,
+        kind: VoiceParticipantKind,
+        channel: AudioChannelKey,
+    ) -> bool:
+        """Return a coherent same-event-loop view without blocking status rendering."""
+        session = self._session
+        return (
+            session is not None
+            and not self._leaving
+            and session.channel == channel
+            and any(participant.request.kind is kind for participant in session.participants)
+        )
 
     async def aclose(self) -> None:
         """Close once, preserving ownership when leave fails so a later call can retry."""

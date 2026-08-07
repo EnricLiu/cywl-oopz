@@ -93,6 +93,11 @@ class MemoryContextSource:
         return self.text
 
 
+class MusicParticipantStatus:
+    def music_active(self, channel) -> bool:
+        return channel.area_id == "area" and channel.channel_id == "voice"
+
+
 @pytest.mark.asyncio
 async def test_voice_service_runs_fake_session_then_stops_and_releases_everything() -> None:
     conversations, access, runtimes = service()
@@ -114,6 +119,27 @@ async def test_voice_service_runs_fake_session_then_stops_and_releases_everythin
     assert access.active_lease is None
     assert access.release_count == 1
     assert (await conversations.status()).active is False
+    await conversations.aclose()
+
+
+@pytest.mark.asyncio
+async def test_voice_service_projects_same_channel_music_presence_into_status() -> None:
+    access = FakeVoiceAccessGateway()
+    access.channels[("area", "person")] = "voice"
+    conversations = VoiceConversationService(
+        settings(),
+        access,
+        FakeVoiceSessionRuntimeFactory(),
+        FakeVoiceConfigurationRepository(),
+        FakeVoiceSessionRepository(),
+        participant_status=MusicParticipantStatus(),
+    )
+
+    active = await conversations.start(request())
+
+    assert active.music_mixing is True
+    assert active.metrics["audio_music_participant_active"] == 1
+    await conversations.stop("person")
     await conversations.aclose()
 
 

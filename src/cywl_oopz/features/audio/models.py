@@ -298,6 +298,8 @@ class AudioMixerBusStats:
     hard_clip_samples: int = 0
     retained_source_count: int = 0
     ledger_entry_count: int = 0
+    decoder_start_ms: float = 0.0
+    decoder_restart_count: int = 0
 
     def as_metrics(self) -> dict[str, int | float]:
         return {
@@ -317,6 +319,8 @@ class AudioMixerBusStats:
             "audio_hard_clip_samples": self.hard_clip_samples,
             "audio_retained_source_count": self.retained_source_count,
             "audio_ledger_entry_count": self.ledger_entry_count,
+            "audio_decoder_start_ms": self.decoder_start_ms,
+            "audio_decoder_restart_count": self.decoder_restart_count,
         }
 
 

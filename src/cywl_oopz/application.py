@@ -556,13 +556,15 @@ class BotApplication:
             self.voice_task_tools,
             self.voice_task_mailbox,
         )
+        self.voice_access = OopzConversationVoiceAccess(self.bot, self.voice_channel_sessions)
         self.voice_conversations = VoiceConversationService(
             settings.voice,
-            OopzConversationVoiceAccess(self.bot, self.voice_channel_sessions),
+            self.voice_access,
             self.voice_runtimes,
             self.voice_configurations,
             self.voice_sessions,
             self.agent_memory,
+            self.voice_access,
         )
         self._register_commands()
         self.bot.on_ready(self._on_ready)

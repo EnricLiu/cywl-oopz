@@ -8,6 +8,7 @@ from contextlib import suppress
 from uuid import uuid4
 
 from cywl_oopz.core.observability import exception_kind
+from cywl_oopz.features.audio.errors import AudioBusFailedError
 from cywl_oopz.features.audio.ledger import SourceKey
 from cywl_oopz.features.audio.models import (
     AUDIO_SAMPLE_RATE,
@@ -188,7 +189,12 @@ class FfmpegMusicPlayback:
                     "Could not flush failed PCM music source: error=%s",
                     exception_kind(cleanup_error),
                 )
-            self._complete(MusicPlaybackEndReason.TRACK_ERROR, exc)
+            reason = (
+                MusicPlaybackEndReason.BACKEND_CLOSED
+                if isinstance(exc, AudioBusFailedError)
+                else MusicPlaybackEndReason.TRACK_ERROR
+            )
+            self._complete(reason, exc)
         finally:
             with suppress(Exception):
                 await self._decoder.aclose()

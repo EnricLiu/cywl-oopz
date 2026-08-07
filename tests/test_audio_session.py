@@ -66,6 +66,22 @@ class FailedMaster(FakeMasterPcmOutput):
         raise RuntimeError("fixture transport failure")
 
 
+class FailedFlushMaster(FakeMasterPcmOutput):
+    async def flush(self):
+        raise RuntimeError("fixture flush failure")
+
+
+class FailedDrainMaster(FakeMasterPcmOutput):
+    async def drain(self):
+        raise RuntimeError("fixture drain failure")
+
+
+class FailedCursorMaster(FakeMasterPcmOutput):
+    @property
+    def cursor(self):
+        raise RuntimeError("fixture cursor failure")
+
+
 @pytest.mark.asyncio
 async def test_shared_bus_coalesces_music_and_voice_into_one_master_block() -> None:
     bus, master = bus_fixture()
@@ -231,6 +247,7 @@ async def test_shared_bus_stats_capture_buffer_limiter_and_release_source() -> N
     music_key = SourceKey(_MUSIC_ID, AudioSourceKind.MUSIC, 0)
 
     await bus.write_music((block(AudioSourceKind.MUSIC, 2.0),))
+    await bus.record_decoder_start(12.5, restarted=True)
     cursors = await bus.drain(music_key, release_source=True)
     stats = await bus.stats()
 
@@ -242,6 +259,9 @@ async def test_shared_bus_stats_capture_buffer_limiter_and_release_source() -> N
     assert stats.hard_clip_samples == 0
     assert stats.retained_source_count == 0
     assert stats.as_metrics()["audio_retained_source_count"] == 0
+    assert stats.decoder_start_ms == 12.5
+    assert stats.decoder_restart_count == 1
+    assert stats.as_metrics()["audio_decoder_start_ms"] == 12.5
     await bus.aclose()
 
 
@@ -273,8 +293,37 @@ async def test_master_transport_failure_fails_bus_and_future_writes() -> None:
     master = FailedMaster()
     bus = SharedAudioMixerBus(master, max_buffer_frames=AUDIO_BLOCK_FRAMES * 11)
 
-    with pytest.raises(RuntimeError, match="transport failure"):
+    with pytest.raises(AudioBusFailedError, match="transport failed"):
         await bus.write_music((block(AudioSourceKind.MUSIC, 0.1),))
+
+    assert bus.failed is True
+    with pytest.raises(AudioBusFailedError, match="failed"):
+        await bus.write_music((block(AudioSourceKind.MUSIC, 0.1),))
+    await bus.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("master_type", "operation", "message"),
+    [
+        (FailedFlushMaster, "flush_source", "remix barrier failed"),
+        (FailedDrainMaster, "drain", "master drain failed"),
+        (FailedCursorMaster, "observe", "cursor observation failed"),
+    ],
+)
+async def test_master_operations_expose_typed_terminal_failures(
+    master_type,
+    operation: str,
+    message: str,
+) -> None:
+    master = master_type(max_buffer_frames=AUDIO_BLOCK_FRAMES * 10)
+    bus = SharedAudioMixerBus(master, max_buffer_frames=AUDIO_BLOCK_FRAMES * 11)
+
+    with pytest.raises(AudioBusFailedError, match=message):
+        if operation == "flush_source":
+            await bus.flush_source(frozenset())
+        else:
+            await getattr(bus, operation)()
 
     assert bus.failed is True
     with pytest.raises(AudioBusFailedError, match="failed"):

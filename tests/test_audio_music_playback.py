@@ -5,6 +5,7 @@ import asyncio
 import numpy as np
 import pytest
 
+from cywl_oopz.features.audio.errors import AudioBusFailedError
 from cywl_oopz.features.audio.models import (
     AUDIO_BLOCK_FRAMES,
     AUDIO_CHANNELS,
@@ -80,6 +81,12 @@ class FailedDecoder:
 
     async def aclose(self) -> None:
         self.closed = True
+
+
+class FailedBus(SharedAudioMixerBus):
+    async def write_music(self, blocks):
+        del blocks
+        raise AudioBusFailedError("fixture shared backend failure")
 
 
 def playback_fixture(decoder) -> tuple[FfmpegMusicPlayback, FakeMasterPcmOutput]:
@@ -168,4 +175,17 @@ async def test_pcm_music_decoder_error_flushes_tail_and_releases_source() -> Non
     assert master.flush_count == 1
     assert decoder.closed is True
     assert (await bus.stats()).retained_source_count == 0
+    await bus.aclose()
+
+
+@pytest.mark.asyncio
+async def test_pcm_music_maps_shared_bus_failure_to_recoverable_end_reason() -> None:
+    master = FakeMasterPcmOutput(max_buffer_frames=AUDIO_BLOCK_FRAMES * 10)
+    bus = FailedBus(master, max_buffer_frames=AUDIO_BLOCK_FRAMES * 11)
+    playback = FfmpegMusicPlayback.from_bus(TupleDecoder((decoded(),)), bus)
+
+    result = await playback.wait_finished()
+
+    assert result.end_reason is MusicPlaybackEndReason.BACKEND_CLOSED
+    assert isinstance(result.terminal_error, AudioBusFailedError)
     await bus.aclose()

@@ -218,6 +218,16 @@ class VoiceSessionStatus:
         if self.active and (self.session_id is None or not self.owner_person_id):
             raise ValueError("Active voice status requires session identity and owner")
 
+    @property
+    def music_mixing(self) -> bool:
+        value = self.metrics.get("audio_music_participant_active", 0)
+        return (
+            self.active
+            and isinstance(value, int | float)
+            and not isinstance(value, bool)
+            and value > 0
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class VoiceRuntimeStatus:

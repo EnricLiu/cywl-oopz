@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+from contextlib import suppress
 from typing import Protocol
 
 from oopz_sdk import OopzBot, VoicePlayback
 
 from cywl_oopz.core.observability import exception_kind, opaque_ref
+from cywl_oopz.features.audio.errors import AudioBusFailedError
 from cywl_oopz.features.audio.models import (
     AudioChannelKey,
     VoiceParticipantKind,
@@ -16,6 +19,7 @@ from cywl_oopz.features.audio.models import (
 )
 from cywl_oopz.features.audio.ports import AudioDecoder
 from cywl_oopz.features.audio.session import SharedAudioMixerBus
+from cywl_oopz.features.music.errors import MusicBackendClosedError
 from cywl_oopz.features.music.models import (
     MusicPlaybackEndReason,
     MusicPlaybackResult,
@@ -90,6 +94,7 @@ class OopzMusicVoiceGateway:
         self._channel: VoiceChannelKey | None = None
         self._playback: OopzMusicPlayback | FfmpegMusicPlayback | None = None
         self._bus: SharedAudioMixerBus | None = None
+        self._backend_recovery_pending = False
         self._lock = asyncio.Lock()
 
     async def validate_capabilities(self) -> None:
@@ -138,8 +143,27 @@ class OopzMusicVoiceGateway:
                 self._channel_ref(channel),
             )
             if self._audio_settings.enabled:
-                bus = await self._ensure_bus_locked()
-                decoder = await self._decoder_factory.open(stream_url)
+                restarting = self._backend_recovery_pending or (
+                    self._bus is not None and self._bus.failed
+                )
+                decoder: AudioDecoder | None = None
+                try:
+                    bus = await self._ensure_bus_locked()
+                    started_at = time.monotonic()
+                    decoder = await self._decoder_factory.open(stream_url)
+                    elapsed_ms = (time.monotonic() - started_at) * 1_000
+                    await bus.record_decoder_start(elapsed_ms, restarted=restarting)
+                    self._backend_recovery_pending = False
+                except BaseException as exc:
+                    if decoder is not None:
+                        with suppress(BaseException):
+                            await asyncio.shield(decoder.aclose())
+                    if isinstance(exc, AudioBusFailedError):
+                        self._backend_recovery_pending = True
+                        raise MusicBackendClosedError(
+                            "Shared music audio backend closed during startup"
+                        ) from exc
+                    raise
                 playback = FfmpegMusicPlayback.from_bus(decoder, bus)
                 self._playback = playback
                 return playback
@@ -203,11 +227,12 @@ class OopzMusicVoiceGateway:
     def _clear_lease_locked(self) -> None:
         self._playback = None
         self._bus = None
+        self._backend_recovery_pending = False
         self._lease = None
         self._channel = None
 
     async def _ensure_bus_locked(self) -> SharedAudioMixerBus:
-        if self._bus is not None and not self._bus.closed:
+        if self._bus is not None and not self._bus.closed and not self._bus.failed:
             return self._bus
         if self._lease is None or self._lease.released:
             raise RuntimeError("Music PCM output requires an active voice participant")

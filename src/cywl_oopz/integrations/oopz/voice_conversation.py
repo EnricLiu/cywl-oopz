@@ -44,6 +44,12 @@ class OopzConversationVoiceAccess:
             )
         )
 
+    def music_active(self, channel: VoiceChannelKey) -> bool:
+        return self._leases.participant_active(
+            VoiceParticipantKind.MUSIC,
+            AudioChannelKey(channel.area_id, channel.channel_id),
+        )
+
 
 class OopzVoiceCommandPresenter:
     """Open one live status message and render compact command fallbacks."""
@@ -97,9 +103,10 @@ class OopzVoiceCommandPresenter:
             channel = (
                 f"频道 {opaque_ref(status.voice_channel.area_id, status.voice_channel.channel_id)}"
             )
+        mixing = " · 与音乐混流中" if status.music_mixing else ""
         await context.reply(
             f"🎙️ **初音未来语音** · {self._label(status)}\n"
-            f"{self._duration(status.elapsed_seconds)} · {channel}"
+            f"{self._duration(status.elapsed_seconds)} · {channel}{mixing}"
         )
 
     async def error(self, context: EventContext, message: str) -> None:

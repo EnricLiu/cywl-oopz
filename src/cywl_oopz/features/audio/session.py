@@ -96,6 +96,8 @@ class SharedAudioMixerBus:
         self._limiter_active_blocks = 0
         self._max_gain_reduction_db = 0.0
         self._hard_clip_samples = 0
+        self._decoder_start_ms = 0.0
+        self._decoder_restart_count = 0
         self._writer = asyncio.create_task(self._writer_loop(), name="shared-audio-writer")
 
     @property
@@ -193,10 +195,15 @@ class SharedAudioMixerBus:
                 self._master_started = False
                 await self._submit_replays(plan)
                 self._ledger.forget_sources(discard)
-            except BaseException:
+            except asyncio.CancelledError:
                 self._failed = True
                 self._fail_waiters(removed, AudioBusFailedError("Audio remix barrier failed"))
                 raise
+            except Exception as exc:
+                self._failed = True
+                failure = AudioBusFailedError("Audio remix barrier failed")
+                self._fail_waiters(removed, failure)
+                raise failure from exc
             for item in removed:
                 if not item.accepted.done():
                     item.accepted.set_result(plan.source_cursors)
@@ -227,7 +234,7 @@ class SharedAudioMixerBus:
             while time.monotonic() < deadline:
                 async with self._operation_lock:
                     self._require_healthy()
-                    observed = self._ledger.observe(self._master.cursor)
+                    observed = self._observe_master_cursor()
                     cursor = observed.get(source)
                     if cursor is None or cursor.rendered_frames >= cursor.accepted_frames:
                         if release_source:
@@ -237,7 +244,7 @@ class SharedAudioMixerBus:
         async with self._operation_lock:
             self._require_healthy()
             try:
-                observed = self._ledger.observe(self._master.cursor)
+                observed = self._observe_master_cursor()
                 if source is not None:
                     cursor = observed.get(source)
                     if cursor is not None and cursor.rendered_frames >= cursor.accepted_frames:
@@ -250,24 +257,35 @@ class SharedAudioMixerBus:
                 if release_source:
                     self._ledger.forget_sources(frozenset({source}))
                 return observed
-            except BaseException:
+            except asyncio.CancelledError:
                 self._failed = True
                 raise
+            except AudioBusFailedError:
+                raise
+            except Exception as exc:
+                self._failed = True
+                raise AudioBusFailedError("Audio master drain failed") from exc
 
     async def observe(self) -> dict[SourceKey, SourcePlaybackCursor]:
         async with self._operation_lock:
             self._require_healthy()
-            try:
-                return self._ledger.observe(self._master.cursor)
-            except BaseException:
-                self._failed = True
-                raise
+            return self._observe_master_cursor()
 
     async def forget_sources(self, sources: frozenset[SourceKey]) -> int:
         """Release source-local cursor history after its caller has consumed it."""
         async with self._operation_lock:
             self._require_healthy()
             return self._ledger.forget_sources(sources)
+
+    async def record_decoder_start(self, elapsed_ms: float, *, restarted: bool) -> None:
+        """Attach decoder lifecycle diagnostics to the owning master generation."""
+        if not np.isfinite(elapsed_ms) or elapsed_ms < 0:
+            raise ValueError("Decoder startup duration must be finite and non-negative")
+        async with self._operation_lock:
+            self._require_healthy()
+            self._decoder_start_ms = elapsed_ms
+            if restarted:
+                self._decoder_restart_count += 1
 
     async def stats(self) -> AudioMixerBusStats:
         """Return a coherent, credential-free snapshot without exposing internals."""
@@ -301,6 +319,8 @@ class SharedAudioMixerBus:
                     hard_clip_samples=self._hard_clip_samples,
                     retained_source_count=self._ledger.source_count,
                     ledger_entry_count=self._ledger.entry_count,
+                    decoder_start_ms=self._decoder_start_ms,
+                    decoder_restart_count=self._decoder_restart_count,
                 )
 
     async def aclose(self) -> None:
@@ -346,9 +366,14 @@ class SharedAudioMixerBus:
                         raise
                     except Exception as exc:
                         self._failed = True
-                        self._fail_waiters(items, exc)
+                        failure = AudioBusFailedError("Shared audio master transport failed")
+                        self._fail_waiters(items, failure)
                         queued = await self._take_all_queued()
-                        self._fail_waiters(queued, exc)
+                        self._fail_waiters(queued, failure)
+                        logger.error(
+                            "Shared audio master writer failed: error=%s",
+                            type(exc).__name__,
+                        )
                         return
                     for item in items:
                         if not item.accepted.done():
@@ -615,6 +640,13 @@ class SharedAudioMixerBus:
             raise AudioBusFailedError("Shared audio bus is closed")
         if self._failed:
             raise AudioBusFailedError("Shared audio bus transport has failed")
+
+    def _observe_master_cursor(self) -> dict[SourceKey, SourcePlaybackCursor]:
+        try:
+            return self._ledger.observe(self._master.cursor)
+        except Exception as exc:
+            self._failed = True
+            raise AudioBusFailedError("Audio master cursor observation failed") from exc
 
 
 def master_buffer_frames(max_buffer_ms: int) -> int:

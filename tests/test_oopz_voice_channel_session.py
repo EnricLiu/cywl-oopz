@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 
-from cywl_oopz.features.audio.errors import AudioSessionClosedError
+from cywl_oopz.features.audio.errors import AudioBusFailedError, AudioSessionClosedError
 from cywl_oopz.features.audio.models import (
     AUDIO_BLOCK_FRAMES,
     AudioChannelKey,
@@ -74,6 +74,18 @@ class FakeMasterFactory:
         return output
 
 
+class RecoveringMasterFactory(FakeMasterFactory):
+    def __init__(self) -> None:
+        super().__init__()
+        self.open_calls = 0
+
+    async def open(self) -> FakeMasterPcmOutput:
+        self.open_calls += 1
+        if self.open_calls == 1:
+            raise RuntimeError("fixture master open failure")
+        return await super().open()
+
+
 @pytest.mark.asyncio
 async def test_same_channel_participants_share_join_until_final_release() -> None:
     bot = FakeBot()
@@ -124,6 +136,24 @@ async def test_same_channel_participants_share_master_until_final_release() -> N
     assert await conversation.release() is True
     assert masters.outputs[0].closed is True
     assert bot.voice.leaves == 1
+    await manager.aclose()
+
+
+@pytest.mark.asyncio
+async def test_master_open_failure_is_typed_and_same_participant_can_retry() -> None:
+    bot = FakeBot()
+    masters = RecoveringMasterFactory()
+    manager = OopzVoiceChannelSessionManager(bot, master_factory=masters)
+    participant = await manager.try_acquire(request(VoiceParticipantKind.MUSIC))
+    assert participant is not None
+
+    with pytest.raises(AudioBusFailedError, match="open shared audio master"):
+        await participant.audio_bus()
+    bus = await participant.audio_bus()
+
+    assert bus.failed is False
+    assert masters.open_calls == 2
+    assert len(bot.voice.joins) == 1
     await manager.aclose()
 
 

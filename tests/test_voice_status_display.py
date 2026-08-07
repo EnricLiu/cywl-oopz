@@ -104,6 +104,17 @@ def test_voice_status_renderer_keeps_terminal_statistics_compact() -> None:
     assert len(rendered) < 2000
 
 
+def test_voice_status_renderer_mentions_active_music_mix() -> None:
+    rendered = OopzVoiceStatusRenderer().render(
+        status(
+            VoiceSessionState.SPEAKING,
+            metrics={"audio_music_participant_active": 1},
+        )
+    )
+
+    assert "与音乐混流中" in rendered
+
+
 @pytest.mark.asyncio
 async def test_voice_status_message_coalesces_updates_into_one_editable_message() -> None:
     gateway = FakeEditableGateway()

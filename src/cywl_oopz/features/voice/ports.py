@@ -57,6 +57,12 @@ class VoiceAccessGateway(Protocol):
     ) -> VoiceLease | None: ...
 
 
+class VoiceParticipantStatus(Protocol):
+    """Read the same-event-loop participant view for compact user status."""
+
+    def music_active(self, channel: VoiceChannelKey) -> bool: ...
+
+
 class VoiceMediaSession(Protocol):
     """Streaming media boundary owned by one conversation."""
 

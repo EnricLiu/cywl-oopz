@@ -41,6 +41,7 @@ from .ports import (
     VoiceConfigurationRepository,
     VoiceLease,
     VoiceMemoryContextSource,
+    VoiceParticipantStatus,
     VoiceSessionRepository,
     VoiceSessionRuntime,
     VoiceSessionRuntimeContext,
@@ -93,6 +94,7 @@ class VoiceConversationService:
         configurations: VoiceConfigurationRepository,
         sessions: VoiceSessionRepository,
         memory_context_source: VoiceMemoryContextSource | None = None,
+        participant_status: VoiceParticipantStatus | None = None,
     ) -> None:
         self._settings = settings
         self._access = access
@@ -100,6 +102,7 @@ class VoiceConversationService:
         self._configurations = configurations
         self._sessions = sessions
         self._memory_context_source = memory_context_source
+        self._participant_status = participant_status
         self._lock = asyncio.Lock()
         self._close_lock = asyncio.Lock()
         self._lease_release_tasks: set[asyncio.Task[None]] = set()
@@ -693,8 +696,8 @@ class VoiceConversationService:
                 exception_kind(exc),
             )
 
-    @staticmethod
     def _status(
+        self,
         slot: _ActiveVoiceSession,
         *,
         active: bool = True,
@@ -703,6 +706,14 @@ class VoiceConversationService:
         metrics = slot.runtime_stats.as_metrics()
         if slot.runtime is not None:
             metrics = slot.runtime.stats.as_metrics()
+        channel = slot.voice_channel
+        if (
+            active
+            and channel is not None
+            and self._participant_status is not None
+            and self._participant_status.music_active(channel)
+        ):
+            metrics["audio_music_participant_active"] = 1
         configuration = slot.configuration
         return VoiceSessionStatus(
             active=active,

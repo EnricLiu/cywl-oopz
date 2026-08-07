@@ -33,6 +33,10 @@ class MusicPlaybackError(MusicError):
     """Raised when the OOPZ voice backend cannot perform a requested action."""
 
 
+class MusicBackendClosedError(MusicPlaybackError):
+    """The shared voice transport closed and the current track may be retried once."""
+
+
 class MusicDecoderError(MusicPlaybackError):
     """FFmpeg could not produce a valid bounded canonical PCM stream."""
 

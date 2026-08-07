@@ -59,6 +59,8 @@ class OopzVoiceStatusRenderer:
         else:
             title = f"🎵 **语音会话结束** · {model}"
         facts = [_duration(elapsed), f"{turns} 轮"]
+        if status.music_mixing:
+            facts.append("与音乐混流中")
         if task_calls:
             facts.append(f"后台调用 {task_calls}")
         if notifications:

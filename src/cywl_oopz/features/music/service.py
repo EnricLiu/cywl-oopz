@@ -8,12 +8,14 @@ import random
 from collections import OrderedDict, deque
 from contextlib import suppress
 from dataclasses import dataclass, field
+from uuid import UUID
 
 from cywl_oopz.core.observability import opaque_ref
 from cywl_oopz.features.agent.models import AgentIdentity
 from cywl_oopz.settings import MusicSettings
 
 from .errors import (
+    MusicBackendClosedError,
     MusicNotFoundError,
     MusicPlaybackError,
     MusicQueryError,
@@ -372,6 +374,7 @@ class MusicRequestService:
         session: _MusicSession,
     ) -> None:
         drained_normally = False
+        backend_retries: dict[UUID, int] = {}
         try:
             while True:
                 async with session.lock:
@@ -400,6 +403,7 @@ class MusicRequestService:
                         session.skip_requested.clear()
                 playback: MusicPlayback | None = None
                 completed = False
+                retry_current = False
                 try:
                     logger.info(
                         "Music track resolving: channel=%s",
@@ -426,7 +430,20 @@ class MusicRequestService:
                     )
                     result = await playback.wait_finished()
                     completed = result.end_reason is MusicPlaybackEndReason.FINISHED
-                    if not completed and result.end_reason not in {
+                    if (
+                        result.end_reason is MusicPlaybackEndReason.BACKEND_CLOSED
+                        and backend_retries.get(item.id, 0) < 1
+                        and not session.skip_requested.is_set()
+                    ):
+                        backend_retries[item.id] = backend_retries.get(item.id, 0) + 1
+                        retry_current = True
+                        logger.warning(
+                            "Retrying music track after shared backend failure: "
+                            "channel=%s attempt=%s",
+                            self._channel_ref(channel),
+                            backend_retries[item.id],
+                        )
+                    elif not completed and result.end_reason not in {
                         MusicPlaybackEndReason.STOPPED,
                         MusicPlaybackEndReason.REPLACED,
                     }:
@@ -438,6 +455,26 @@ class MusicRequestService:
                         with suppress(Exception):
                             await playback.stop()
                     raise
+                except MusicBackendClosedError as exc:
+                    if backend_retries.get(item.id, 0) < 1 and not session.skip_requested.is_set():
+                        backend_retries[item.id] = backend_retries.get(item.id, 0) + 1
+                        retry_current = True
+                        logger.warning(
+                            "Retrying music startup after shared backend failure: "
+                            "channel=%s attempt=%s error=%s",
+                            self._channel_ref(channel),
+                            backend_retries[item.id],
+                            type(exc).__name__,
+                        )
+                    else:
+                        logger.error(
+                            "Music backend recovery exhausted: channel=%s error=%s",
+                            self._channel_ref(channel),
+                            type(exc).__name__,
+                        )
+                        async with session.lock:
+                            session.state = PlaybackState.FAILED
+                            session.revision += 1
                 except Exception as exc:
                     logger.error(
                         "Music playback failed: channel=%s error=%s",
@@ -454,6 +491,13 @@ class MusicRequestService:
                     async with session.lock:
                         if not session.skip_requested.is_set() and completed:
                             self._retain_completed(session, item)
+                            backend_retries.pop(item.id, None)
+                        elif not session.skip_requested.is_set() and retry_current:
+                            session.queue.appendleft(item)
+                            session.state = PlaybackState.WAITING
+                            session.revision += 1
+                        else:
+                            backend_retries.pop(item.id, None)
                         if session.playback is playback:
                             session.playback = None
                         session.current = None

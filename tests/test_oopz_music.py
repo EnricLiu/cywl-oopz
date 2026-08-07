@@ -18,6 +18,7 @@ from cywl_oopz.features.audio.models import (
     VoiceParticipantKind,
     VoiceParticipantRequest,
 )
+from cywl_oopz.features.music.errors import MusicBackendClosedError
 from cywl_oopz.features.music.models import MusicPlaybackEndReason, VoiceChannelKey
 from cywl_oopz.integrations.audio.fake import FakeMasterPcmOutput
 from cywl_oopz.integrations.oopz.music import OopzMusicVoiceGateway
@@ -165,6 +166,34 @@ class FakeMasterFactory:
         return output
 
 
+class FailingMaster(FakeMasterPcmOutput):
+    async def write(self, pcm_s16le: bytes):
+        del pcm_s16le
+        raise RuntimeError("fixture master transport failure")
+
+
+class RecoveringMasterFactory(FakeMasterFactory):
+    async def open(self) -> FakeMasterPcmOutput:
+        if not self.outputs:
+            output = FailingMaster(max_buffer_frames=AUDIO_BLOCK_FRAMES * 10)
+        else:
+            output = FakeMasterPcmOutput(max_buffer_frames=AUDIO_BLOCK_FRAMES * 10)
+        self.outputs.append(output)
+        return output
+
+
+class OpenRecoveringMasterFactory(FakeMasterFactory):
+    def __init__(self) -> None:
+        super().__init__()
+        self.open_calls = 0
+
+    async def open(self) -> FakeMasterPcmOutput:
+        self.open_calls += 1
+        if self.open_calls == 1:
+            raise RuntimeError("fixture master open failure")
+        return await super().open()
+
+
 def pcm_settings() -> AudioMixerSettings:
     return AudioMixerSettings.from_mapping({"CYWL_AUDIO_MIXER_ENABLED": "true"})
 
@@ -243,6 +272,69 @@ async def test_oopz_music_gateway_reuses_one_pcm_master_across_tracks() -> None:
     assert await gateway.release(channel) is True
     assert masters.outputs[0].closed is True
     assert bot.voice.leaves == 1
+    await gateway.aclose()
+    await sessions.aclose()
+
+
+@pytest.mark.asyncio
+async def test_oopz_music_gateway_rebuilds_failed_shared_master_for_next_attempt() -> None:
+    bot = FakeBot()
+    decoders = FakeDecoderFactory()
+    masters = RecoveringMasterFactory()
+    sessions = OopzVoiceChannelSessionManager(bot, master_factory=masters)
+    gateway = OopzMusicVoiceGateway(
+        bot,
+        sessions,
+        pcm_settings(),
+        decoder_factory=decoders,
+    )
+    channel = VoiceChannelKey("area", "voice")
+    assert await gateway.acquire(channel) is True
+
+    failed = await gateway.start_playback(channel, "https://music.example/retry.mp3")
+    failed_result = await failed.wait_finished()
+    recovered = await gateway.start_playback(channel, "https://music.example/retry.mp3")
+    recovered_result = await recovered.wait_finished()
+
+    assert failed_result.end_reason is MusicPlaybackEndReason.BACKEND_CLOSED
+    assert recovered_result.end_reason is MusicPlaybackEndReason.FINISHED
+    assert len(masters.outputs) == 2
+    assert masters.outputs[0].closed is True
+    assert masters.outputs[1].closed is False
+    assert gateway._bus is not None
+    stats = await gateway._bus.stats()
+    assert stats.decoder_start_ms >= 0
+    assert stats.decoder_restart_count == 1
+    assert bot.voice.joins == [{"area": "area", "channel": "voice"}]
+    await gateway.release(channel)
+    await gateway.aclose()
+    await sessions.aclose()
+
+
+@pytest.mark.asyncio
+async def test_oopz_music_gateway_maps_master_open_failure_and_tracks_retry() -> None:
+    bot = FakeBot()
+    masters = OpenRecoveringMasterFactory()
+    sessions = OopzVoiceChannelSessionManager(bot, master_factory=masters)
+    gateway = OopzMusicVoiceGateway(
+        bot,
+        sessions,
+        pcm_settings(),
+        decoder_factory=FakeDecoderFactory(),
+    )
+    channel = VoiceChannelKey("area", "voice")
+    assert await gateway.acquire(channel) is True
+
+    with pytest.raises(MusicBackendClosedError, match="backend closed"):
+        await gateway.start_playback(channel, "https://music.example/retry.mp3")
+    recovered = await gateway.start_playback(channel, "https://music.example/retry.mp3")
+    assert (await recovered.wait_finished()).end_reason is MusicPlaybackEndReason.FINISHED
+
+    assert gateway._bus is not None
+    assert (await gateway._bus.stats()).decoder_restart_count == 1
+    assert masters.open_calls == 2
+    assert bot.voice.joins == [{"area": "area", "channel": "voice"}]
+    await gateway.release(channel)
     await gateway.aclose()
     await sessions.aclose()
 

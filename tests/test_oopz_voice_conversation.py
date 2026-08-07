@@ -1,11 +1,24 @@
 from __future__ import annotations
 
+from uuid import uuid4
+
 import pytest
 
-from cywl_oopz.features.audio.models import VoiceParticipantKind
-from cywl_oopz.features.voice.models import VoiceChannelKey
+from cywl_oopz.features.audio.models import (
+    AudioChannelKey,
+    VoiceParticipantKind,
+    VoiceParticipantRequest,
+)
+from cywl_oopz.features.voice.models import (
+    VoiceChannelKey,
+    VoiceSessionState,
+    VoiceSessionStatus,
+)
 from cywl_oopz.integrations.oopz.voice_channel_session import OopzVoiceChannelSessionManager
-from cywl_oopz.integrations.oopz.voice_conversation import OopzConversationVoiceAccess
+from cywl_oopz.integrations.oopz.voice_conversation import (
+    OopzConversationVoiceAccess,
+    OopzVoiceCommandPresenter,
+)
 
 
 class FakeVoice:
@@ -32,6 +45,14 @@ class FakeBot:
         self.channels = FakeChannels()
 
 
+class RecordingContext:
+    def __init__(self) -> None:
+        self.replies: list[str] = []
+
+    async def reply(self, text: str) -> None:
+        self.replies.append(text)
+
+
 @pytest.mark.asyncio
 async def test_oopz_conversation_access_maps_lookup_and_shared_lease_purpose() -> None:
     bot = FakeBot()
@@ -47,7 +68,38 @@ async def test_oopz_conversation_access_maps_lookup_and_shared_lease_purpose() -
     assert snapshot is not None
     assert snapshot.participants[0].kind is VoiceParticipantKind.CONVERSATION
     assert bot.voice.joins == [{"area": "area", "channel": "voice"}]
+    assert access.music_active(VoiceChannelKey("area", "voice")) is False
+
+    music = await leases.try_acquire(
+        VoiceParticipantRequest(
+            VoiceParticipantKind.MUSIC,
+            AudioChannelKey("area", "voice"),
+            "music",
+        )
+    )
+    assert music is not None
+    assert access.music_active(VoiceChannelKey("area", "voice")) is True
 
     await lease.release()
+    assert bot.voice.leaves == 0
+    await music.release()
     assert bot.voice.leaves == 1
     await leases.aclose()
+
+
+@pytest.mark.asyncio
+async def test_voice_status_command_mentions_active_music_mix() -> None:
+    context = RecordingContext()
+    status = VoiceSessionStatus(
+        active=True,
+        session_id=uuid4(),
+        owner_person_id="person",
+        voice_channel=VoiceChannelKey("area", "voice"),
+        state=VoiceSessionState.LISTENING,
+        elapsed_seconds=12,
+        metrics={"audio_music_participant_active": 1},
+    )
+
+    await OopzVoiceCommandPresenter().status(context, status)
+
+    assert "与音乐混流中" in context.replies[0]

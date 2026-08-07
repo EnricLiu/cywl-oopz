@@ -9,6 +9,7 @@ import pytest
 from cywl_oopz.features.agent.models import AgentIdentity
 from cywl_oopz.features.chat.models import ConversationKey
 from cywl_oopz.features.music.errors import (
+    MusicBackendClosedError,
     MusicQueueFullError,
     MusicVoiceBusyError,
     MusicVoiceChannelRequiredError,
@@ -19,6 +20,7 @@ from cywl_oopz.features.music.models import (
     MusicTrack,
     PlayableTrack,
     PlaybackMode,
+    PlaybackState,
     VoiceChannelKey,
 )
 from cywl_oopz.features.music.service import MusicRequestService
@@ -45,6 +47,7 @@ def identity(person_id: str = "person") -> AgentIdentity:
 class FakeCatalog:
     def __init__(self) -> None:
         self.closed = False
+        self.resolved: list[str] = []
 
     async def search(self, query: str, *, limit: int) -> tuple[MusicTrack, ...]:
         return (
@@ -58,6 +61,7 @@ class FakeCatalog:
         )[:limit]
 
     async def resolve(self, track: MusicTrack) -> PlayableTrack:
+        self.resolved.append(track.source_id)
         return PlayableTrack(track, f"https://music.example/{track.source_id}.mp3")
 
     async def aclose(self) -> None:
@@ -145,6 +149,58 @@ class FakePlayback:
         return True
 
 
+class TerminalPlayback:
+    def __init__(self, result: MusicPlaybackResult) -> None:
+        self._result = result
+
+    async def wait_finished(self) -> MusicPlaybackResult:
+        return self._result
+
+    async def stop(self) -> None:
+        return None
+
+    async def pause(self) -> bool:
+        return False
+
+    async def resume(self) -> bool:
+        return False
+
+
+class RecoveringVoice(FakeVoice):
+    def __init__(self, failures: int = 1) -> None:
+        super().__init__()
+        self._failures_remaining = failures
+
+    async def start_playback(
+        self,
+        channel: VoiceChannelKey,
+        stream_url: str,
+    ):
+        if self._failures_remaining:
+            self._failures_remaining -= 1
+            self.played.append((channel, stream_url))
+            self.play_started.set()
+            return TerminalPlayback(MusicPlaybackResult(MusicPlaybackEndReason.BACKEND_CLOSED))
+        return await super().start_playback(channel, stream_url)
+
+
+class StartupRecoveringVoice(FakeVoice):
+    def __init__(self, failures: int = 1) -> None:
+        super().__init__()
+        self._failures_remaining = failures
+
+    async def start_playback(
+        self,
+        channel: VoiceChannelKey,
+        stream_url: str,
+    ):
+        if self._failures_remaining:
+            self._failures_remaining -= 1
+            self.played.append((channel, stream_url))
+            raise MusicBackendClosedError("fixture startup backend failure")
+        return await super().start_playback(channel, stream_url)
+
+
 async def eventually(predicate, *, attempts: int = 100) -> None:
     for _ in range(attempts):
         if predicate():
@@ -187,6 +243,54 @@ async def test_music_service_serializes_queue_controls_and_cleans_up() -> None:
     await service.aclose()
     assert catalog.closed is True
     assert voice.closed is True
+
+
+@pytest.mark.asyncio
+async def test_music_service_reresolves_current_track_once_after_backend_failure() -> None:
+    catalog = FakeCatalog()
+    voice = RecoveringVoice()
+    service = MusicRequestService(settings(), catalog, voice)
+
+    await service.enqueue(identity(), "recover")
+    await eventually(lambda: len(voice.played) == 2)
+
+    assert catalog.resolved == ["recover", "recover"]
+    assert voice.played[0] == voice.played[1]
+    assert (await service.queue(identity())).state is PlaybackState.PLAYING
+    voice.current_finished.set()
+    await eventually(lambda: voice.acquired is None)
+    await service.aclose()
+
+
+@pytest.mark.asyncio
+async def test_music_service_does_not_retry_backend_failure_more_than_once() -> None:
+    catalog = FakeCatalog()
+    voice = RecoveringVoice(failures=2)
+    service = MusicRequestService(settings(), catalog, voice)
+
+    await service.enqueue(identity(), "still-broken")
+    await eventually(lambda: voice.acquired is None)
+
+    assert catalog.resolved == ["still-broken", "still-broken"]
+    assert len(voice.played) == 2
+    assert (await service.queue(identity())).state is PlaybackState.IDLE
+    await service.aclose()
+
+
+@pytest.mark.asyncio
+async def test_music_service_reresolves_once_when_backend_fails_during_startup() -> None:
+    catalog = FakeCatalog()
+    voice = StartupRecoveringVoice()
+    service = MusicRequestService(settings(), catalog, voice)
+
+    await service.enqueue(identity(), "startup-recover")
+    await eventually(lambda: len(voice.played) == 2)
+
+    assert catalog.resolved == ["startup-recover", "startup-recover"]
+    assert (await service.queue(identity())).state is PlaybackState.PLAYING
+    voice.current_finished.set()
+    await eventually(lambda: voice.acquired is None)
+    await service.aclose()
 
 
 @pytest.mark.asyncio
