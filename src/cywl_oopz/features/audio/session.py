@@ -402,6 +402,8 @@ class SharedAudioMixerBus:
             return music, voice
 
     def _other_lane_active(self, available: AudioSourceKind) -> bool:
+        if available is AudioSourceKind.MUSIC:
+            return DuckingReason.VOICE_PLAYOUT in self._ducking_reasons
         return self._other_participant_active(available)
 
     def _other_participant_active(self, source: AudioSourceKind) -> bool:

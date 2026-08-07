@@ -6,6 +6,7 @@ from uuid import UUID
 import numpy as np
 import pytest
 
+from cywl_oopz.features.audio import session as audio_session_module
 from cywl_oopz.features.audio.errors import AudioBackpressureError, AudioBusFailedError
 from cywl_oopz.features.audio.ledger import SourceKey
 from cywl_oopz.features.audio.models import (
@@ -99,6 +100,18 @@ async def test_shared_bus_coalesces_music_and_voice_into_one_master_block() -> N
     assert samples[0, 0] > int(0.1 * 32_767)
     assert music_cursors[SourceKey(_MUSIC_ID, AudioSourceKind.MUSIC, 0)].accepted_frames == 960
     assert voice_cursors[SourceKey(_VOICE_ID, AudioSourceKind.VOICE, 0)].accepted_frames == 960
+    await bus.aclose()
+
+
+@pytest.mark.asyncio
+async def test_idle_conversation_does_not_delay_music_for_missing_voice(monkeypatch) -> None:
+    bus, master = bus_fixture()
+    monkeypatch.setattr(audio_session_module, "AUDIO_BLOCK_DURATION_MS", 1_000)
+
+    async with asyncio.timeout(0.1):
+        await bus.write_music((block(AudioSourceKind.MUSIC, 0.1),))
+
+    assert len(master.writes) == 1
     await bus.aclose()
 
 
