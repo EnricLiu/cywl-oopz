@@ -9,6 +9,7 @@ import pytest
 from cywl_oopz.features.audio.errors import (
     AudioBackpressureError,
     AudioLedgerCapacityError,
+    AudioLedgerError,
     AudioQueueClosedError,
 )
 from cywl_oopz.features.audio.ledger import MasterPlayoutLedger, SourceKey
@@ -163,6 +164,33 @@ def test_ledger_rejects_more_unrendered_audio_than_its_window() -> None:
                 None,
             )
         )
+
+
+def test_ledger_forgets_only_sources_without_master_references() -> None:
+    music_id = uuid4()
+    key = SourceKey(music_id, AudioSourceKind.MUSIC, 0)
+    ledger = MasterPlayoutLedger(max_buffer_frames=AUDIO_BLOCK_FRAMES * 2)
+    entry = ledger.register_pending(AudioMixer().mix(_block(music_id, AudioSourceKind.MUSIC), None))
+    ledger.mark_accepted(
+        entry,
+        _cursor(0, accepted=AUDIO_BLOCK_FRAMES, rendered=0),
+    )
+
+    with pytest.raises(AudioLedgerError, match="still referenced"):
+        ledger.forget_sources(frozenset({key}))
+
+    cursors = ledger.observe(
+        _cursor(
+            0,
+            accepted=AUDIO_BLOCK_FRAMES,
+            rendered=AUDIO_BLOCK_FRAMES,
+        )
+    )
+    assert cursors[key].rendered_frames == AUDIO_BLOCK_FRAMES
+    assert ledger.entry_count == 0
+    assert ledger.forget_sources(frozenset({key})) == 1
+    assert ledger.source_count == 0
+    assert ledger.forget_sources(frozenset({key})) == 0
 
 
 @pytest.mark.asyncio

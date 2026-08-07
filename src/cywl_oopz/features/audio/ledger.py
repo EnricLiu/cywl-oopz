@@ -131,6 +131,10 @@ class MasterPlayoutLedger:
     def entry_count(self) -> int:
         return len(self._entries)
 
+    @property
+    def source_count(self) -> int:
+        return len(self._sources)
+
     def register_pending(self, mixed: MixedAudioBlock) -> int:
         """Register source data before the single writer calls SDK ``write``."""
         if self._pending_entry_id is not None:
@@ -193,6 +197,18 @@ class MasterPlayoutLedger:
 
     def source_cursors(self) -> dict[SourceKey, SourcePlaybackCursor]:
         return {key: self.source_cursor(key) for key in self._sources}
+
+    def forget_sources(self, keys: frozenset[SourceKey]) -> int:
+        """Release terminal source cursors after all master references are gone."""
+        referenced = {
+            SourceKey.from_slice(source) for entry in self._entries for source in entry.sources
+        }
+        if referenced.intersection(keys):
+            raise AudioLedgerError("Cannot forget a source still referenced by master audio")
+        removed = 0
+        for key in keys:
+            removed += int(self._sources.pop(key, None) is not None)
+        return removed
 
     def remix(
         self,

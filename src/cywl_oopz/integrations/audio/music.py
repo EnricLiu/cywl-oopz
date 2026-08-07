@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from contextlib import suppress
 from uuid import uuid4
 
+from cywl_oopz.core.observability import exception_kind
 from cywl_oopz.features.audio.ledger import SourceKey
 from cywl_oopz.features.audio.models import (
     AUDIO_SAMPLE_RATE,
@@ -17,6 +19,8 @@ from cywl_oopz.features.audio.models import (
 from cywl_oopz.features.audio.ports import AudioDecoder
 from cywl_oopz.features.audio.session import SharedAudioMixerBus
 from cywl_oopz.features.music.models import MusicPlaybackEndReason, MusicPlaybackResult
+
+logger = logging.getLogger(__name__)
 
 
 class MusicPcmSourceOutput:
@@ -60,7 +64,7 @@ class MusicPcmSourceOutput:
         return cursor
 
     async def drain(self) -> SourcePlaybackCursor:
-        return self._cursor_from(await self._bus.drain(self._key()))
+        return self._cursor_from(await self._bus.drain(self._key(), release_source=True))
 
     def _cursor_from(
         self,
@@ -175,6 +179,15 @@ class FfmpegMusicPlayback:
             self._complete(MusicPlaybackEndReason.BACKEND_CLOSED)
             raise
         except Exception as exc:
+            try:
+                async with self._operation_lock:
+                    cursor = await self._source.flush()
+                    self._record_segment(cursor)
+            except Exception as cleanup_error:
+                logger.warning(
+                    "Could not flush failed PCM music source: error=%s",
+                    exception_kind(cleanup_error),
+                )
             self._complete(MusicPlaybackEndReason.TRACK_ERROR, exc)
         finally:
             with suppress(Exception):

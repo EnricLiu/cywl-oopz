@@ -218,6 +218,14 @@ async def test_live_project_shared_music_and_voice_pcm_survive_barge_in() -> Non
         music_cursor = await music_output.drain()
         assert music_cursor.accepted_frames == AUDIO_BLOCK_FRAMES * flush_count
         assert music_cursor.rendered_frames == music_cursor.accepted_frames
+        audio_stats = await conversation_bus.stats()
+        logger.info("OOPZ shared audio live gate: %s", audio_stats.as_metrics())
+        assert audio_stats.remix_count == flush_count
+        assert audio_stats.max_remix_ms < 200
+        assert audio_stats.master_max_buffered_ms <= audio_settings.master_max_buffer_ms
+        assert audio_stats.hard_clip_samples == 0
+        assert audio_stats.retained_source_count == 0
+        assert audio_stats.ledger_entry_count == 0
 
         snapshot = await sessions.current()
         assert snapshot is not None

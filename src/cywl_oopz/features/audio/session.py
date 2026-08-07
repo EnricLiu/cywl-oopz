@@ -20,6 +20,7 @@ from .models import (
     AUDIO_CHANNELS,
     AUDIO_SAMPLE_RATE,
     AudioBlock,
+    AudioMixerBusStats,
     AudioSourceKind,
     DuckingReason,
     SourcePlaybackCursor,
@@ -81,6 +82,20 @@ class SharedAudioMixerBus:
         self._closed = False
         self._failed = False
         self._master_cursor_observed_at = time.monotonic()
+        self._master_started = False
+        self._master_max_buffered_frames = 0
+        self._master_underrun_count = 0
+        self._mixer_deadline_miss_count = 0
+        self._remix_count = 0
+        self._last_remix_ms = 0.0
+        self._max_remix_ms = 0.0
+        self._replayed_frames = {
+            AudioSourceKind.MUSIC: 0,
+            AudioSourceKind.VOICE: 0,
+        }
+        self._limiter_active_blocks = 0
+        self._max_gain_reduction_db = 0.0
+        self._hard_clip_samples = 0
         self._writer = asyncio.create_task(self._writer_loop(), name="shared-audio-writer")
 
     @property
@@ -175,7 +190,9 @@ class SharedAudioMixerBus:
                 self._master_cursor_observed_at = time.monotonic()
                 plan = self._ledger.remix(old_cursor, discard=discard)
                 self._mixer.reset_dynamics()
+                self._master_started = False
                 await self._submit_replays(plan)
+                self._ledger.forget_sources(discard)
             except BaseException:
                 self._failed = True
                 self._fail_waiters(removed, AudioBusFailedError("Audio remix barrier failed"))
@@ -183,19 +200,25 @@ class SharedAudioMixerBus:
             for item in removed:
                 if not item.accepted.done():
                     item.accepted.set_result(plan.source_cursors)
+            elapsed_ms = (time.monotonic() - started_at) * 1_000
+            self._record_remix(plan, elapsed_ms)
             logger.info(
                 "Remixed shared audio master: discarded=%s replay_segments=%s elapsed_ms=%.1f",
                 len(discard),
                 len(plan.survivors),
-                (time.monotonic() - started_at) * 1_000,
+                elapsed_ms,
             )
             return plan
 
     async def drain(
         self,
         source: SourceKey | None = None,
+        *,
+        release_source: bool = False,
     ) -> dict[SourceKey, SourcePlaybackCursor]:
         """Drain current master audio, returning source-local rendered cursors."""
+        if release_source and source is None:
+            raise ValueError("Releasing a drained source requires its key")
         if source is not None and self._other_participant_active(source.kind):
             deadline = time.monotonic() + max(
                 0.1,
@@ -207,6 +230,8 @@ class SharedAudioMixerBus:
                     observed = self._ledger.observe(self._master.cursor)
                     cursor = observed.get(source)
                     if cursor is None or cursor.rendered_frames >= cursor.accepted_frames:
+                        if release_source:
+                            self._ledger.forget_sources(frozenset({source}))
                         return observed
                 await asyncio.sleep(AUDIO_BLOCK_DURATION_MS / 2_000)
         async with self._operation_lock:
@@ -216,10 +241,15 @@ class SharedAudioMixerBus:
                 if source is not None:
                     cursor = observed.get(source)
                     if cursor is not None and cursor.rendered_frames >= cursor.accepted_frames:
+                        if release_source:
+                            self._ledger.forget_sources(frozenset({source}))
                         return observed
                 cursor = await self._master.drain()
                 self._master_cursor_observed_at = time.monotonic()
-                return self._ledger.observe(cursor)
+                observed = self._ledger.observe(cursor)
+                if release_source:
+                    self._ledger.forget_sources(frozenset({source}))
+                return observed
             except BaseException:
                 self._failed = True
                 raise
@@ -232,6 +262,46 @@ class SharedAudioMixerBus:
             except BaseException:
                 self._failed = True
                 raise
+
+    async def forget_sources(self, sources: frozenset[SourceKey]) -> int:
+        """Release source-local cursor history after its caller has consumed it."""
+        async with self._operation_lock:
+            self._require_healthy()
+            return self._ledger.forget_sources(sources)
+
+    async def stats(self) -> AudioMixerBusStats:
+        """Return a coherent, credential-free snapshot without exposing internals."""
+        async with self._operation_lock:
+            async with self._condition:
+                buffered_frames = 0 if self._closed else self._estimated_master_buffered_frames()
+                return AudioMixerBusStats(
+                    master_buffered_ms=buffered_frames * 1_000 / AUDIO_SAMPLE_RATE,
+                    master_max_buffered_ms=(
+                        self._master_max_buffered_frames * 1_000 / AUDIO_SAMPLE_RATE
+                    ),
+                    master_underrun_count=self._master_underrun_count,
+                    mixer_deadline_miss_count=self._mixer_deadline_miss_count,
+                    music_queue_ms=(
+                        len(self._queues[AudioSourceKind.MUSIC]) * AUDIO_BLOCK_DURATION_MS
+                    ),
+                    voice_queue_ms=(
+                        len(self._queues[AudioSourceKind.VOICE]) * AUDIO_BLOCK_DURATION_MS
+                    ),
+                    remix_count=self._remix_count,
+                    last_remix_ms=self._last_remix_ms,
+                    max_remix_ms=self._max_remix_ms,
+                    replayed_music_ms=(
+                        self._replayed_frames[AudioSourceKind.MUSIC] * 1_000 / AUDIO_SAMPLE_RATE
+                    ),
+                    replayed_voice_ms=(
+                        self._replayed_frames[AudioSourceKind.VOICE] * 1_000 / AUDIO_SAMPLE_RATE
+                    ),
+                    limiter_active_blocks=self._limiter_active_blocks,
+                    max_gain_reduction_db=self._max_gain_reduction_db,
+                    hard_clip_samples=self._hard_clip_samples,
+                    retained_source_count=self._ledger.source_count,
+                    ledger_entry_count=self._ledger.entry_count,
+                )
 
     async def aclose(self) -> None:
         async with self._close_lock:
@@ -247,6 +317,8 @@ class SharedAudioMixerBus:
             self._fail_waiters(queued, AudioBusFailedError("Shared audio bus is closing"))
             await self._master.aclose()
             self._closed = True
+            final_stats = await self.stats()
+            logger.info("Closed shared audio master: metrics=%s", final_stats.as_metrics())
 
     async def _writer_loop(self) -> None:
         try:
@@ -323,26 +395,57 @@ class SharedAudioMixerBus:
         transition_from: np.ndarray | None = None,
     ) -> dict[SourceKey, SourcePlaybackCursor]:
         await self._pace_master()
+        started_at = time.monotonic()
         snapshot = DuckingSnapshot(
             conversation_active=(VoiceParticipantKind.CONVERSATION in self._participants),
             reasons=self._ducking_reasons,
         )
         mixed = self._mixer.mix(music, voice, snapshot)
+        if mixed.limiter.gain_reduction_db > 0:
+            self._limiter_active_blocks += 1
+        self._max_gain_reduction_db = max(
+            self._max_gain_reduction_db,
+            mixed.limiter.gain_reduction_db,
+        )
+        self._hard_clip_samples += mixed.limiter.hard_clipped_samples
         if transition_from is not None:
             mixed = self._apply_transition(mixed, transition_from)
         entry_id = self._ledger.register_pending(mixed)
         master_cursor = await self._master.write(mixed.pcm_s16le)
         self._master_cursor_observed_at = time.monotonic()
+        self._master_started = True
+        self._master_max_buffered_frames = max(
+            self._master_max_buffered_frames,
+            master_cursor.buffered_frames,
+        )
+        if time.monotonic() - started_at > AUDIO_BLOCK_DURATION_MS / 1_000:
+            self._mixer_deadline_miss_count += 1
         return self._ledger.mark_accepted(entry_id, master_cursor)
 
     async def _pace_master(self) -> None:
-        cursor = self._master.cursor
-        now = time.monotonic()
-        elapsed_frames = int((now - self._master_cursor_observed_at) * AUDIO_SAMPLE_RATE)
-        estimated_buffered = max(0, cursor.buffered_frames - elapsed_frames)
+        estimated_buffered = self._estimated_master_buffered_frames()
+        if self._master_started and estimated_buffered == 0:
+            self._master_underrun_count += 1
         excess = estimated_buffered + AUDIO_BLOCK_FRAMES - self._target_buffer_frames
         if excess > 0:
             await asyncio.sleep(excess / AUDIO_SAMPLE_RATE)
+
+    def _estimated_master_buffered_frames(self) -> int:
+        cursor = self._master.cursor
+        elapsed_frames = int(
+            (time.monotonic() - self._master_cursor_observed_at) * AUDIO_SAMPLE_RATE
+        )
+        return max(0, cursor.buffered_frames - elapsed_frames)
+
+    def _record_remix(self, plan: RemixPlan, elapsed_ms: float) -> None:
+        self._remix_count += 1
+        self._last_remix_ms = elapsed_ms
+        self._max_remix_ms = max(self._max_remix_ms, elapsed_ms)
+        for survivor in plan.survivors:
+            if survivor.music is not None:
+                self._replayed_frames[AudioSourceKind.MUSIC] += survivor.music.frame_count
+            if survivor.voice is not None:
+                self._replayed_frames[AudioSourceKind.VOICE] += survivor.voice.frame_count
 
     async def _submit_replays(self, plan: RemixPlan) -> None:
         if not plan.survivors:

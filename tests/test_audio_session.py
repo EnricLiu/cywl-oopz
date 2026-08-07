@@ -145,7 +145,8 @@ async def test_voice_flush_replays_only_unrendered_music_without_double_counting
     observed = await bus.drain()
     assert observed[music_key].accepted_frames == AUDIO_BLOCK_FRAMES * 2
     assert observed[music_key].rendered_frames == AUDIO_BLOCK_FRAMES * 2
-    assert observed[voice_key].rendered_frames == AUDIO_BLOCK_FRAMES // 2
+    assert voice_key not in observed
+    assert plan.source_cursors[voice_key].rendered_frames == AUDIO_BLOCK_FRAMES // 2
     await bus.aclose()
 
 
@@ -167,7 +168,8 @@ async def test_music_flush_replays_voice_tail_and_preserves_voice_cursor() -> No
     assert plan.survivors[0].voice is not None
     assert observed[voice_key].accepted_frames == AUDIO_BLOCK_FRAMES
     assert observed[voice_key].rendered_frames == AUDIO_BLOCK_FRAMES
-    assert observed[music_key].rendered_frames == 0
+    assert music_key not in observed
+    assert plan.source_cursors[music_key].rendered_frames == 0
     await bus.aclose()
 
 
@@ -214,6 +216,32 @@ async def test_one_hundred_barge_in_remixes_do_not_duplicate_music_cursor() -> N
 
     assert observed[music_key].accepted_frames == AUDIO_BLOCK_FRAMES * 100
     assert observed[music_key].rendered_frames == AUDIO_BLOCK_FRAMES * 100
+    stats = await bus.stats()
+    assert stats.remix_count == 100
+    assert stats.replayed_music_ms == pytest.approx(1_000)
+    assert stats.replayed_voice_ms == 0
+    assert stats.retained_source_count == 1
+    assert stats.ledger_entry_count == 0
+    await bus.aclose()
+
+
+@pytest.mark.asyncio
+async def test_shared_bus_stats_capture_buffer_limiter_and_release_source() -> None:
+    bus, _master = bus_fixture()
+    music_key = SourceKey(_MUSIC_ID, AudioSourceKind.MUSIC, 0)
+
+    await bus.write_music((block(AudioSourceKind.MUSIC, 2.0),))
+    cursors = await bus.drain(music_key, release_source=True)
+    stats = await bus.stats()
+
+    assert cursors[music_key].rendered_frames == AUDIO_BLOCK_FRAMES
+    assert stats.master_max_buffered_ms == pytest.approx(20)
+    assert stats.music_queue_ms == stats.voice_queue_ms == 0
+    assert stats.limiter_active_blocks == 1
+    assert stats.max_gain_reduction_db > 0
+    assert stats.hard_clip_samples == 0
+    assert stats.retained_source_count == 0
+    assert stats.as_metrics()["audio_retained_source_count"] == 0
     await bus.aclose()
 
 

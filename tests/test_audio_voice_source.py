@@ -115,3 +115,25 @@ async def test_voice_drain_uses_source_barrier_while_music_participant_is_active
     assert cursor.accepted_samples == cursor.rendered_samples == 960
     assert master.drain_count == 0
     await source.aclose()
+
+
+@pytest.mark.asyncio
+async def test_repeated_voice_drains_compact_rendered_source_segments() -> None:
+    master = FakeMasterPcmOutput(max_buffer_frames=AUDIO_BLOCK_FRAMES * 20)
+    bus = SharedAudioMixerBus(master, max_buffer_frames=AUDIO_BLOCK_FRAMES * 21)
+    source = VoicePcmSourceOutput(bus)
+
+    for _ in range(100):
+        await source.write(chunk(20))
+        cursor = await source.drain()
+
+    stats = await bus.stats()
+    assert cursor.accepted_samples == cursor.rendered_samples == 48_000
+    assert stats.retained_source_count == 0
+    assert stats.ledger_entry_count == 0
+    assert source._segments == []
+
+    repeated = await source.drain()
+    assert repeated == cursor
+    assert master.drain_count == 100
+    await source.aclose()

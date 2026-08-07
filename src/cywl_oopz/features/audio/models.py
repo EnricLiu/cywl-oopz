@@ -279,6 +279,48 @@ class SourcePlaybackCursor:
 
 
 @dataclass(frozen=True, slots=True)
+class AudioMixerBusStats:
+    """Small in-memory snapshot used by live gates and status diagnostics."""
+
+    master_buffered_ms: float = 0.0
+    master_max_buffered_ms: float = 0.0
+    master_underrun_count: int = 0
+    mixer_deadline_miss_count: int = 0
+    music_queue_ms: int = 0
+    voice_queue_ms: int = 0
+    remix_count: int = 0
+    last_remix_ms: float = 0.0
+    max_remix_ms: float = 0.0
+    replayed_music_ms: float = 0.0
+    replayed_voice_ms: float = 0.0
+    limiter_active_blocks: int = 0
+    max_gain_reduction_db: float = 0.0
+    hard_clip_samples: int = 0
+    retained_source_count: int = 0
+    ledger_entry_count: int = 0
+
+    def as_metrics(self) -> dict[str, int | float]:
+        return {
+            "audio_master_buffered_ms": self.master_buffered_ms,
+            "audio_master_max_buffered_ms": self.master_max_buffered_ms,
+            "audio_master_underrun_count": self.master_underrun_count,
+            "audio_mixer_deadline_miss_count": self.mixer_deadline_miss_count,
+            "audio_music_queue_ms": self.music_queue_ms,
+            "audio_voice_queue_ms": self.voice_queue_ms,
+            "audio_remix_count": self.remix_count,
+            "audio_last_remix_ms": self.last_remix_ms,
+            "audio_max_remix_ms": self.max_remix_ms,
+            "audio_replayed_music_ms": self.replayed_music_ms,
+            "audio_replayed_voice_ms": self.replayed_voice_ms,
+            "audio_limiter_active_blocks": self.limiter_active_blocks,
+            "audio_max_gain_reduction_db": self.max_gain_reduction_db,
+            "audio_hard_clip_samples": self.hard_clip_samples,
+            "audio_retained_source_count": self.retained_source_count,
+            "audio_ledger_entry_count": self.ledger_entry_count,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class MixerLevels:
     """Finite source gain and transition settings used by one mixer."""
 

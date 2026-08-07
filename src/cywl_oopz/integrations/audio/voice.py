@@ -38,6 +38,7 @@ class VoicePcmSourceOutput:
         self._source_generation = 0
         self._provider_generation = 0
         self._accepted_native_frames = 0
+        self._retired_native_frames = 0
         self._segments: list[_VoiceSourceSegment] = []
         self._active_segment: _VoiceSourceSegment | None = None
         self._converter = self._new_converter()
@@ -73,6 +74,7 @@ class VoicePcmSourceOutput:
                 old_cursor = self._cursor_from({})
             self._provider_generation += 1
             self._accepted_native_frames = 0
+            self._retired_native_frames = 0
             self._segments.clear()
             self._active_segment = None
             self._reset_converter()
@@ -91,9 +93,14 @@ class VoicePcmSourceOutput:
                 self._reset_converter()
             else:
                 segment = self._segments[-1] if self._segments else None
+            if segment is None:
+                await self._bus.set_voice_playout(False)
+                return self._cursor_from({})
             cursors = await self._bus.drain(segment.key if segment is not None else None)
             await self._bus.set_voice_playout(False)
-            return self._cursor_from(cursors)
+            cursor = self._cursor_from(cursors)
+            await self._retire_rendered_segments(cursors)
+            return cursor
 
     async def set_user_speaking(self, speaking: bool) -> None:
         await self._bus.set_user_speaking(speaking)
@@ -147,7 +154,7 @@ class VoicePcmSourceOutput:
         self,
         cursors: dict[SourceKey, SourcePlaybackCursor],
     ) -> PlaybackCursor:
-        rendered_native = 0
+        rendered_native = self._retired_native_frames
         for segment in self._segments:
             cursor = cursors.get(segment.key)
             if cursor is None:
@@ -170,6 +177,26 @@ class VoicePcmSourceOutput:
             self._accepted_native_frames - rendered_native,
             PROVIDER_OUTPUT_FORMAT.sample_rate,
         )
+
+    async def _retire_rendered_segments(
+        self,
+        cursors: dict[SourceKey, SourcePlaybackCursor],
+    ) -> None:
+        retired: list[_VoiceSourceSegment] = []
+        for segment in self._segments:
+            cursor = cursors.get(segment.key)
+            if (
+                segment.closed
+                and cursor is not None
+                and cursor.rendered_frames >= segment.canonical_frames
+            ):
+                retired.append(segment)
+        if not retired:
+            return
+        retired_keys = frozenset(segment.key for segment in retired)
+        await self._bus.forget_sources(retired_keys)
+        self._segments = [segment for segment in self._segments if segment.key not in retired_keys]
+        self._retired_native_frames += sum(segment.native_frames for segment in retired)
 
     def _require_open(self) -> None:
         if self._closed:
