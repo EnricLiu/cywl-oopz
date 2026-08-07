@@ -17,6 +17,20 @@ from oopz_sdk import OopzBot, OopzConfig
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from cywl_oopz.features.audio.models import (
+    AudioChannelKey,
+    VoiceParticipantKind,
+    VoiceParticipantRequest,
+)
+from cywl_oopz.features.music.errors import MusicNotFoundError
+from cywl_oopz.features.music.models import (
+    PlayableTrack,
+)
+from cywl_oopz.features.music.models import (
+    VoiceChannelKey as MusicVoiceChannelKey,
+)
+from cywl_oopz.features.music.netease import NeteaseMusicCatalog
+from cywl_oopz.features.music.ports import MusicPlayback
 from cywl_oopz.features.voice.errors import VoiceProviderConfigurationError
 from cywl_oopz.features.voice.events import VoiceSessionFinished, VoiceSessionReady
 from cywl_oopz.features.voice.models import (
@@ -40,11 +54,11 @@ from cywl_oopz.features.voice.settings import (
     VoiceStartConfiguration,
     VoiceTurnRole,
 )
-from cywl_oopz.integrations.oopz.voice_lease import (
-    OopzVoiceLease,
-    OopzVoiceLeaseManager,
-    VoiceLeasePurpose,
-    VoiceLeaseRequest,
+from cywl_oopz.integrations.oopz.master_audio import OopzMasterPcmOutputFactory
+from cywl_oopz.integrations.oopz.music import OopzMusicVoiceGateway
+from cywl_oopz.integrations.oopz.voice_channel_session import (
+    OopzVoiceChannelSessionManager,
+    OopzVoiceParticipant,
 )
 from cywl_oopz.integrations.oopz.voice_media import OopzVoiceMediaGateway
 from cywl_oopz.integrations.voice.fake import (
@@ -56,7 +70,7 @@ from cywl_oopz.integrations.voice.fake import (
 )
 from cywl_oopz.integrations.voice.qwen_omni import QwenOmniRealtimeProvider
 from cywl_oopz.integrations.voice.qwen_protocol import QwenOmniConfig
-from cywl_oopz.settings import VoiceSettings
+from cywl_oopz.settings import AudioMixerSettings, MusicSettings, VoiceSettings
 from cywl_oopz.storage.models import VoiceModelRecord, VoiceProviderRecord
 from cywl_oopz.storage.url import normalize_asyncpg_url
 
@@ -216,14 +230,18 @@ class _QwenLiveRuntimeHarness:
 
 @dataclass(slots=True)
 class _OopzQwenLiveRuntimeHarness:
-    """Own the paid Provider and mutating OOPZ resources for one manual E2E gate."""
+    """Own one shared OOPZ bus, paid Provider, and optional real music stream."""
 
     bot: OopzBot
-    leases: OopzVoiceLeaseManager
-    lease: OopzVoiceLease
+    channel_sessions: OopzVoiceChannelSessionManager
+    lease: OopzVoiceParticipant
     runtime: RealtimeVoiceSessionRuntimeImpl
     sessions: FakeVoiceSessionRepository
     providers: list[QwenOmniRealtimeProvider]
+    audio_settings: AudioMixerSettings
+    voice_channel: VoiceChannelKey
+    music: OopzMusicVoiceGateway | None = None
+    playback: MusicPlayback | None = None
 
     @classmethod
     async def create(
@@ -233,20 +251,44 @@ class _OopzQwenLiveRuntimeHarness:
         area_id: str,
         channel_id: str,
         target_person_id: str,
+        music_stream_url: str | None = None,
+        music_first: bool = False,
     ) -> _OopzQwenLiveRuntimeHarness:
         bot = OopzBot(await OopzConfig.from_env_async())
-        leases = OopzVoiceLeaseManager(bot)
+        audio_values = dict(os.environ)
+        audio_values["CYWL_AUDIO_MIXER_ENABLED"] = "true"
+        audio_settings = AudioMixerSettings.from_mapping(audio_values)
+        master_factory = OopzMasterPcmOutputFactory.from_settings(bot, audio_settings)
+        channel_sessions = OopzVoiceChannelSessionManager(
+            bot,
+            allow_mixed_participants=True,
+            master_factory=master_factory,
+            master_target_buffer_ms=audio_settings.master_target_buffer_ms,
+            music_queue_ms=audio_settings.music_queue_ms,
+            voice_queue_ms=audio_settings.voice_queue_ms,
+            mixer_levels=audio_settings.mixer_levels(),
+        )
         lease = None
         runtime = None
+        music = None
+        playback = None
         try:
             await bot.rest.start()
             await bot.voice.start()
-            lease = await leases.try_acquire(
-                VoiceLeaseRequest(
-                    VoiceLeasePurpose.CONVERSATION,
-                    area_id,
-                    channel_id,
-                    owner_key="qwen-oopz-live-e2e",
+            music_channel = MusicVoiceChannelKey(area_id, channel_id)
+            if music_stream_url is not None and music_first:
+                music, playback = await cls._start_music(
+                    bot,
+                    channel_sessions,
+                    audio_settings,
+                    music_channel,
+                    music_stream_url,
+                )
+            lease = await channel_sessions.try_acquire(
+                VoiceParticipantRequest(
+                    VoiceParticipantKind.CONVERSATION,
+                    AudioChannelKey(area_id, channel_id),
+                    "qwen-oopz-live-e2e",
                 )
             )
             if lease is None:
@@ -288,23 +330,68 @@ class _OopzQwenLiveRuntimeHarness:
             runtime = RealtimeVoiceSessionRuntimeImpl(
                 VoiceSessionRuntimeContext(descriptor, lease, configuration),
                 settings,
-                OopzVoiceMediaGateway(bot, settings),
+                OopzVoiceMediaGateway(
+                    bot,
+                    settings,
+                    audio_settings,
+                    master_factory=master_factory,
+                ),
                 sessions,
                 build_provider,
             )
             await runtime.start()
-            return cls(bot, leases, lease, runtime, sessions, providers)
+            if music_stream_url is not None and not music_first:
+                music, playback = await cls._start_music(
+                    bot,
+                    channel_sessions,
+                    audio_settings,
+                    music_channel,
+                    music_stream_url,
+                )
+            return cls(
+                bot,
+                channel_sessions,
+                lease,
+                runtime,
+                sessions,
+                providers,
+                audio_settings,
+                channel,
+                music,
+                playback,
+            )
         except BaseException:
             if runtime is not None:
                 await runtime.aclose()
+            if music is not None:
+                await music.aclose()
             if lease is not None:
                 await lease.release()
-            await leases.aclose()
+            await channel_sessions.aclose()
             try:
                 await bot.voice.close()
             finally:
                 await bot.rest.close()
             raise
+
+    @staticmethod
+    async def _start_music(
+        bot: OopzBot,
+        channel_sessions: OopzVoiceChannelSessionManager,
+        audio_settings: AudioMixerSettings,
+        channel: MusicVoiceChannelKey,
+        stream_url: str,
+    ) -> tuple[OopzMusicVoiceGateway, MusicPlayback]:
+        gateway = OopzMusicVoiceGateway(bot, channel_sessions, audio_settings)
+        try:
+            await gateway.validate_capabilities()
+            if not await gateway.acquire(channel):
+                pytest.fail("shared OOPZ voice channel rejected the music participant")
+            playback = await gateway.start_playback(channel, stream_url)
+        except BaseException:
+            await gateway.aclose()
+            raise
+        return gateway, playback
 
     async def wait_for_responses(self, count: int, timeout_seconds: float) -> None:
         finished = asyncio.create_task(self.runtime.wait_finished())
@@ -329,14 +416,33 @@ class _OopzQwenLiveRuntimeHarness:
             result = await self.runtime.wait_finished()
         assert result.reason is VoiceStopReason.COMMAND
 
-    async def aclose(self) -> None:
-        await self.runtime.aclose()
+    async def release_voice(self) -> None:
+        await self.stop()
         await self.lease.release()
-        await self.leases.aclose()
+
+    async def release_music(self) -> None:
+        if self.music is None:
+            return
+        await self.music.aclose()
+        self.music = None
+
+    async def aclose(self) -> None:
         try:
-            await self.bot.voice.close()
+            await self.runtime.aclose()
         finally:
-            await self.bot.rest.close()
+            try:
+                if self.music is not None:
+                    await self.music.aclose()
+                    self.music = None
+            finally:
+                try:
+                    await self.lease.release()
+                    await self.channel_sessions.aclose()
+                finally:
+                    try:
+                        await self.bot.voice.close()
+                    finally:
+                        await self.bot.rest.close()
 
 
 def test_live_wav_replay_loads_bounded_pcm_fixture(tmp_path: Path) -> None:
@@ -367,12 +473,32 @@ def test_qwen_live_counts_are_bounded(monkeypatch) -> None:
     with pytest.raises(ValueError, match="between 1 and 10"):
         _bounded_live_integer("CYWL_VOICE_E2E_ROUNDS", 3, 10)
 
+    monkeypatch.setenv("CYWL_VOICE_MUSIC_E2E_ROUNDS", "0")
+    with pytest.raises(ValueError, match="between 1 and 10"):
+        _bounded_live_integer("CYWL_VOICE_MUSIC_E2E_ROUNDS", 10, 10)
+
 
 def _required_live_value(name: str) -> str:
     value = os.getenv(name, "").strip()
     if not value:
         pytest.fail(f"live voice E2E test requires {name}")
     return value
+
+
+async def _resolve_live_music() -> PlayableTrack:
+    settings = MusicSettings.from_mapping(os.environ)
+    catalog = NeteaseMusicCatalog(settings)
+    try:
+        query = os.getenv("CYWL_MUSIC_LIVE_QUERY", "初音未来").strip() or "初音未来"
+        tracks = await catalog.search(query, limit=settings.search_limit)
+        for track in tracks:
+            try:
+                return await catalog.resolve(track)
+            except MusicNotFoundError:
+                continue
+        pytest.fail("none of the bounded Netease search results is currently playable")
+    finally:
+        await catalog.aclose()
 
 
 async def _load_live_config() -> QwenOmniConfig:
@@ -670,5 +796,97 @@ async def test_qwen_live_runtime_traverses_real_oopz_media_end_to_end() -> None:
         )
         await harness.stop()
     finally:
+        await harness.aclose()
+    assert all(provider._closed for provider in harness.providers)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("music_first", "release_voice_first"),
+    ((True, True), (False, False)),
+    ids=("music-first-voice-stops", "voice-first-music-stops"),
+)
+async def test_live_oopz_qwen_and_netease_share_one_master_bus(
+    music_first: bool,
+    release_voice_first: bool,
+) -> None:
+    """Speak for every round while the resolved Netease track remains audible."""
+
+    load_dotenv(find_dotenv(usecwd=True), override=False)
+    if os.getenv("CYWL_RUN_LIVE_VOICE_MUSIC_TESTS") != "1":
+        pytest.skip("set CYWL_RUN_LIVE_VOICE_MUSIC_TESTS=1 for paid RTC/music mutation")
+    config = await _load_live_config()
+    playable = await _resolve_live_music()
+    rounds = _bounded_live_integer("CYWL_VOICE_MUSIC_E2E_ROUNDS", 10, 10)
+    harness = await _OopzQwenLiveRuntimeHarness.create(
+        config,
+        area_id=_required_live_value("OOPZ_AREA_ID"),
+        channel_id=_required_live_value("OOPZ_CHANNEL_ID"),
+        target_person_id=_required_live_value("OOPZ_TARGET_PERSON_UID"),
+        music_stream_url=playable.stream_url,
+        music_first=music_first,
+    )
+    assert harness.playback is not None
+    playback_finished = asyncio.create_task(harness.playback.wait_finished())
+    try:
+        snapshot = await harness.channel_sessions.current()
+        assert snapshot is not None
+        assert {participant.kind for participant in snapshot.participants} == {
+            VoiceParticipantKind.MUSIC,
+            VoiceParticipantKind.CONVERSATION,
+        }
+
+        await harness.wait_for_responses(rounds, timeout_seconds=rounds * 90)
+        if playback_finished.done():
+            result = playback_finished.result()
+            pytest.fail(f"music ended during voice rounds: reason={result.end_reason.value}")
+        bus = await harness.lease.audio_bus()
+        stats = await bus.stats()
+        runtime_stats = harness.runtime.stats
+        logger.info(
+            "OOPZ/Qwen/Netease shared gate: order=%s responses=%s metrics=%s",
+            "music_first" if music_first else "voice_first",
+            runtime_stats.responses_drained,
+            stats.as_metrics(),
+        )
+        user_turns = sum(turn[2] is VoiceTurnRole.USER for turn in harness.sessions.turns)
+        assistant_turns = sum(turn[2] is VoiceTurnRole.ASSISTANT for turn in harness.sessions.turns)
+        assert runtime_stats.responses_started >= rounds
+        assert runtime_stats.responses_drained >= rounds
+        assert runtime_stats.first_final_transcript_ms > 0
+        assert runtime_stats.first_provider_audio_ms > 0
+        assert runtime_stats.first_oopz_output_ms > 0
+        assert user_turns >= rounds
+        assert assistant_turns >= rounds
+        assert stats.decoder_start_ms > 0
+        assert stats.master_max_buffered_ms <= harness.audio_settings.master_max_buffer_ms
+        assert stats.hard_clip_samples == 0
+
+        if release_voice_first:
+            await harness.release_voice()
+            snapshot = await harness.channel_sessions.current()
+            assert snapshot is not None
+            assert {participant.kind for participant in snapshot.participants} == {
+                VoiceParticipantKind.MUSIC
+            }
+            await asyncio.sleep(0.2)
+            assert not playback_finished.done()
+        else:
+            await harness.release_music()
+            snapshot = await harness.channel_sessions.current()
+            assert snapshot is not None
+            assert {participant.kind for participant in snapshot.participants} == {
+                VoiceParticipantKind.CONVERSATION
+            }
+            assert harness.runtime.state not in {
+                VoiceSessionState.CLOSING,
+                VoiceSessionState.CLOSED,
+                VoiceSessionState.FAILED,
+            }
+            await harness.stop()
+    finally:
+        if not playback_finished.done():
+            playback_finished.cancel()
+        await asyncio.gather(playback_finished, return_exceptions=True)
         await harness.aclose()
     assert all(provider._closed for provider in harness.providers)
