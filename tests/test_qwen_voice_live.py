@@ -544,6 +544,7 @@ async def test_qwen_live_runtime_survives_repeated_barge_in() -> None:
             "保持自然语速并持续说至少十秒；被打断后立刻停止，再对新的话重新开始。"
         ),
     )
+    harness.media.drain_gate = asyncio.Event()
     try:
         sequence = await replay.replay(harness.media, 0, trailing_silence_ms=1_000)
         async with asyncio.timeout(60):
@@ -576,6 +577,7 @@ async def test_qwen_live_runtime_survives_repeated_barge_in() -> None:
             harness.runtime.stats.max_barge_in_flush_ms,
             harness.runtime.stats.responses_started,
         )
+        harness.media.drain_gate.set()
         await harness.stop()
     finally:
         await harness.aclose()
