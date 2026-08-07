@@ -16,7 +16,9 @@ from uuid import UUID
 import numpy as np
 import pytest
 
+from cywl_oopz.features.audio.dynamics import float32_stereo_to_s16le
 from cywl_oopz.features.audio.ledger import SourceKey
+from cywl_oopz.features.audio.mixer import AudioMixer, DuckingSnapshot
 from cywl_oopz.features.audio.models import (
     AUDIO_BLOCK_DURATION_MS,
     AUDIO_BLOCK_FRAMES,
@@ -35,6 +37,7 @@ _MUSIC_ID = UUID("30000000-0000-0000-0000-000000000003")
 _VOICE_ID = UUID("40000000-0000-0000-0000-000000000004")
 _SOAK_MINUTES = 30
 _BARGE_IN_COUNT = 100
+_HEARTBEAT_INTERVAL_SECONDS = 0.005
 
 
 class ImmediateMasterOutput:
@@ -92,6 +95,32 @@ def _block(
     )
 
 
+async def _heartbeat(stop: asyncio.Event, lags: list[float]) -> None:
+    previous = asyncio.get_running_loop().time()
+    while not stop.is_set():
+        await asyncio.sleep(_HEARTBEAT_INTERVAL_SECONDS)
+        current = asyncio.get_running_loop().time()
+        lags.append(max(0.0, current - previous - _HEARTBEAT_INTERVAL_SECONDS))
+        previous = current
+
+
+def _dsp_p99_ms(iterations: int = 5_000) -> float:
+    mixer = AudioMixer()
+    music = _block(_MUSIC_ID, AudioSourceKind.MUSIC, 0, 0, 0.1)
+    voice = _block(_VOICE_ID, AudioSourceKind.VOICE, 0, 0, 0.2)
+    snapshot = DuckingSnapshot(
+        conversation_active=True,
+        reasons=frozenset(),
+    )
+    durations_ns = np.empty(iterations, dtype=np.int64)
+    for index in range(iterations):
+        started_at = time.perf_counter_ns()
+        mixed = mixer.mix(music, voice, snapshot)
+        float32_stereo_to_s16le(mixed.samples)
+        durations_ns[index] = time.perf_counter_ns() - started_at
+    return float(np.percentile(durations_ns, 99) / 1_000_000)
+
+
 @pytest.mark.asyncio
 async def test_offline_thirty_minute_equivalent_mixing_is_bounded() -> None:
     if not _enabled():
@@ -110,58 +139,74 @@ async def test_offline_thirty_minute_equivalent_mixing_is_bounded() -> None:
     voice_start = 0
     voice_generation = 0
     started_at = time.monotonic()
+    heartbeat_stop = asyncio.Event()
+    heartbeat_lags: list[float] = []
+    heartbeat_task = asyncio.create_task(
+        _heartbeat(heartbeat_stop, heartbeat_lags),
+        name="audio-soak-heartbeat",
+    )
 
-    for index in range(block_count):
-        await asyncio.gather(
-            bus.write_music(
-                (
-                    _block(
-                        _MUSIC_ID,
-                        AudioSourceKind.MUSIC,
-                        0,
-                        music_start,
-                        0.1,
-                    ),
-                )
-            ),
-            bus.write_voice(
-                (
-                    _block(
-                        _VOICE_ID,
-                        AudioSourceKind.VOICE,
-                        voice_generation,
-                        voice_start,
-                        0.2,
-                    ),
-                )
-            ),
-        )
-        music_start += AUDIO_BLOCK_FRAMES
-        voice_start += AUDIO_BLOCK_FRAMES
-        if (index + 1) % remix_interval == 0:
-            await bus.flush_voice(
-                frozenset(
-                    {
-                        SourceKey(
+    try:
+        for index in range(block_count):
+            await asyncio.gather(
+                bus.write_music(
+                    (
+                        _block(
+                            _MUSIC_ID,
+                            AudioSourceKind.MUSIC,
+                            0,
+                            music_start,
+                            0.1,
+                        ),
+                    )
+                ),
+                bus.write_voice(
+                    (
+                        _block(
                             _VOICE_ID,
                             AudioSourceKind.VOICE,
                             voice_generation,
-                        )
-                    }
-                )
+                            voice_start,
+                            0.2,
+                        ),
+                    )
+                ),
             )
-            voice_generation += 1
-            voice_start = 0
+            music_start += AUDIO_BLOCK_FRAMES
+            voice_start += AUDIO_BLOCK_FRAMES
+            if (index + 1) % remix_interval == 0:
+                await bus.flush_voice(
+                    frozenset(
+                        {
+                            SourceKey(
+                                _VOICE_ID,
+                                AudioSourceKind.VOICE,
+                                voice_generation,
+                            )
+                        }
+                    )
+                )
+                voice_generation += 1
+                voice_start = 0
+    finally:
+        heartbeat_stop.set()
+        await heartbeat_task
 
     await bus.forget_sources(frozenset({SourceKey(_MUSIC_ID, AudioSourceKind.MUSIC, 0)}))
     elapsed_seconds = time.monotonic() - started_at
     realtime_ratio = (_SOAK_MINUTES * 60) / elapsed_seconds
+    heartbeat_max_lag_ms = max(heartbeat_lags, default=float("inf")) * 1_000
+    dsp_p99_ms = _dsp_p99_ms()
     stats = await bus.stats()
     logger.info(
-        "Offline shared audio soak: blocks=%s elapsed_s=%.3f realtime_ratio=%.1f metrics=%s",
+        "Offline shared audio soak: blocks=%s elapsed_s=%.3f realtime_ratio=%.1f "
+        "heartbeat_ticks=%s heartbeat_max_lag_ms=%.3f dsp_p99_ms=%.3f metrics=%s",
         block_count,
         elapsed_seconds,
         realtime_ratio,
+        len(heartbeat_lags),
+        heartbeat_max_lag_ms,
+        dsp_p99_ms,
         stats.as_metrics(),
     )
 
@@ -170,6 +215,9 @@ async def test_offline_thirty_minute_equivalent_mixing_is_bounded() -> None:
     assert stats.ledger_entry_count == 0
     assert stats.hard_clip_samples == 0
     assert realtime_ratio >= 50
+    assert len(heartbeat_lags) >= 10
+    assert heartbeat_max_lag_ms < 100
+    assert dsp_p99_ms < 2
     await bus.aclose()
     assert bus.closed is True
     assert master.closed is True
