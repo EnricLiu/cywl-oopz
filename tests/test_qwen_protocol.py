@@ -14,7 +14,7 @@ from cywl_oopz.features.voice.errors import (
 )
 from cywl_oopz.features.voice.events import (
     VoiceAssistantAudio,
-    VoiceProviderFailed,
+    VoiceProviderErrorEvent,
     VoiceResponseCancelled,
     VoiceResponseCompleted,
     VoiceResponseStarted,
@@ -134,7 +134,13 @@ def test_qwen_recorded_fixture_maps_only_curated_domain_events() -> None:
         "output_tokens": 5,
         "total_tokens": 17,
     }
-    assert events[9] == VoiceProviderFailed("rate_limit_exceeded", True)
+    assert events[9] == VoiceProviderErrorEvent(
+        "anonymous_error_type",
+        "rate_limit_exceeded",
+        "fixture-only",
+        "",
+        True,
+    )
     assert events[10] is None
     assert events[11] == VoiceResponseStarted("response-2")
     assert events[12] == VoiceResponseCancelled("response-2", {})

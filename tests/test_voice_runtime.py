@@ -13,6 +13,7 @@ from cywl_oopz.features.voice.audio import PROVIDER_OUTPUT_FORMAT
 from cywl_oopz.features.voice.errors import VoiceProviderDisconnectedError
 from cywl_oopz.features.voice.events import (
     VoiceAssistantAudio,
+    VoiceProviderErrorEvent,
     VoiceProviderFailed,
     VoiceResponseCancelled,
     VoiceResponseCompleted,
@@ -1454,12 +1455,21 @@ async def test_realtime_runtime_retries_initial_provider_connection() -> None:
 
 
 @pytest.mark.asyncio
-async def test_realtime_runtime_fails_start_immediately_on_fatal_provider_event() -> None:
+@pytest.mark.parametrize(
+    "provider_event",
+    (
+        VoiceProviderFailed("invalid_session", False),
+        VoiceProviderErrorEvent("invalid_request", "invalid_session", "bad session", "", False),
+    ),
+)
+async def test_realtime_runtime_fails_start_immediately_on_fatal_provider_event(
+    provider_event: VoiceProviderFailed | VoiceProviderErrorEvent,
+) -> None:
     runtime, _, _, providers = await runtime_fixture()
     starting = asyncio.create_task(runtime.start())
     await wait_until(lambda: bool(providers and providers[0].sessions))
 
-    await providers[0].sessions[0].emit(VoiceProviderFailed("invalid_session", False))
+    await providers[0].sessions[0].emit(provider_event)
 
     with pytest.raises(VoiceProviderDisconnectedError):
         await starting

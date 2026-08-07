@@ -100,9 +100,7 @@ def _split_pcm_chunk(chunk: PcmChunk, maximum_duration_ms: int) -> tuple[PcmChun
         pcm = chunk.pcm[
             start_sample * frame_width_bytes : (start_sample + maximum_samples) * frame_width_bytes
         ]
-        duration_ms = round(
-            (len(pcm) // frame_width_bytes) * 1_000 / chunk.format.sample_rate
-        )
+        duration_ms = round((len(pcm) // frame_width_bytes) * 1_000 / chunk.format.sample_rate)
         chunks.append(PcmChunk(pcm, chunk.format, duration_ms, chunk.generation))
     return tuple(chunks)
 
@@ -2007,7 +2005,10 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
         terminal = False
         try:
             async for event in session.events():
-                terminal = isinstance(event, VoiceProviderFailed | VoiceSessionFinished)
+                terminal = isinstance(
+                    event,
+                    VoiceProviderFailed | VoiceProviderErrorEvent | VoiceSessionFinished,
+                )
                 await self._control.put(_ProviderEvent(session, event))
             if not terminal and not self._closed and session is self._provider_session:
                 await self._control.put(_PumpFailed("provider_events_eof", "premature_eof", True))

@@ -99,7 +99,8 @@ class VoiceProviderFailed:
 
     error_kind: str
     retryable: bool
-    
+
+
 @dataclass(frozen=True, slots=True)
 class VoiceProviderErrorEvent:
     """A sanitized typed Provider error."""
@@ -109,6 +110,12 @@ class VoiceProviderErrorEvent:
     error_message: str
     error_param: str
     retryable: bool
+
+    def __post_init__(self) -> None:
+        _validate_identifier(self.error_type, "error type")
+        _validate_identifier(self.error_code, "error code")
+        if len(self.error_message) > 2_000 or len(self.error_param) > 256:
+            raise ValueError("Provider error detail exceeds its bounded contract")
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,6 +145,7 @@ VoiceModelEvent = (
     | VoiceResponseCancelled
     | VoiceToolCall
     | VoiceProviderFailed
+    | VoiceProviderErrorEvent
 )
 
 

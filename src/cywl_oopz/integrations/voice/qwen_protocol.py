@@ -20,8 +20,8 @@ from cywl_oopz.features.voice.errors import (
 from cywl_oopz.features.voice.events import (
     VoiceAssistantAudio,
     VoiceModelEvent,
-    VoiceProviderFailed,
     VoiceProviderErrorEvent,
+    VoiceProviderFailed,
     VoiceResponseCancelled,
     VoiceResponseCompleted,
     VoiceResponseStarted,
@@ -266,10 +266,10 @@ def parse_server_event(raw: str | bytes) -> VoiceModelEvent | None:
     if event_type == "error":
         error = payload.get("error")
         error = error if isinstance(error, dict) else {}
-        typ = str(error.get("type", "anonymous_error_type"))
-        code = str(error.get("code", "anonymous_error_code"))
-        msg = str(error.get("message", "Qwen sent an unknown error"))
-        param = str(error.get("param", ""))
+        typ = str(error.get("type", "anonymous_error_type"))[:256]
+        code = str(error.get("code", "anonymous_error_code"))[:256]
+        msg = str(error.get("message", "Qwen sent an unknown error"))[:2_000]
+        param = str(error.get("param", ""))[:256]
         normalized = code.casefold()
         retryable = any(
             marker in normalized
