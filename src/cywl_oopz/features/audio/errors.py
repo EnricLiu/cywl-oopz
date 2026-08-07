@@ -21,6 +21,10 @@ class AudioSessionClosedError(AudioCoreError):
     """The shared OOPZ voice-channel session manager no longer accepts owners."""
 
 
+class AudioBusFailedError(AudioCoreError):
+    """The shared master output failed and cannot accept more source operations."""
+
+
 class AudioLedgerError(AudioCoreError):
     """Master/source cursor state violates a playout ledger invariant."""
 

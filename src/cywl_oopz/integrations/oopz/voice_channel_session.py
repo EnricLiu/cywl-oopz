@@ -119,11 +119,18 @@ class SharedVoiceChannelSession:
 class OopzVoiceChannelSessionManager:
     """Serialize one physical join while allowing same-channel feature participants."""
 
-    def __init__(self, bot: OopzBot, *, transition_wait_seconds: float = 1.0) -> None:
+    def __init__(
+        self,
+        bot: OopzBot,
+        *,
+        transition_wait_seconds: float = 1.0,
+        allow_mixed_participants: bool = True,
+    ) -> None:
         if transition_wait_seconds <= 0:
             raise ValueError("Voice session transition wait must be positive")
         self._bot = bot
         self._transition_wait_seconds = transition_wait_seconds
+        self._allow_mixed_participants = allow_mixed_participants
         self._lock = asyncio.Lock()
         self._close_lock = asyncio.Lock()
         self._session: SharedVoiceChannelSession | None = None
@@ -155,6 +162,9 @@ class OopzVoiceChannelSessionManager:
                     if self._session.channel != request.channel:
                         self._log_unavailable(request, self._session.channel)
                         return None
+                    if not self._can_mix_with_active(request):
+                        self._log_coexistence_disabled(request)
+                        return None
                     participant, added = self._session.try_add(self, request)
                     if participant is None:
                         self._log_kind_conflict(request)
@@ -171,6 +181,9 @@ class OopzVoiceChannelSessionManager:
                     pending = self._pending_request
                     if pending.channel != request.channel:
                         self._log_unavailable(request, pending.channel)
+                        return None
+                    if not self._allow_mixed_participants and pending.kind is not request.kind:
+                        self._log_coexistence_disabled(request)
                         return None
                     if pending.kind is request.kind and pending.owner_key != request.owner_key:
                         self._log_kind_conflict(request)
@@ -415,6 +428,20 @@ class OopzVoiceChannelSessionManager:
             request.kind.value,
             self._channel_ref(request.channel),
             self._channel_ref(active_channel),
+        )
+
+    def _can_mix_with_active(self, request: VoiceParticipantRequest) -> bool:
+        if self._allow_mixed_participants or self._session is None:
+            return True
+        return all(
+            participant.request.kind is request.kind for participant in self._session.participants
+        )
+
+    @staticmethod
+    def _log_coexistence_disabled(request: VoiceParticipantRequest) -> None:
+        logger.info(
+            "OOPZ mixed voice participants are not enabled yet: requested=%s",
+            request.kind.value,
         )
 
     @staticmethod

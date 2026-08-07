@@ -145,7 +145,7 @@ async def test_composition_root_registers_music_tools_only_when_music_is_enabled
     assert "enqueue_music" not in disabled.agent_tool_registry.names
     assert enabled.music is not None
     assert enabled.music_playlists is not None
-    assert enabled.music._voice._leases is enabled.voice_leases
+    assert enabled.music._voice._leases is enabled.voice_channel_sessions
     assert {
         "search_music_catalog",
         "enqueue_music",
@@ -181,7 +181,7 @@ async def test_composition_root_registers_experimental_voice_command_only_when_e
 
     assert "voice" not in {command.name for command in disabled.commands.commands}
     assert "voice" in {command.name for command in enabled.commands.commands}
-    assert enabled.voice_conversations._access._leases is enabled.voice_leases
+    assert enabled.voice_conversations._access._leases is enabled.voice_channel_sessions
     assert enabled.voice_media._bot is enabled.bot
     assert {check.name: check.state.value for check in enabled.health.snapshot()}[
         "voice"

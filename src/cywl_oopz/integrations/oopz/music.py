@@ -8,17 +8,20 @@ import logging
 from oopz_sdk import OopzBot, VoicePlayback
 
 from cywl_oopz.core.observability import exception_kind, opaque_ref
+from cywl_oopz.features.audio.models import (
+    AudioChannelKey,
+    VoiceParticipantKind,
+    VoiceParticipantRequest,
+)
 from cywl_oopz.features.music.models import (
     MusicPlaybackEndReason,
     MusicPlaybackResult,
     VoiceChannelKey,
 )
 
-from .voice_lease import (
-    OopzVoiceLease,
-    OopzVoiceLeaseManager,
-    VoiceLeasePurpose,
-    VoiceLeaseRequest,
+from .voice_channel_session import (
+    OopzVoiceChannelSessionManager,
+    OopzVoiceParticipant,
 )
 
 DEFAULT_VOLUME = 2  # %
@@ -59,10 +62,10 @@ class OopzMusicPlayback:
 class OopzMusicVoiceGateway:
     """Translate music operations under one shared OOPZ voice lease."""
 
-    def __init__(self, bot: OopzBot, leases: OopzVoiceLeaseManager) -> None:
+    def __init__(self, bot: OopzBot, leases: OopzVoiceChannelSessionManager) -> None:
         self._bot = bot
         self._leases = leases
-        self._lease: OopzVoiceLease | None = None
+        self._lease: OopzVoiceParticipant | None = None
         self._channel: VoiceChannelKey | None = None
         self._playback: OopzMusicPlayback | None = None
         self._lock = asyncio.Lock()
@@ -82,10 +85,9 @@ class OopzMusicVoiceGateway:
             if self._lease is not None:
                 return self._channel == channel and not self._lease.released
             lease = await self._leases.try_acquire(
-                VoiceLeaseRequest(
-                    VoiceLeasePurpose.MUSIC,
-                    channel.area_id,
-                    channel.channel_id,
+                VoiceParticipantRequest(
+                    VoiceParticipantKind.MUSIC,
+                    AudioChannelKey(channel.area_id, channel.channel_id),
                     owner_key=f"music:{channel.area_id}:{channel.channel_id}",
                 )
             )

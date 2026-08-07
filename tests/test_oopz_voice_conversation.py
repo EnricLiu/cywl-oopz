@@ -2,12 +2,10 @@ from __future__ import annotations
 
 import pytest
 
+from cywl_oopz.features.audio.models import VoiceParticipantKind
 from cywl_oopz.features.voice.models import VoiceChannelKey
+from cywl_oopz.integrations.oopz.voice_channel_session import OopzVoiceChannelSessionManager
 from cywl_oopz.integrations.oopz.voice_conversation import OopzConversationVoiceAccess
-from cywl_oopz.integrations.oopz.voice_lease import (
-    OopzVoiceLeaseManager,
-    VoiceLeasePurpose,
-)
 
 
 class FakeVoice:
@@ -37,7 +35,7 @@ class FakeBot:
 @pytest.mark.asyncio
 async def test_oopz_conversation_access_maps_lookup_and_shared_lease_purpose() -> None:
     bot = FakeBot()
-    leases = OopzVoiceLeaseManager(bot)
+    leases = OopzVoiceChannelSessionManager(bot)
     access = OopzConversationVoiceAccess(bot, leases)
 
     channel_id = await access.voice_channel_for_user("area", "person")
@@ -47,7 +45,7 @@ async def test_oopz_conversation_access_maps_lookup_and_shared_lease_purpose() -
     assert lease is not None
     snapshot = await leases.current()
     assert snapshot is not None
-    assert snapshot.request.purpose is VoiceLeasePurpose.CONVERSATION
+    assert snapshot.participants[0].kind is VoiceParticipantKind.CONVERSATION
     assert bot.voice.joins == [{"area": "area", "channel": "voice"}]
 
     await lease.release()

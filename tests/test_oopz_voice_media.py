@@ -56,26 +56,48 @@ class FakeSubscription:
 
 class FakeOutput:
     def __init__(self) -> None:
-        self.format = PcmFormat.s16le()
+        self.format = PcmFormat.s16le(sample_rate=48_000, channels=2)
         self.stats = SimpleNamespace(
-            generation=3,
-            accepted_samples=480,
-            rendered_samples=240,
-            buffered_samples=240,
+            generation=0,
+            accepted_samples=0,
+            rendered_samples=0,
+            buffered_samples=0,
         )
         self.writes: list[bytes] = []
         self.close_count = 0
-        self.flush_cursor = VoicePlaybackCursor(4, 480, 360, 120, 24_000, 1.0)
-        self.drain_cursor = VoicePlaybackCursor(4, 480, 480, 0, 24_000, 2.0)
 
     async def write(self, pcm: bytes) -> None:
         self.writes.append(pcm)
+        frames = len(pcm) // self.format.frame_width
+        self.stats.accepted_samples += frames
+        self.stats.buffered_samples += frames
 
     async def flush(self) -> VoicePlaybackCursor:
-        return self.flush_cursor
+        cursor = VoicePlaybackCursor(
+            self.stats.generation,
+            self.stats.accepted_samples,
+            self.stats.rendered_samples,
+            self.stats.buffered_samples,
+            self.format.sample_rate,
+            1.0,
+        )
+        self.stats.generation += 1
+        self.stats.accepted_samples = 0
+        self.stats.rendered_samples = 0
+        self.stats.buffered_samples = 0
+        return cursor
 
     async def drain(self) -> VoicePlaybackCursor:
-        return self.drain_cursor
+        self.stats.rendered_samples = self.stats.accepted_samples
+        self.stats.buffered_samples = 0
+        return VoicePlaybackCursor(
+            self.stats.generation,
+            self.stats.accepted_samples,
+            self.stats.rendered_samples,
+            0,
+            self.format.sample_rate,
+            2.0,
+        )
 
     async def aclose(self) -> None:
         self.close_count += 1
@@ -134,7 +156,11 @@ def sdk_frame() -> AgoraAudioTrackData:
 
 
 def output_chunk() -> PcmChunk:
-    return PcmChunk(b"\x00" * 960, PROVIDER_OUTPUT_FORMAT, 20, 3)
+    return PcmChunk(b"\x00" * 960, PROVIDER_OUTPUT_FORMAT, 20, 0)
+
+
+def long_output_chunk() -> PcmChunk:
+    return PcmChunk(b"\x00" * 4_800, PROVIDER_OUTPUT_FORMAT, 100, 0)
 
 
 @pytest.mark.asyncio
@@ -159,8 +185,8 @@ async def test_oopz_media_opens_only_owner_input_and_fixed_output_contract() -> 
         )
     ]
     format, options = voice.output_calls[0]
-    assert format == PcmFormat.s16le(sample_rate=24_000, channels=1)
-    assert options == {"prebuffer_ms": 90, "max_buffer_ms": 360}
+    assert format == PcmFormat.s16le(sample_rate=48_000, channels=2)
+    assert options == {"prebuffer_ms": 40, "max_buffer_ms": 160}
     assert frames[0].sequence == 7
     assert frames[0].format.sample_rate == 48_000
     assert frames[0].format.channels == 2
@@ -168,12 +194,16 @@ async def test_oopz_media_opens_only_owner_input_and_fixed_output_contract() -> 
     assert frames[0].source_dropped_frames == 2
 
     written = await media.write_output(output_chunk())
-    assert output.writes == [b"\x00" * 960]
-    assert written.generation == 3
-    assert written.rendered_samples == 240
+    assert written.generation == 0
+    assert written.accepted_samples == 480
     assert (await media.current_cursor()) == written
-    assert (await media.flush_output()).rendered_samples == 360
-    assert (await media.drain_output()).buffered_samples == 0
+    drained = await media.drain_output()
+    assert output.writes
+    assert all(len(pcm) == 3_840 for pcm in output.writes)
+    assert drained.accepted_samples == drained.rendered_samples == 480
+    flushed = await media.flush_output()
+    assert flushed == drained
+    assert (await media.current_cursor()).generation == 1
 
     await media.aclose()
     await media.aclose()
@@ -325,7 +355,7 @@ async def test_oopz_media_maps_input_and_output_failures_without_sdk_leakage() -
 
     output.write = failed_write
     with pytest.raises(VoiceMediaTransportError) as output_failure:
-        await media.write_output(output_chunk())
+        await media.write_output(long_output_chunk())
     assert output_failure.value.operation == "write_output"
     assert output_failure.value.error_kind == "RuntimeError"
     await media.aclose()

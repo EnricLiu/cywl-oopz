@@ -8,17 +8,18 @@ from oopz_sdk import OopzBot
 from oopz_sdk.events.context import EventContext
 
 from cywl_oopz.core.observability import opaque_ref
+from cywl_oopz.features.audio.models import (
+    AudioChannelKey,
+    VoiceParticipantKind,
+    VoiceParticipantRequest,
+)
 from cywl_oopz.features.voice.display import NoopVoiceSessionStatusSink
 from cywl_oopz.features.voice.models import VoiceChannelKey, VoiceSessionStatus
 from cywl_oopz.features.voice.ports import VoiceSessionStatusSink
 from cywl_oopz.features.voice.settings import SelectableVoiceModel, VoiceUserSelection
 
 from .editable_messages import MessageAddress, OopzEditableMessageGateway
-from .voice_lease import (
-    OopzVoiceLeaseManager,
-    VoiceLeasePurpose,
-    VoiceLeaseRequest,
-)
+from .voice_channel_session import OopzVoiceChannelSessionManager
 from .voice_status import VOICE_STATE_LABELS, OopzVoiceStatusMessage
 
 logger = logging.getLogger(__name__)
@@ -27,7 +28,7 @@ logger = logging.getLogger(__name__)
 class OopzConversationVoiceAccess:
     """Map channel lookup and conversation lease requests to the OOPZ SDK."""
 
-    def __init__(self, bot: OopzBot, leases: OopzVoiceLeaseManager) -> None:
+    def __init__(self, bot: OopzBot, leases: OopzVoiceChannelSessionManager) -> None:
         self._bot = bot
         self._leases = leases
 
@@ -36,10 +37,9 @@ class OopzConversationVoiceAccess:
 
     async def try_acquire(self, channel: VoiceChannelKey, owner_key: str):
         return await self._leases.try_acquire(
-            VoiceLeaseRequest(
-                VoiceLeasePurpose.CONVERSATION,
-                channel.area_id,
-                channel.channel_id,
+            VoiceParticipantRequest(
+                VoiceParticipantKind.CONVERSATION,
+                AudioChannelKey(channel.area_id, channel.channel_id),
                 owner_key,
             )
         )

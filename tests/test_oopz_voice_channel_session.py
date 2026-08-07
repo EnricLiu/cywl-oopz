@@ -108,6 +108,21 @@ async def test_channel_and_kind_conflicts_do_not_change_active_session() -> None
 
 
 @pytest.mark.asyncio
+async def test_rollout_gate_keeps_legacy_music_and_pcm_voice_exclusive() -> None:
+    bot = FakeBot()
+    manager = OopzVoiceChannelSessionManager(bot, allow_mixed_participants=False)
+    music = await manager.try_acquire(request(VoiceParticipantKind.MUSIC, owner="music"))
+
+    assert music is not None
+    assert (
+        await manager.try_acquire(request(VoiceParticipantKind.CONVERSATION, owner="conversation"))
+        is None
+    )
+    assert len(bot.voice.joins) == 1
+    await manager.aclose()
+
+
+@pytest.mark.asyncio
 async def test_same_channel_participant_waits_for_one_concurrent_join() -> None:
     bot = FakeBot()
     bot.voice.join_allowed.clear()

@@ -9,13 +9,14 @@ from oopz_sdk import (
     VoicePlaybackState,
 )
 
+from cywl_oopz.features.audio.models import (
+    AudioChannelKey,
+    VoiceParticipantKind,
+    VoiceParticipantRequest,
+)
 from cywl_oopz.features.music.models import MusicPlaybackEndReason, VoiceChannelKey
 from cywl_oopz.integrations.oopz.music import OopzMusicVoiceGateway
-from cywl_oopz.integrations.oopz.voice_lease import (
-    OopzVoiceLeaseManager,
-    VoiceLeasePurpose,
-    VoiceLeaseRequest,
-)
+from cywl_oopz.integrations.oopz.voice_channel_session import OopzVoiceChannelSessionManager
 
 
 class FakeChannels:
@@ -108,7 +109,7 @@ class FakeBot:
 @pytest.mark.asyncio
 async def test_oopz_music_gateway_reuses_one_lease_and_typed_playback() -> None:
     bot = FakeBot()
-    leases = OopzVoiceLeaseManager(bot)
+    leases = OopzVoiceChannelSessionManager(bot)
     gateway = OopzMusicVoiceGateway(bot, leases)
     channel = VoiceChannelKey("area", "voice")
 
@@ -145,12 +146,11 @@ async def test_oopz_music_gateway_reuses_one_lease_and_typed_playback() -> None:
 @pytest.mark.asyncio
 async def test_oopz_music_gateway_does_not_preempt_another_lease() -> None:
     bot = FakeBot()
-    leases = OopzVoiceLeaseManager(bot)
+    leases = OopzVoiceChannelSessionManager(bot, allow_mixed_participants=False)
     conversation = await leases.try_acquire(
-        VoiceLeaseRequest(
-            VoiceLeasePurpose.CONVERSATION,
-            "area",
-            "voice",
+        VoiceParticipantRequest(
+            VoiceParticipantKind.CONVERSATION,
+            AudioChannelKey("area", "voice"),
             "conversation:owner",
         )
     )
@@ -168,7 +168,7 @@ async def test_oopz_music_gateway_does_not_preempt_another_lease() -> None:
 @pytest.mark.asyncio
 async def test_oopz_music_gateway_keeps_lease_when_release_is_cancelled() -> None:
     bot = FakeBot()
-    leases = OopzVoiceLeaseManager(bot)
+    leases = OopzVoiceChannelSessionManager(bot)
     gateway = OopzMusicVoiceGateway(bot, leases)
     channel = VoiceChannelKey("area", "voice")
     assert await gateway.acquire(channel) is True
@@ -196,7 +196,7 @@ async def test_oopz_music_gateway_keeps_lease_when_release_is_cancelled() -> Non
 @pytest.mark.asyncio
 async def test_oopz_music_gateway_close_retries_failed_lease_release() -> None:
     bot = FakeBot()
-    leases = OopzVoiceLeaseManager(bot)
+    leases = OopzVoiceChannelSessionManager(bot)
     gateway = OopzMusicVoiceGateway(bot, leases)
     channel = VoiceChannelKey("area", "voice")
     assert await gateway.acquire(channel) is True

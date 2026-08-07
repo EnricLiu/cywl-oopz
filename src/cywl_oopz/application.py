@@ -144,11 +144,11 @@ from .integrations.oopz.music import OopzMusicVoiceGateway
 from .integrations.oopz.reactions import OopzReactionGateway
 from .integrations.oopz.skill_sharing import OopzSkillShareNotifier
 from .integrations.oopz.voice_capabilities import OopzVoiceCapabilityGate
+from .integrations.oopz.voice_channel_session import OopzVoiceChannelSessionManager
 from .integrations.oopz.voice_conversation import (
     OopzConversationVoiceAccess,
     OopzVoiceCommandPresenter,
 )
-from .integrations.oopz.voice_lease import OopzVoiceLeaseManager
 from .integrations.oopz.voice_media import OopzVoiceMediaGateway
 from .integrations.oopz.voice_task_notifications import OopzVoiceTaskTextGateway
 from .integrations.voice.provider_builder import ConfiguredVoiceProviderBuilder
@@ -178,7 +178,10 @@ class BotApplication:
         self.database = Database(settings.database)
         self.bot = OopzBot(settings.oopz)
         self.voice_capability_gate = OopzVoiceCapabilityGate()
-        self.voice_leases = OopzVoiceLeaseManager(self.bot)
+        self.voice_channel_sessions = OopzVoiceChannelSessionManager(
+            self.bot,
+            allow_mixed_participants=False,
+        )
         self.voice_media = OopzVoiceMediaGateway(self.bot, settings.voice)
         self.chat_invocations = OopzChatInvocationFactory(settings.oopz.person_uid)
         self.editable_messages = OopzEditableMessageGateway(self.bot)
@@ -249,7 +252,7 @@ class BotApplication:
             self.music = MusicRequestService(
                 settings.music,
                 self.music_catalog,
-                OopzMusicVoiceGateway(self.bot, self.voice_leases),
+                OopzMusicVoiceGateway(self.bot, self.voice_channel_sessions),
             )
             self.music_playlists = MusicPlaylistService(
                 settings.music,
@@ -537,7 +540,7 @@ class BotApplication:
         )
         self.voice_conversations = VoiceConversationService(
             settings.voice,
-            OopzConversationVoiceAccess(self.bot, self.voice_leases),
+            OopzConversationVoiceAccess(self.bot, self.voice_channel_sessions),
             self.voice_runtimes,
             self.voice_configurations,
             self.voice_sessions,
@@ -727,7 +730,7 @@ class BotApplication:
             await self.delegated_task_text_fallback.aclose()
             if self.music is not None:
                 await self.music.aclose()
-            await self.voice_leases.aclose()
+            await self.voice_channel_sessions.aclose()
             if self.browser is not None:
                 await self.browser.aclose()
             if self.web_search is not None:
