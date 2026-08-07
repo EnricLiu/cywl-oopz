@@ -9,6 +9,7 @@ import shutil
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass, replace
+from urllib.parse import urlparse
 
 import numpy as np
 
@@ -217,45 +218,51 @@ class FfmpegMusicDecoder:
         settings: AudioMixerSettings,
     ) -> tuple[str, ...]:
         rw_timeout_us = max(1, round(settings.decoder_read_timeout_seconds * 1_000_000))
-        return (
+        command = [
             executable,
             "-nostdin",
             "-hide_banner",
             "-loglevel",
             "warning",
-            "-rw_timeout",
-            str(rw_timeout_us),
-            "-reconnect",
-            "1",
-            "-reconnect_on_network_error",
-            "1",
-            "-reconnect_on_http_error",
-            "429,5xx",
-            "-reconnect_streamed",
-            "1",
-            "-reconnect_delay_max",
-            "2",
-            "-reconnect_max_retries",
-            "3",
-            "-reconnect_delay_total_max",
-            "5",
-            "-i",
-            stream_url,
-            "-map",
-            "0:a:0",
-            "-vn",
-            "-sn",
-            "-dn",
-            "-f",
-            "f32le",
-            "-acodec",
-            "pcm_f32le",
-            "-ar",
-            "48000",
-            "-ac",
-            "2",
-            "pipe:1",
+        ]
+        if urlparse(stream_url).scheme.casefold() in {"http", "https"}:
+            command.extend(
+                (
+                    "-rw_timeout",
+                    str(rw_timeout_us),
+                    "-reconnect",
+                    "1",
+                    "-reconnect_on_network_error",
+                    "1",
+                    "-reconnect_on_http_error",
+                    "429,5xx",
+                    "-reconnect_streamed",
+                    "1",
+                    "-reconnect_delay_max",
+                    "2",
+                )
+            )
+        command.extend(
+            (
+                "-i",
+                stream_url,
+                "-map",
+                "0:a:0",
+                "-vn",
+                "-sn",
+                "-dn",
+                "-f",
+                "f32le",
+                "-acodec",
+                "pcm_f32le",
+                "-ar",
+                "48000",
+                "-ac",
+                "2",
+                "pipe:1",
+            )
         )
+        return tuple(command)
 
     @property
     def stats(self) -> FfmpegDecoderStats:

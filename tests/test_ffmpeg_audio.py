@@ -101,6 +101,8 @@ def test_ffmpeg_command_is_argument_list_with_canonical_output() -> None:
 
     assert command[0] == "/usr/bin/ffmpeg"
     assert command[command.index("-i") + 1] == stream_url
+    assert "-reconnect" in command
+    assert "-reconnect_max_retries" not in command
     assert command[-9:] == (
         "-f",
         "f32le",
@@ -113,6 +115,14 @@ def test_ffmpeg_command_is_argument_list_with_canonical_output() -> None:
         "pipe:1",
     )
     assert "shell=True" not in command
+
+    local_command = FfmpegMusicDecoder.command(
+        "/usr/bin/ffmpeg",
+        "/tmp/music.wav",
+        settings(),
+    )
+    assert "-rw_timeout" not in local_command
+    assert "-reconnect" not in local_command
 
 
 @pytest.mark.asyncio
