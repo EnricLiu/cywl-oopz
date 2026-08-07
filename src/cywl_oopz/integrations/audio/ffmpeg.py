@@ -287,32 +287,65 @@ class FfmpegMusicDecoder:
         async with self._close_lock:
             if self._closed:
                 return
+            self._closed = True
+            stdout_task = asyncio.create_task(
+                self._discard_stdout(),
+                name=f"ffmpeg-stdout-discard:{self._source_ref}",
+            )
+            wait_task = asyncio.create_task(
+                self._process.wait(),
+                name=f"ffmpeg-wait:{self._source_ref}",
+            )
             try:
                 if self._process.returncode is None:
                     self._process.terminate()
-                    try:
-                        async with asyncio.timeout(self._settings.decoder_stop_timeout_seconds):
-                            await self._process.wait()
-                    except TimeoutError:
+                try:
+                    await self._await_process_exit(wait_task)
+                except TimeoutError:
+                    if self._process.returncode is None:
                         self._process.kill()
                         self._stats = replace(
                             self._stats,
                             forced_kills=self._stats.forced_kills + 1,
                         )
-                        async with asyncio.timeout(self._settings.decoder_stop_timeout_seconds):
-                            await self._process.wait()
+                    try:
+                        await self._await_process_exit(wait_task)
+                    except TimeoutError:
+                        logger.warning(
+                            "FFmpeg process did not settle after forced stop: source=%s",
+                            self._source_ref,
+                        )
             except asyncio.CancelledError:
                 if self._process.returncode is None:
                     self._process.kill()
-                    with suppress(BaseException):
-                        await asyncio.shield(self._process.wait())
+                    self._stats = replace(
+                        self._stats,
+                        forced_kills=self._stats.forced_kills + 1,
+                    )
+                with suppress(BaseException):
+                    await self._await_process_exit(wait_task)
                 raise
             finally:
+                for task in (stdout_task, wait_task):
+                    if not task.done():
+                        task.cancel()
                 if not self._stderr_task.done():
                     self._stderr_task.cancel()
-                await asyncio.gather(self._stderr_task, return_exceptions=True)
-            self._closed = True
+                await asyncio.gather(
+                    stdout_task,
+                    wait_task,
+                    self._stderr_task,
+                    return_exceptions=True,
+                )
             logger.info("FFmpeg music decoder closed: source=%s", self._source_ref)
+
+    async def _await_process_exit(self, wait_task: asyncio.Task[int]) -> int:
+        async with asyncio.timeout(self._settings.decoder_stop_timeout_seconds):
+            return await asyncio.shield(wait_task)
+
+    async def _discard_stdout(self) -> None:
+        while await self._stdout.read(64 * 1024):
+            pass
 
     async def _read_block(self) -> DecodedAudioBlock | None:
         while len(self._pcm) < _BLOCK_BYTES and not self._eof:

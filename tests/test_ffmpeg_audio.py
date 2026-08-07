@@ -324,6 +324,26 @@ async def test_real_ffmpeg_decodes_local_wav_when_available(tmp_path: Path) -> N
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg is not installed")
+async def test_real_ffmpeg_closes_early_with_buffered_stdout(tmp_path: Path) -> None:
+    wav_path = tmp_path / "long-tone.wav"
+    frames = 48_000 * 10
+    with wave.open(str(wav_path), "wb") as output:
+        output.setnchannels(1)
+        output.setsampwidth(2)
+        output.setframerate(48_000)
+        output.writeframes((1000).to_bytes(2, "little", signed=True) * frames)
+
+    factory = FfmpegMusicDecoderFactory(settings(CYWL_AUDIO_DECODER_STOP_TIMEOUT_SECONDS="0.2"))
+    decoder = await factory.open(str(wav_path))
+    await asyncio.sleep(0.05)
+
+    async with asyncio.timeout(1):
+        await decoder.aclose()
+    await decoder.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg is not installed")
 async def test_real_ffmpeg_slow_http_startup_times_out_without_logging_url(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
