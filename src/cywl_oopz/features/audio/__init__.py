@@ -6,6 +6,7 @@ from .models import (
     CANONICAL_AUDIO_FORMAT,
     MASTER_AUDIO_FORMAT,
     AudioBlock,
+    AudioChannelKey,
     AudioFormat,
     AudioSourceKind,
     DuckingReason,
@@ -13,6 +14,8 @@ from .models import (
     PcmSampleFormat,
     SourcePlaybackCursor,
     SourceSlice,
+    VoiceParticipantKind,
+    VoiceParticipantRequest,
 )
 
 __all__ = [
@@ -20,6 +23,7 @@ __all__ = [
     "AUDIO_BLOCK_FRAMES",
     "CANONICAL_AUDIO_FORMAT",
     "MASTER_AUDIO_FORMAT",
+    "AudioChannelKey",
     "AudioBlock",
     "AudioFormat",
     "AudioSourceKind",
@@ -28,4 +32,6 @@ __all__ = [
     "PcmSampleFormat",
     "SourcePlaybackCursor",
     "SourceSlice",
+    "VoiceParticipantKind",
+    "VoiceParticipantRequest",
 ]

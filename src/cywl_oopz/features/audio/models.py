@@ -17,6 +17,38 @@ AUDIO_CHANNELS = 2
 AUDIO_BLOCK_FRAMES = AUDIO_SAMPLE_RATE * AUDIO_BLOCK_DURATION_MS // 1_000
 
 
+@dataclass(frozen=True, slots=True)
+class AudioChannelKey:
+    """Stable OOPZ area/channel identity shared by music and conversation."""
+
+    area_id: str
+    channel_id: str
+
+    def __post_init__(self) -> None:
+        if not self.area_id.strip() or not self.channel_id.strip():
+            raise ValueError("Audio channel area and channel identifiers must not be empty")
+
+
+class VoiceParticipantKind(StrEnum):
+    """Feature roles that may share one physical OOPZ voice channel."""
+
+    MUSIC = "music"
+    CONVERSATION = "conversation"
+
+
+@dataclass(frozen=True, slots=True)
+class VoiceParticipantRequest:
+    """One idempotent feature owner requesting the shared voice session."""
+
+    kind: VoiceParticipantKind
+    channel: AudioChannelKey
+    owner_key: str
+
+    def __post_init__(self) -> None:
+        if not self.owner_key.strip():
+            raise ValueError("Voice participant owner key must not be empty")
+
+
 class PcmSampleFormat(StrEnum):
     """PCM encodings accepted at source and master boundaries."""
 

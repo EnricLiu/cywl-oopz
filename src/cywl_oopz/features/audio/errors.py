@@ -17,6 +17,10 @@ class AudioBackpressureError(AudioCoreError):
     """A producer exceeded the bounded source queue wait budget."""
 
 
+class AudioSessionClosedError(AudioCoreError):
+    """The shared OOPZ voice-channel session manager no longer accepts owners."""
+
+
 class AudioLedgerError(AudioCoreError):
     """Master/source cursor state violates a playout ledger invariant."""
 
