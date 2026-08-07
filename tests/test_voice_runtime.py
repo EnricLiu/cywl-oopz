@@ -8,6 +8,8 @@ from uuid import uuid4
 import numpy as np
 import pytest
 
+from cywl_oopz.features.audio.models import AUDIO_BLOCK_FRAMES
+from cywl_oopz.features.audio.session import SharedAudioMixerBus
 from cywl_oopz.features.voice import runtime as runtime_module
 from cywl_oopz.features.voice.audio import PROVIDER_OUTPUT_FORMAT
 from cywl_oopz.features.voice.errors import VoiceProviderDisconnectedError
@@ -41,11 +43,14 @@ from cywl_oopz.features.voice.models import (
 from cywl_oopz.features.voice.ports import VoiceSessionRuntimeContext
 from cywl_oopz.features.voice.runtime import RealtimeVoiceSessionRuntimeImpl
 from cywl_oopz.features.voice.settings import VoiceTurnRole
+from cywl_oopz.integrations.audio.fake import FakeMasterPcmOutput
+from cywl_oopz.integrations.audio.voice import VoicePcmSourceOutput
 from cywl_oopz.integrations.voice.fake import (
     FakeRealtimeVoiceProvider,
     FakeVoiceAccessGateway,
     FakeVoiceConfigurationRepository,
     FakeVoiceMediaGateway,
+    FakeVoiceMediaSession,
     FakeVoiceSessionRepository,
 )
 from cywl_oopz.settings import VoiceSettings
@@ -112,6 +117,7 @@ async def runtime_fixture(
     capabilities=None,
     status_sink=None,
     settings_overrides: dict[str, str] | None = None,
+    media_gateway=None,
 ):
     access = FakeVoiceAccessGateway()
     channel = VoiceChannelKey("area", "voice")
@@ -131,7 +137,7 @@ async def runtime_fixture(
         VoiceTextAddress("area", "text"),
     )
     context = VoiceSessionRuntimeContext(descriptor, lease, configuration, status_sink)
-    media = FakeVoiceMediaGateway()
+    media = media_gateway or FakeVoiceMediaGateway()
     sessions = FakeVoiceSessionRepository()
     providers: list[FakeRealtimeVoiceProvider] = []
 
@@ -150,6 +156,56 @@ async def runtime_fixture(
         task_mailbox,
     )
     return runtime, media, sessions, providers
+
+
+class MixerVoiceMediaSession(FakeVoiceMediaSession):
+    """Exercise the runtime against the production voice-to-mixer adapter."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.master = FakeMasterPcmOutput(max_buffer_frames=AUDIO_BLOCK_FRAMES * 20)
+        bus = SharedAudioMixerBus(
+            self.master,
+            max_buffer_frames=AUDIO_BLOCK_FRAMES * 21,
+        )
+        self.source = VoicePcmSourceOutput(bus)
+
+    async def write_output(self, chunk: PcmChunk):
+        self.outputs.append(chunk)
+        return await self.source.write(chunk)
+
+    async def flush_output(self):
+        cursor = await self.source.flush()
+        self.flushes.append(cursor)
+        return cursor
+
+    async def drain_output(self):
+        self.drain_count += 1
+        return await self.source.drain()
+
+    async def current_cursor(self):
+        return await self.source.current_cursor()
+
+    async def set_user_speaking(self, speaking: bool) -> None:
+        self.user_speaking_changes.append(speaking)
+        await self.source.set_user_speaking(speaking)
+
+    async def aclose(self) -> None:
+        if self.closed:
+            return
+        await self.source.aclose()
+        await super().aclose()
+
+
+class MixerVoiceMediaGateway:
+    def __init__(self) -> None:
+        self.sessions: list[MixerVoiceMediaSession] = []
+
+    async def open(self, descriptor, lease) -> MixerVoiceMediaSession:
+        del descriptor, lease
+        session = MixerVoiceMediaSession()
+        self.sessions.append(session)
+        return session
 
 
 async def wait_until(predicate, attempts: int = 100) -> None:
@@ -237,6 +293,76 @@ async def test_realtime_runtime_streams_audio_and_persists_final_turns() -> None
     await runtime.aclose()
     assert media.closed is True
     assert providers[0].closed is True
+
+
+@pytest.mark.asyncio
+async def test_realtime_runtime_keeps_mixer_generation_aligned_across_turns() -> None:
+    media_gateway = MixerVoiceMediaGateway()
+    runtime, _, _, providers = await runtime_fixture(media_gateway=media_gateway)
+    starting = asyncio.create_task(runtime.start())
+    await wait_until(lambda: bool(providers and providers[0].sessions))
+    provider_session = providers[0].sessions[0]
+    await provider_session.emit(VoiceSessionReady())
+    await starting
+    media = media_gateway.sessions[0]
+
+    async def complete_response(
+        response_id: str,
+        text: str,
+        expected_drains: int,
+    ) -> None:
+        await provider_session.emit(VoiceResponseStarted(response_id))
+        await provider_session.emit(
+            VoiceAssistantAudio(
+                PcmChunk(b"\x01\x00" * 480, PROVIDER_OUTPUT_FORMAT, 20, generation=0),
+                response_id,
+                f"item-{response_id}",
+            )
+        )
+        await provider_session.emit(
+            VoiceTranscriptFinal(
+                "assistant",
+                text,
+                f"item-{response_id}",
+                response_id,
+            )
+        )
+        await provider_session.emit(VoiceResponseCompleted(response_id))
+        await wait_until(lambda: runtime.stats.responses_drained == expected_drains)
+
+    await complete_response("response-1", "第一轮", 1)
+    await complete_response("response-2", "第二轮", 2)
+
+    assert [chunk.generation for chunk in media.outputs] == [0, 0]
+    assert runtime.state is VoiceSessionState.LISTENING
+
+    await provider_session.emit(VoiceResponseStarted("response-interrupted"))
+    await provider_session.emit(
+        VoiceAssistantAudio(
+            PcmChunk(b"\x02\x00" * 480, PROVIDER_OUTPUT_FORMAT, 20, generation=0),
+            "response-interrupted",
+            "item-interrupted",
+        )
+    )
+    await wait_until(lambda: len(media.outputs) == 3)
+    await provider_session.emit(VoiceUserSpeechStarted())
+    await wait_until(lambda: len(provider_session.interruptions) == 1)
+
+    assert provider_session.interruptions[0].generation == 0
+    assert (await media.current_cursor()).generation == 1
+    assert len(media.flushes) == 1
+
+    await provider_session.emit(VoiceUserSpeechStopped())
+    await complete_response("response-after-flush", "打断后回复", 3)
+
+    assert [chunk.generation for chunk in media.outputs] == [0, 0, 0, 1]
+    assert runtime.state is VoiceSessionState.LISTENING
+    assert not runtime._result.done()
+
+    await runtime.request_stop(VoiceStopReason.COMMAND)
+    result = await runtime.wait_finished()
+    assert result.reason is VoiceStopReason.COMMAND
+    await runtime.aclose()
 
 
 @pytest.mark.asyncio

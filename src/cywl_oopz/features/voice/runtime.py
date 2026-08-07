@@ -1550,7 +1550,9 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                 count_barge_in=False,
             ):
                 return
-        generation = await self._output.start_generation()
+        # Response IDs separate normally drained turns. Generation advances only
+        # when a flush invalidates playout, keeping transit and media barriers aligned.
+        generation = self._output.generation
         self._active_response = _ActiveResponse(response_id, generation)
         self._stats = replace(
             self._stats,
