@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import time
 import wave
@@ -24,6 +25,7 @@ from cywl_oopz.features.audio.models import (
 )
 from cywl_oopz.features.music.errors import MusicNotFoundError
 from cywl_oopz.features.music.models import (
+    MusicPlaybackEndReason,
     PlayableTrack,
 )
 from cywl_oopz.features.music.models import (
@@ -86,6 +88,18 @@ def _bounded_live_integer(name: str, default: int, maximum: int) -> int:
         raise ValueError(f"{name} must be an integer") from exc
     if not 1 <= value <= maximum:
         raise ValueError(f"{name} must be between 1 and {maximum}")
+    return value
+
+
+def _bounded_live_soak_seconds() -> int:
+    name = "CYWL_VOICE_MUSIC_SOAK_SECONDS"
+    raw = os.getenv(name, "1800").strip()
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+    if not 60 <= value <= 1_800:
+        raise ValueError(f"{name} must be between 60 and 1800")
     return value
 
 
@@ -426,6 +440,18 @@ class _OopzQwenLiveRuntimeHarness:
         await self.music.aclose()
         self.music = None
 
+    async def restart_music(self, stream_url: str) -> MusicPlayback:
+        if self.music is None:
+            raise RuntimeError("music gateway is not active")
+        self.playback = await self.music.start_playback(
+            MusicVoiceChannelKey(
+                self.voice_channel.area_id,
+                self.voice_channel.channel_id,
+            ),
+            stream_url,
+        )
+        return self.playback
+
     async def aclose(self) -> None:
         try:
             await self.runtime.aclose()
@@ -436,8 +462,10 @@ class _OopzQwenLiveRuntimeHarness:
                     self.music = None
             finally:
                 try:
-                    await self.lease.release()
-                    await self.channel_sessions.aclose()
+                    try:
+                        await self.lease.release()
+                    finally:
+                        await self.channel_sessions.aclose()
                 finally:
                     try:
                         await self.bot.voice.close()
@@ -477,6 +505,10 @@ def test_qwen_live_counts_are_bounded(monkeypatch) -> None:
     with pytest.raises(ValueError, match="between 1 and 10"):
         _bounded_live_integer("CYWL_VOICE_MUSIC_E2E_ROUNDS", 10, 10)
 
+    monkeypatch.setenv("CYWL_VOICE_MUSIC_SOAK_SECONDS", "59")
+    with pytest.raises(ValueError, match="between 60 and 1800"):
+        _bounded_live_soak_seconds()
+
 
 def _required_live_value(name: str) -> str:
     value = os.getenv(name, "").strip()
@@ -485,18 +517,25 @@ def _required_live_value(name: str) -> str:
     return value
 
 
+async def _resolve_live_music_from(
+    catalog: NeteaseMusicCatalog,
+    settings: MusicSettings,
+) -> PlayableTrack:
+    query = os.getenv("CYWL_MUSIC_LIVE_QUERY", "初音未来").strip() or "初音未来"
+    tracks = await catalog.search(query, limit=settings.search_limit)
+    for track in tracks:
+        try:
+            return await catalog.resolve(track)
+        except MusicNotFoundError:
+            continue
+    pytest.fail("none of the bounded Netease search results is currently playable")
+
+
 async def _resolve_live_music() -> PlayableTrack:
     settings = MusicSettings.from_mapping(os.environ)
     catalog = NeteaseMusicCatalog(settings)
     try:
-        query = os.getenv("CYWL_MUSIC_LIVE_QUERY", "初音未来").strip() or "初音未来"
-        tracks = await catalog.search(query, limit=settings.search_limit)
-        for track in tracks:
-            try:
-                return await catalog.resolve(track)
-            except MusicNotFoundError:
-                continue
-        pytest.fail("none of the bounded Netease search results is currently playable")
+        return await _resolve_live_music_from(catalog, settings)
     finally:
         await catalog.aclose()
 
@@ -890,3 +929,122 @@ async def test_live_oopz_qwen_and_netease_share_one_master_bus(
         await asyncio.gather(playback_finished, return_exceptions=True)
         await harness.aclose()
     assert all(provider._closed for provider in harness.providers)
+
+
+@pytest.mark.asyncio
+async def test_live_oopz_qwen_netease_wall_clock_soak() -> None:
+    """Keep speaking intermittently while music is re-resolved and looped."""
+
+    load_dotenv(find_dotenv(usecwd=True), override=False)
+    if os.getenv("CYWL_RUN_LIVE_VOICE_MUSIC_SOAK_TESTS") != "1":
+        pytest.skip("set CYWL_RUN_LIVE_VOICE_MUSIC_SOAK_TESTS=1 for the wall-clock RTC soak")
+    duration_seconds = _bounded_live_soak_seconds()
+    minimum_responses = _bounded_live_integer(
+        "CYWL_VOICE_MUSIC_SOAK_MIN_RESPONSES",
+        10,
+        100,
+    )
+    if duration_seconds < 1_800:
+        logger.warning(
+            "Running shortened voice/music RTC soak; this does not satisfy Phase G: "
+            "duration_seconds=%s",
+            duration_seconds,
+        )
+    config = await _load_live_config()
+    music_settings = MusicSettings.from_mapping(os.environ)
+    catalog = NeteaseMusicCatalog(music_settings)
+    try:
+        playable = await _resolve_live_music_from(catalog, music_settings)
+        harness = await _OopzQwenLiveRuntimeHarness.create(
+            config,
+            area_id=_required_live_value("OOPZ_AREA_ID"),
+            channel_id=_required_live_value("OOPZ_CHANNEL_ID"),
+            target_person_id=_required_live_value("OOPZ_TARGET_PERSON_UID"),
+            music_stream_url=playable.stream_url,
+            music_first=True,
+        )
+    except BaseException:
+        await catalog.aclose()
+        raise
+    assert harness.playback is not None
+    bus = await harness.lease.audio_bus()
+    playback_finished = asyncio.create_task(harness.playback.wait_finished())
+    runtime_finished = asyncio.create_task(harness.runtime.wait_finished())
+    buffered_samples: list[float] = []
+    track_restarts = 0
+    started_at = time.monotonic()
+    try:
+        deadline = asyncio.get_running_loop().time() + duration_seconds
+        while (remaining := deadline - asyncio.get_running_loop().time()) > 0:
+            if runtime_finished.done():
+                result = runtime_finished.result()
+                pytest.fail(f"voice runtime ended during soak: reason={result.reason.value}")
+            if playback_finished.done():
+                result = playback_finished.result()
+                if result.end_reason is not MusicPlaybackEndReason.FINISHED:
+                    error = (
+                        type(result.terminal_error).__name__
+                        if result.terminal_error is not None
+                        else "none"
+                    )
+                    pytest.fail(
+                        f"music failed during soak: reason={result.end_reason.value} error={error}"
+                    )
+                try:
+                    playable = await catalog.resolve(playable.track)
+                except MusicNotFoundError:
+                    playable = await _resolve_live_music_from(catalog, music_settings)
+                playback = await harness.restart_music(playable.stream_url)
+                playback_finished = asyncio.create_task(playback.wait_finished())
+                track_restarts += 1
+            stats = await bus.stats()
+            buffered_samples.append(stats.master_buffered_ms)
+            assert stats.master_max_buffered_ms <= harness.audio_settings.master_max_buffer_ms
+            assert stats.hard_clip_samples == 0
+            await asyncio.sleep(min(1.0, remaining))
+
+        runtime_stats = harness.runtime.stats
+        if runtime_stats.responses_drained < minimum_responses:
+            pytest.fail(
+                "not enough manual voice turns during soak: "
+                f"actual={runtime_stats.responses_drained} required={minimum_responses}"
+            )
+        p95_index = max(0, math.ceil(len(buffered_samples) * 0.95) - 1)
+        buffered_p95_ms = sorted(buffered_samples)[p95_index]
+        stats = await bus.stats()
+        elapsed_seconds = time.monotonic() - started_at
+        logger.info(
+            "OOPZ/Qwen/Netease wall-clock soak: elapsed_s=%.1f responses=%s "
+            "track_restarts=%s master_buffered_p95_ms=%.1f metrics=%s",
+            elapsed_seconds,
+            runtime_stats.responses_drained,
+            track_restarts,
+            buffered_p95_ms,
+            stats.as_metrics(),
+        )
+        assert elapsed_seconds >= duration_seconds
+        assert 40 <= buffered_p95_ms <= 80
+        assert stats.decoder_start_ms > 0
+        assert stats.hard_clip_samples == 0
+
+        await harness.release_voice()
+        snapshot = await harness.channel_sessions.current()
+        assert snapshot is not None
+        assert {participant.kind for participant in snapshot.participants} == {
+            VoiceParticipantKind.MUSIC
+        }
+    finally:
+        for task in (playback_finished, runtime_finished):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(playback_finished, runtime_finished, return_exceptions=True)
+        try:
+            await harness.aclose()
+        finally:
+            await catalog.aclose()
+
+    assert await harness.channel_sessions.current() is None
+    assert all(provider._closed for provider in harness.providers)
+    final_stats = await bus.stats()
+    assert final_stats.retained_source_count == 0
+    assert final_stats.ledger_entry_count == 0
