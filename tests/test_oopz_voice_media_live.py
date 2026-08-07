@@ -1,8 +1,9 @@
-"""Explicit live project-adapter smoke for OOPZ/Agora realtime media.
+"""Explicit live shared-mixer gate for OOPZ/Agora realtime media.
 
 Run only with ``CYWL_RUN_LIVE_VOICE_TESTS=1`` and the credential, area, channel,
 and target-person variables documented by the SDK live voice guide. This test joins
-the channel and emits a short 440 Hz tone; it never records remote PCM.
+the channel, mixes synthetic music with voice tones, and repeatedly flushes only the
+voice lane. It consumes one owner frame for validation but never records remote PCM.
 """
 
 from __future__ import annotations
@@ -15,10 +16,19 @@ import struct
 import time
 from uuid import uuid4
 
+import numpy as np
 import pytest
 from dotenv import find_dotenv, load_dotenv
 from oopz_sdk import OopzBot, OopzConfig
 
+from cywl_oopz.features.audio.models import (
+    AUDIO_BLOCK_FRAMES,
+    AUDIO_CHANNELS,
+    AudioChannelKey,
+    DecodedAudioBlock,
+    VoiceParticipantKind,
+    VoiceParticipantRequest,
+)
 from cywl_oopz.features.voice.audio import PROVIDER_OUTPUT_FORMAT, VoiceAudioIngress
 from cywl_oopz.features.voice.models import (
     PcmChunk,
@@ -26,13 +36,13 @@ from cywl_oopz.features.voice.models import (
     VoiceSessionDescriptor,
     VoiceTextAddress,
 )
-from cywl_oopz.integrations.oopz.voice_lease import (
-    OopzVoiceLeaseManager,
-    VoiceLeasePurpose,
-    VoiceLeaseRequest,
+from cywl_oopz.integrations.audio.music import MusicPcmSourceOutput
+from cywl_oopz.integrations.oopz.master_audio import OopzMasterPcmOutputFactory
+from cywl_oopz.integrations.oopz.voice_channel_session import (
+    OopzVoiceChannelSessionManager,
 )
 from cywl_oopz.integrations.oopz.voice_media import OopzVoiceMediaGateway
-from cywl_oopz.settings import VoiceSettings
+from cywl_oopz.settings import AudioMixerSettings, VoiceSettings
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +88,15 @@ def _tone(duration_ms: int = 100) -> PcmChunk:
     )
 
 
+def _music_block() -> DecodedAudioBlock:
+    samples = np.full(
+        (AUDIO_BLOCK_FRAMES, AUDIO_CHANNELS),
+        0.05,
+        dtype=np.float32,
+    )
+    return DecodedAudioBlock(AUDIO_BLOCK_FRAMES, samples)
+
+
 def test_live_voice_flush_count_is_bounded(monkeypatch) -> None:
     monkeypatch.setenv("CYWL_OOPZ_LIVE_FLUSH_COUNT", "100")
 
@@ -89,7 +108,7 @@ def test_live_voice_flush_count_is_bounded(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_live_project_voice_media_receives_owner_and_plays_fixed_pcm() -> None:
+async def test_live_project_shared_music_and_voice_pcm_survive_barge_in() -> None:
     load_dotenv(find_dotenv(usecwd=True), override=False)
     if not _live_enabled():
         pytest.skip("set CYWL_RUN_LIVE_VOICE_TESTS=1 for explicit RTC mutation")
@@ -104,21 +123,42 @@ async def test_live_project_voice_media_receives_owner_and_plays_fixed_pcm() -> 
     )
     config = await OopzConfig.from_env_async()
     bot = OopzBot(config)
-    leases = OopzVoiceLeaseManager(bot)
+    audio_settings = AudioMixerSettings.from_mapping({"CYWL_AUDIO_MIXER_ENABLED": "true"})
+    master_factory = OopzMasterPcmOutputFactory.from_settings(bot, audio_settings)
+    sessions = OopzVoiceChannelSessionManager(
+        bot,
+        master_factory=master_factory,
+        mixer_levels=audio_settings.mixer_levels(),
+    )
     media = None
-    lease = None
+    conversation = None
+    music = None
     try:
         await bot.rest.start()
         await bot.voice.start()
-        lease = await leases.try_acquire(
-            VoiceLeaseRequest(
-                VoiceLeasePurpose.CONVERSATION,
-                area_id,
-                channel_id,
-                owner_key="live-project-adapter",
+        channel = AudioChannelKey(area_id, channel_id)
+        conversation = await sessions.try_acquire(
+            VoiceParticipantRequest(
+                VoiceParticipantKind.CONVERSATION,
+                channel,
+                owner_key="live-project-conversation",
             )
         )
-        assert lease is not None
+        music = await sessions.try_acquire(
+            VoiceParticipantRequest(
+                VoiceParticipantKind.MUSIC,
+                channel,
+                owner_key="live-project-music",
+            )
+        )
+        assert conversation is not None
+        assert music is not None
+        conversation_bus, music_bus = await asyncio.gather(
+            conversation.audio_bus(),
+            music.audio_bus(),
+        )
+        assert conversation_bus is music_bus
+        music_output = MusicPcmSourceOutput(music_bus)
         settings = VoiceSettings.from_mapping(
             {
                 "CYWL_VOICE_ENABLED": "true",
@@ -127,14 +167,19 @@ async def test_live_project_voice_media_receives_owner_and_plays_fixed_pcm() -> 
                 ),
             }
         )
-        media = await OopzVoiceMediaGateway(bot, settings).open(
+        media = await OopzVoiceMediaGateway(
+            bot,
+            settings,
+            audio_settings,
+            master_factory=master_factory,
+        ).open(
             VoiceSessionDescriptor(
                 uuid4(),
                 target_person_id,
                 VoiceChannelKey(area_id, channel_id),
                 VoiceTextAddress(area_id, channel_id),
             ),
-            lease,
+            conversation,
         )
 
         input_iterator = media.input_frames()
@@ -148,12 +193,17 @@ async def test_live_project_voice_media_receives_owner_and_plays_fixed_pcm() -> 
         flush_latencies: list[float] = []
         previous_generation = -1
         for _ in range(flush_count):
-            await media.write_output(_tone(20))
+            await asyncio.gather(
+                music_output.write(_music_block()),
+                media.write_output(_tone()),
+            )
             started_at = time.monotonic()
             flushed = await media.flush_output()
             flush_latencies.append(time.monotonic() - started_at)
             assert flushed.generation > previous_generation
-            assert flushed.buffered_samples == 0
+            current = await media.current_cursor()
+            assert current.generation == flushed.generation + 1
+            assert current.buffered_samples == 0
             previous_generation = flushed.generation
         p95_index = max(0, math.ceil(len(flush_latencies) * 0.95) - 1)
         flush_p95_seconds = sorted(flush_latencies)[p95_index]
@@ -165,15 +215,24 @@ async def test_live_project_voice_media_receives_owner_and_plays_fixed_pcm() -> 
         )
         assert flush_p95_seconds < 0.2
 
-        await media.write_output(_tone())
-        drained = await media.drain_output()
-        assert drained.accepted_samples == drained.rendered_samples
+        music_cursor = await music_output.drain()
+        assert music_cursor.accepted_frames == AUDIO_BLOCK_FRAMES * flush_count
+        assert music_cursor.rendered_frames == music_cursor.accepted_frames
+
+        snapshot = await sessions.current()
+        assert snapshot is not None
+        assert {item.kind for item in snapshot.participants} == {
+            VoiceParticipantKind.MUSIC,
+            VoiceParticipantKind.CONVERSATION,
+        }
     finally:
         if media is not None:
             await media.aclose()
-        if lease is not None:
-            await lease.release()
-        await leases.aclose()
+        if conversation is not None:
+            await conversation.release()
+        if music is not None:
+            await music.release()
+        await sessions.aclose()
         try:
             await bot.voice.close()
         finally:
