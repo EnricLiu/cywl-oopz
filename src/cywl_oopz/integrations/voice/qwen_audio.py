@@ -30,7 +30,6 @@ class QwenAudioRealtimeProvider(QwenOmniRealtimeProvider):
             tool_schemas=tool_schemas,
             connector=connector,
             proactive_context=True,
-            send_finish_event=False,
         )
 
 

@@ -106,7 +106,7 @@ def descriptor() -> VoiceSessionDescriptor:
 
 
 @pytest.mark.asyncio
-async def test_qwen_adapter_serializes_session_update_audio_and_finish() -> None:
+async def test_qwen_adapter_serializes_session_update_audio_and_closes_locally() -> None:
     websocket = FakeWebSocket()
     connector = FakeConnector(websocket)
     config = QwenOmniConfig(
@@ -142,7 +142,6 @@ async def test_qwen_adapter_serializes_session_update_audio_and_finish() -> None
         "input_audio_buffer.append",
         "conversation.item.create",
         "response.create",
-        "session.finish",
     ]
     assert sent[0]["session"]["instructions"] == "short prompt"
     assert sent[0]["session"]["tools"][0]["name"] == "delegate_agent_task"
@@ -152,8 +151,57 @@ async def test_qwen_adapter_serializes_session_update_audio_and_finish() -> None
     assert "development-secret" not in "".join(websocket.sent)
     assert len(sent[1]["audio"]) == 856
 
-    await provider.aclose()
     assert websocket.closed is True
+    await provider.aclose()
+
+
+@pytest.mark.asyncio
+async def test_qwen_adapter_synthesizes_clean_terminal_after_local_finish() -> None:
+    websocket = FakeWebSocket()
+    provider = QwenOmniRealtimeProvider(
+        QwenOmniConfig("wss://workspace.example/realtime", "secret", "model"),
+        "prompt",
+        connector=FakeConnector(websocket),
+    )
+    session = await provider.connect(descriptor())
+    events = session.events().__aiter__()
+    await websocket.emit({"type": "session.updated"})
+    assert isinstance(await anext(events), VoiceSessionReady)
+
+    await session.finish()
+
+    assert isinstance(await anext(events), VoiceSessionFinished)
+    with pytest.raises(StopAsyncIteration):
+        await anext(events)
+    assert websocket.closed is True
+    assert [json.loads(payload)["type"] for payload in websocket.sent] == ["session.update"]
+    await provider.aclose()
+
+
+@pytest.mark.asyncio
+async def test_qwen_adapter_finish_can_retry_after_caller_cancellation() -> None:
+    websocket = StalledCloseWebSocket()
+    provider = QwenOmniRealtimeProvider(
+        QwenOmniConfig("wss://workspace.example/realtime", "secret", "model"),
+        "prompt",
+        connector=FakeConnector(websocket),
+    )
+    session = await provider.connect(descriptor())
+    finishing = asyncio.create_task(session.finish())
+    await websocket.close_started.wait()
+
+    finishing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await finishing
+    assert session._finishing is True
+    assert session._closed is False
+
+    websocket.allow_close.set()
+    await session.finish()
+
+    assert websocket.close_calls == 2
+    assert session._closed is True
+    await provider.aclose()
 
 
 @pytest.mark.asyncio

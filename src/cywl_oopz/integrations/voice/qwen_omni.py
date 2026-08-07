@@ -79,11 +79,9 @@ class QwenOmniRealtimeSession:
         websocket: ClientConnection,
         *,
         proactive_context: bool = False,
-        send_finish_event: bool = True,
     ) -> None:
         self._websocket = websocket
         self._proactive_context = proactive_context
-        self._send_finish_event = send_finish_event
         self._writer_lock = asyncio.Lock()
         self._close_lock = asyncio.Lock()
         self._events_started = False
@@ -154,12 +152,16 @@ class QwenOmniRealtimeSession:
                 if isinstance(event, VoiceSessionFinished):
                     finished = True
                     return
-            if not finished and not self._finishing and not self._closing and not self._closed:
+            if not finished and self._finishing:
+                yield VoiceSessionFinished()
+            elif not finished and not self._closing and not self._closed:
                 yield VoiceProviderFailed("connection_eof", retryable=True)
         except asyncio.CancelledError:
             raise
         except ConnectionClosed as exc:
-            if not self._finishing and not self._closing and not self._closed:
+            if self._finishing:
+                yield VoiceSessionFinished()
+            elif not self._closing and not self._closed:
                 yield VoiceProviderFailed(
                     error_kind="connection_closed",
                     retryable=exc.code not in {1000, 1001, 4001, 4003},
@@ -174,11 +176,13 @@ class QwenOmniRealtimeSession:
             yield VoiceProviderFailed(exception_kind(exc), retryable=True)
 
     async def finish(self) -> None:
-        if self._closed or self._closing or self._finishing:
-            return
-        self._finishing = True
-        if self._send_finish_event:
-            await self._send({"event_id": _event_id(), "type": "session.finish"})
+        """Close locally; Qwen Omni has no client ``session.finish`` wire event."""
+        async with self._close_lock:
+            if self._closed or self._closing:
+                return
+            self._finishing = True
+            await self._websocket.close()
+            self._closed = True
 
     async def aclose(self) -> None:
         async with self._close_lock:
@@ -217,14 +221,12 @@ class QwenOmniRealtimeProvider:
         tool_schemas: Sequence[Mapping[str, object]] = (),
         connector: QwenConnector = connect,
         proactive_context: bool = False,
-        send_finish_event: bool = True,
     ) -> None:
         self._config = config
         self._instructions = instructions
         self._tool_schemas = tuple(tool_schemas)
         self._connector = connector
         self._proactive_context = proactive_context
-        self._send_finish_event = send_finish_event
         self._sessions: set[QwenOmniRealtimeSession] = set()
         self._close_lock = asyncio.Lock()
         self._closing = False
@@ -276,7 +278,6 @@ class QwenOmniRealtimeProvider:
         session = QwenOmniRealtimeSession(
             websocket,
             proactive_context=self._proactive_context,
-            send_finish_event=self._send_finish_event,
         )
         try:
             await session.configure(self._config, self._instructions, self._tool_schemas)
