@@ -26,7 +26,10 @@ jobs:
       DATABASE_URL: postgresql+asyncpg://cywl:test-password@127.0.0.1:5432/cywl_test
     steps:
       - uses: actions/checkout@v4
-      - run: git submodule update --init --recursive
+      - run: |
+          sed -i 's|git@github.com:|https://github.com/|' .gitmodules
+          git submodule sync
+          git submodule update --init --recursive
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.13"
