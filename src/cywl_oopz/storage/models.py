@@ -22,7 +22,7 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.types import Uuid
 
@@ -33,10 +33,23 @@ from cywl_oopz.core.lifecycle import (
     ToolEffect,
     ToolExecutionStatus,
 )
+from cywl_oopz.features.agent.delegation.models import (
+    DelegatedResultStyle,
+    DelegatedTaskLane,
+    DelegatedTaskNotificationState,
+    DelegatedTaskStatus,
+)
 from cywl_oopz.features.agent.skills.models import (
     SkillOwnershipKind,
     SkillResourceKind,
     SkillShareStatus,
+)
+from cywl_oopz.features.voice.settings import (
+    PersistedVoiceSessionStatus,
+    VoiceDuplexMode,
+    VoiceModelMode,
+    VoiceProviderProtocol,
+    VoiceTurnRole,
 )
 
 CURRENT_TIMESTAMP = text("CURRENT_TIMESTAMP")
@@ -133,6 +146,60 @@ AGENT_SKILL_OWNERSHIP_KIND_ENUM = Enum(
 AGENT_SKILL_SHARE_STATUS_ENUM = Enum(
     SkillShareStatus,
     name="agent_skill_share_status",
+    values_callable=_enum_values,
+    validate_strings=True,
+)
+VOICE_PROVIDER_PROTOCOL_ENUM = Enum(
+    VoiceProviderProtocol,
+    name="voice_provider_protocol",
+    values_callable=_enum_values,
+    validate_strings=True,
+)
+VOICE_MODEL_MODE_ENUM = Enum(
+    VoiceModelMode,
+    name="voice_model_mode",
+    values_callable=_enum_values,
+    validate_strings=True,
+)
+VOICE_DUPLEX_MODE_ENUM = Enum(
+    VoiceDuplexMode,
+    name="voice_duplex_mode",
+    values_callable=_enum_values,
+    validate_strings=True,
+)
+VOICE_SESSION_STATUS_ENUM = Enum(
+    PersistedVoiceSessionStatus,
+    name="voice_session_status",
+    values_callable=_enum_values,
+    validate_strings=True,
+)
+VOICE_TURN_ROLE_ENUM = Enum(
+    VoiceTurnRole,
+    name="voice_turn_role",
+    values_callable=_enum_values,
+    validate_strings=True,
+)
+DELEGATED_RESULT_STYLE_ENUM = Enum(
+    DelegatedResultStyle,
+    name="delegated_result_style",
+    values_callable=_enum_values,
+    validate_strings=True,
+)
+DELEGATED_TASK_STATUS_ENUM = Enum(
+    DelegatedTaskStatus,
+    name="delegated_task_status",
+    values_callable=_enum_values,
+    validate_strings=True,
+)
+DELEGATED_TASK_LANE_ENUM = Enum(
+    DelegatedTaskLane,
+    name="delegated_task_lane",
+    values_callable=_enum_values,
+    validate_strings=True,
+)
+TASK_NOTIFICATION_STATE_ENUM = Enum(
+    DelegatedTaskNotificationState,
+    name="task_notification_state",
     values_callable=_enum_values,
     validate_strings=True,
 )
@@ -1064,3 +1131,427 @@ class AgentToolExecutionRecord(Base):
         nullable=False,
     )
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class VoiceProviderRecord(Base):
+    """Realtime voice Provider endpoint and credential bundle."""
+
+    __tablename__ = "voice_providers"
+    __table_args__ = (
+        CheckConstraint(
+            "jsonb_typeof(credentials) = 'object'", name="ck_voice_providers_credentials_object"
+        ),
+        CheckConstraint("jsonb_typeof(config) = 'object'", name="ck_voice_providers_config_object"),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid, primary_key=True, default=uuid4, server_default=GENERATED_UUID
+    )
+    alias: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
+    display_name: Mapped[str] = mapped_column(String(256), nullable=False)
+    protocol: Mapped[VoiceProviderProtocol] = mapped_column(
+        VOICE_PROVIDER_PROTOCOL_ENUM, nullable=False
+    )
+    endpoint: Mapped[str] = mapped_column(String(2048), nullable=False)
+    credentials: Mapped[dict[str, object]] = mapped_column(
+        JSONB, default=dict, server_default=EMPTY_JSONB_OBJECT, nullable=False
+    )
+    config: Mapped[dict[str, object]] = mapped_column(
+        JSONB, default=dict, server_default=EMPTY_JSONB_OBJECT, nullable=False
+    )
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=TRUE, nullable=False
+    )
+    user_selectable: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=TRUE, nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, server_default=CURRENT_TIMESTAMP, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        server_default=CURRENT_TIMESTAMP,
+        server_onupdate=FetchedValue(),
+        nullable=False,
+    )
+
+
+class VoiceModelRecord(Base):
+    """One realtime model available through a voice Provider."""
+
+    __tablename__ = "voice_models"
+    __table_args__ = (
+        UniqueConstraint("provider_id", "alias"),
+        UniqueConstraint("provider_id", "remote_model_name"),
+        Index(
+            "ux_voice_models_one_provider_default",
+            "provider_id",
+            unique=True,
+            postgresql_where=text("is_provider_default"),
+        ),
+        Index(
+            "ux_voice_models_one_application_default",
+            "is_application_default",
+            unique=True,
+            postgresql_where=text("is_application_default"),
+        ),
+        CheckConstraint(
+            "jsonb_typeof(capabilities) = 'object'", name="ck_voice_models_capabilities_object"
+        ),
+        CheckConstraint(
+            "jsonb_typeof(audio_config) = 'object'", name="ck_voice_models_audio_config_object"
+        ),
+        CheckConstraint(
+            "jsonb_typeof(prompt_config) = 'object'", name="ck_voice_models_prompt_config_object"
+        ),
+        CheckConstraint("jsonb_typeof(limits) = 'object'", name="ck_voice_models_limits_object"),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid, primary_key=True, default=uuid4, server_default=GENERATED_UUID
+    )
+    provider_id: Mapped[UUID] = mapped_column(
+        ForeignKey("voice_providers.id", ondelete="CASCADE"), nullable=False
+    )
+    alias: Mapped[str] = mapped_column(String(128), nullable=False)
+    remote_model_name: Mapped[str] = mapped_column(String(256), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(256), nullable=False)
+    mode: Mapped[VoiceModelMode] = mapped_column(
+        VOICE_MODEL_MODE_ENUM,
+        default=VoiceModelMode.NATIVE_REALTIME,
+        server_default=text("'native_realtime'"),
+        nullable=False,
+    )
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=TRUE, nullable=False
+    )
+    is_provider_default: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=FALSE, nullable=False
+    )
+    is_application_default: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=FALSE, nullable=False
+    )
+    capabilities: Mapped[dict[str, object]] = mapped_column(
+        JSONB, default=dict, server_default=EMPTY_JSONB_OBJECT, nullable=False
+    )
+    audio_config: Mapped[dict[str, object]] = mapped_column(
+        JSONB, default=dict, server_default=EMPTY_JSONB_OBJECT, nullable=False
+    )
+    prompt_config: Mapped[dict[str, object]] = mapped_column(
+        JSONB, default=dict, server_default=EMPTY_JSONB_OBJECT, nullable=False
+    )
+    limits: Mapped[dict[str, object]] = mapped_column(
+        JSONB, default=dict, server_default=EMPTY_JSONB_OBJECT, nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, server_default=CURRENT_TIMESTAMP, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        server_default=CURRENT_TIMESTAMP,
+        server_onupdate=FetchedValue(),
+        nullable=False,
+    )
+
+
+class VoiceUserPreferenceRecord(Base):
+    """One user's model, speaker voice, and duplex defaults for new sessions."""
+
+    __tablename__ = "voice_user_preferences"
+
+    owner_person_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    preferred_model_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("voice_models.id", ondelete="SET NULL"), nullable=True
+    )
+    voice_id: Mapped[str] = mapped_column(
+        String(128), default="", server_default=EMPTY_STRING, nullable=False
+    )
+    duplex_mode: Mapped[VoiceDuplexMode] = mapped_column(
+        VOICE_DUPLEX_MODE_ENUM,
+        default=VoiceDuplexMode.FULL,
+        server_default=text("'full'"),
+        nullable=False,
+    )
+    delegated_agent_model_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("llm_models.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, server_default=CURRENT_TIMESTAMP, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        server_default=CURRENT_TIMESTAMP,
+        server_onupdate=FetchedValue(),
+        nullable=False,
+    )
+
+
+class VoiceChannelSettingsRecord(Base):
+    """Realtime voice policy for one OOPZ area voice channel."""
+
+    __tablename__ = "voice_channel_settings"
+    __table_args__ = (
+        CheckConstraint(
+            "idle_timeout_seconds > 0", name="ck_voice_channel_settings_idle_timeout_positive"
+        ),
+    )
+
+    area_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    voice_channel_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=FALSE, nullable=False
+    )
+    delegated_task_profile: Mapped[str] = mapped_column(
+        String(128),
+        default="voice_readonly_v1",
+        server_default=text("'voice_readonly_v1'"),
+        nullable=False,
+    )
+    idle_timeout_seconds: Mapped[int] = mapped_column(
+        Integer, default=300, server_default=text("300"), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, server_default=CURRENT_TIMESTAMP, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        server_default=CURRENT_TIMESTAMP,
+        server_onupdate=FetchedValue(),
+        nullable=False,
+    )
+
+
+class VoiceSessionRecord(Base):
+    """Durable lifecycle envelope for one realtime voice conversation."""
+
+    __tablename__ = "voice_sessions"
+    __table_args__ = (
+        Index("ix_voice_sessions_owner_started", "owner_person_id", "started_at"),
+        CheckConstraint("jsonb_typeof(usage) = 'object'", name="ck_voice_sessions_usage_object"),
+        CheckConstraint(
+            "(ended_at IS NULL) OR (ended_at >= started_at)",
+            name="ck_voice_sessions_ended_after_started",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid, primary_key=True, default=uuid4, server_default=GENERATED_UUID
+    )
+    owner_person_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    area_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    voice_channel_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    text_channel_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    model_id: Mapped[UUID] = mapped_column(
+        ForeignKey("voice_models.id", ondelete="RESTRICT"), nullable=False
+    )
+    voice_id: Mapped[str] = mapped_column(
+        String(128), default="", server_default=EMPTY_STRING, nullable=False
+    )
+    duplex_mode: Mapped[VoiceDuplexMode] = mapped_column(VOICE_DUPLEX_MODE_ENUM, nullable=False)
+    status: Mapped[PersistedVoiceSessionStatus] = mapped_column(
+        VOICE_SESSION_STATUS_ENUM,
+        default=PersistedVoiceSessionStatus.STARTING,
+        server_default=text("'starting'"),
+        nullable=False,
+    )
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, server_default=CURRENT_TIMESTAMP, nullable=False
+    )
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    stop_reason: Mapped[str] = mapped_column(
+        String(128), default="", server_default=EMPTY_STRING, nullable=False
+    )
+    usage: Mapped[dict[str, object]] = mapped_column(
+        JSONB, default=dict, server_default=EMPTY_JSONB_OBJECT, nullable=False
+    )
+    summary: Mapped[str] = mapped_column(
+        Text, default="", server_default=EMPTY_STRING, nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, server_default=CURRENT_TIMESTAMP, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        server_default=CURRENT_TIMESTAMP,
+        server_onupdate=FetchedValue(),
+        nullable=False,
+    )
+
+
+class VoiceTurnRecord(Base):
+    """One ordered final user or assistant transcript."""
+
+    __tablename__ = "voice_turns"
+    __table_args__ = (
+        UniqueConstraint("session_id", "sequence"),
+        CheckConstraint("sequence > 0", name="ck_voice_turns_sequence_positive"),
+        CheckConstraint(
+            "char_length(btrim(transcript)) > 0", name="ck_voice_turns_transcript_nonempty"
+        ),
+        CheckConstraint("jsonb_typeof(usage) = 'object'", name="ck_voice_turns_usage_object"),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid, primary_key=True, default=uuid4, server_default=GENERATED_UUID
+    )
+    session_id: Mapped[UUID] = mapped_column(
+        ForeignKey("voice_sessions.id", ondelete="CASCADE"), nullable=False
+    )
+    sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    role: Mapped[VoiceTurnRole] = mapped_column(VOICE_TURN_ROLE_ENUM, nullable=False)
+    transcript: Mapped[str] = mapped_column(Text, nullable=False)
+    provider_item_id: Mapped[str] = mapped_column(
+        String(256), default="", server_default=EMPTY_STRING, nullable=False
+    )
+    usage: Mapped[dict[str, object]] = mapped_column(
+        JSONB, default=dict, server_default=EMPTY_JSONB_OBJECT, nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, server_default=CURRENT_TIMESTAMP, nullable=False
+    )
+
+
+class DelegatedAgentTaskRecord(Base):
+    """Durable work envelope submitted by a realtime voice function call."""
+
+    __tablename__ = "delegated_agent_tasks"
+    __table_args__ = (
+        UniqueConstraint("origin_voice_session_id", "provider_call_id"),
+        UniqueConstraint("origin_voice_session_id", "session_sequence"),
+        Index("ix_delegated_tasks_owner_created", "owner_person_id", "created_at"),
+        Index(
+            "ix_delegated_tasks_worker_claim",
+            "status",
+            "next_attempt_at",
+            "created_at",
+            postgresql_where=text("status IN ('queued', 'waiting_retry')"),
+        ),
+        Index(
+            "ix_delegated_tasks_mailbox",
+            "origin_voice_session_id",
+            "notification_state",
+            "finished_at",
+            postgresql_where=text(
+                "status IN ('succeeded', 'failed', 'cancelled', 'interrupted') "
+                "AND notification_state IN ('pending', 'deferred')"
+            ),
+        ),
+        CheckConstraint("session_sequence > 0", name="ck_delegated_tasks_sequence_positive"),
+        CheckConstraint("retry_count >= 0", name="ck_delegated_tasks_retry_nonnegative"),
+        CheckConstraint(
+            "char_length(btrim(objective)) BETWEEN 1 AND 4000",
+            name="ck_delegated_tasks_objective_length",
+        ),
+        CheckConstraint(
+            "char_length(progress_stage) <= 64 AND char_length(progress_summary) <= 512",
+            name="ck_delegated_tasks_progress_length",
+        ),
+        CheckConstraint(
+            "char_length(result_summary) <= 1000 AND char_length(result_text) <= 16000",
+            name="ck_delegated_tasks_result_length",
+        ),
+        CheckConstraint(
+            "char_length(error_code) <= 128 AND char_length(error_message) <= 1000",
+            name="ck_delegated_tasks_error_length",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid, primary_key=True, default=uuid4, server_default=GENERATED_UUID
+    )
+    owner_person_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    area_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    text_channel_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    voice_channel_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    origin_voice_session_id: Mapped[UUID] = mapped_column(
+        ForeignKey("voice_sessions.id", ondelete="RESTRICT"), nullable=False
+    )
+    session_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    provider_call_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    objective: Mapped[str] = mapped_column(Text, nullable=False)
+    result_style: Mapped[DelegatedResultStyle] = mapped_column(
+        DELEGATED_RESULT_STYLE_ENUM,
+        default=DelegatedResultStyle.BRIEF,
+        server_default=text("'brief'"),
+        nullable=False,
+    )
+    status: Mapped[DelegatedTaskStatus] = mapped_column(
+        DELEGATED_TASK_STATUS_ENUM,
+        default=DelegatedTaskStatus.QUEUED,
+        server_default=text("'queued'"),
+        nullable=False,
+    )
+    lane: Mapped[DelegatedTaskLane] = mapped_column(
+        DELEGATED_TASK_LANE_ENUM,
+        default=DelegatedTaskLane.READ_PARALLEL,
+        server_default=text("'read_parallel'"),
+        nullable=False,
+    )
+    conflict_key: Mapped[str] = mapped_column(
+        String(256), default="", server_default=EMPTY_STRING, nullable=False
+    )
+    notification_state: Mapped[DelegatedTaskNotificationState] = mapped_column(
+        TASK_NOTIFICATION_STATE_ENUM,
+        default=DelegatedTaskNotificationState.PENDING,
+        server_default=text("'pending'"),
+        nullable=False,
+    )
+    agent_model_id: Mapped[UUID] = mapped_column(
+        ForeignKey("llm_models.id", ondelete="RESTRICT"), nullable=False
+    )
+    allowed_tool_names: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), default=list, server_default=text("'{}'::text[]"), nullable=False
+    )
+    agent_thread_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("agent_threads.id", ondelete="SET NULL"), nullable=True
+    )
+    agent_run_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("agent_runs.id", ondelete="SET NULL"), nullable=True
+    )
+    progress_stage: Mapped[str] = mapped_column(
+        String(64), default="", server_default=EMPTY_STRING, nullable=False
+    )
+    progress_summary: Mapped[str] = mapped_column(
+        String(512), default="", server_default=EMPTY_STRING, nullable=False
+    )
+    result_summary: Mapped[str] = mapped_column(
+        Text, default="", server_default=EMPTY_STRING, nullable=False
+    )
+    result_text: Mapped[str] = mapped_column(
+        Text, default="", server_default=EMPTY_STRING, nullable=False
+    )
+    error_code: Mapped[str] = mapped_column(
+        String(128), default="", server_default=EMPTY_STRING, nullable=False
+    )
+    error_message: Mapped[str] = mapped_column(
+        Text, default="", server_default=EMPTY_STRING, nullable=False
+    )
+    retry_count: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
+    )
+    worker_id: Mapped[str] = mapped_column(
+        String(128), default="", server_default=EMPTY_STRING, nullable=False
+    )
+    cancel_requested_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    presented_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, server_default=CURRENT_TIMESTAMP, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        server_default=CURRENT_TIMESTAMP,
+        server_onupdate=FetchedValue(),
+        nullable=False,
+    )

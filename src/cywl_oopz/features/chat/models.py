@@ -187,7 +187,7 @@ class ChatChunk:
 
 @dataclass(frozen=True, slots=True)
 class ChatStatus:
-    """Safe status data shown by the `!chat-status` command."""
+    """Safe status data shown by the `/chat-status` command."""
 
     enabled: bool
     active: bool

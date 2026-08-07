@@ -161,4 +161,4 @@ async def test_memory_command_remember_list_off_and_forget_all() -> None:
         ParsedCommand("memory", ("remember", "new")),
         disabled_context,
     )
-    assert disabled_context.replies == ["长期记忆当前已关闭；请先使用 !memory on。"]
+    assert disabled_context.replies == ["长期记忆当前已关闭；请先使用 /memory on。"]

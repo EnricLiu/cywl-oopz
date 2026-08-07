@@ -111,6 +111,9 @@ class AgentRunRepository(Protocol):
     ) -> None:
         """Persist one terminal state."""
 
+    async def heartbeat(self, run_id: UUID, now: datetime) -> bool:
+        """Refresh one running record and report whether ownership still exists."""
+
     async def abandon_stale(self, before: datetime, now: datetime) -> int:
         """Mark stale running records abandoned and return the changed count."""
 

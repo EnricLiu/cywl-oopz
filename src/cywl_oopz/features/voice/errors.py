@@ -1,0 +1,108 @@
+"""Typed failures exposed by the realtime voice use case."""
+
+from __future__ import annotations
+
+
+class VoiceConversationError(Exception):
+    """Base class for expected voice conversation failures."""
+
+
+class VoiceFeatureDisabledError(VoiceConversationError):
+    """Realtime voice is disabled by the application feature gate."""
+
+
+class VoiceChannelContextRequiredError(VoiceConversationError):
+    """A command did not originate from an area text channel."""
+
+
+class VoiceUserNotInChannelError(VoiceConversationError):
+    """The session owner is not currently present in an area voice channel."""
+
+
+class VoiceBackendBusyError(VoiceConversationError):
+    """Music or another conversation owns the single voice backend."""
+
+
+class VoiceSessionAlreadyActiveError(VoiceConversationError):
+    """A voice conversation is already starting or active."""
+
+
+class VoiceSessionNotActiveError(VoiceConversationError):
+    """There is no session to stop."""
+
+
+class VoiceSessionOwnershipError(VoiceConversationError):
+    """Only the session owner may perform this operation."""
+
+
+class VoiceRuntimeUnavailableError(VoiceConversationError):
+    """No configured realtime Provider runtime can create a session."""
+
+
+class VoiceSessionStartTimeoutError(VoiceConversationError):
+    """Session startup exceeded its bounded deadline."""
+
+
+class VoiceSessionStartCancelledError(VoiceConversationError):
+    """The owner stopped a session while it was still starting."""
+
+
+class VoiceAudioQueueClosedError(VoiceConversationError):
+    """A media pump attempted to use a closed transit queue."""
+
+
+class VoiceOutputBackpressureError(VoiceConversationError):
+    """Provider output could not make progress before its hard timeout."""
+
+
+class VoiceMediaTransportError(VoiceConversationError):
+    """The OOPZ media subscription or PCM output transport failed."""
+
+    def __init__(self, operation: str, error_kind: str) -> None:
+        super().__init__(f"Voice media operation failed: {operation}")
+        self.operation = operation
+        self.error_kind = error_kind
+
+
+class VoiceChannelDisabledError(VoiceConversationError):
+    """Realtime voice is not enabled for the resolved area voice channel."""
+
+
+class VoiceConfigurationUnavailableError(VoiceConversationError):
+    """No usable Provider/model selection can start a realtime session."""
+
+
+class VoiceModelSelectionError(VoiceConversationError):
+    """A requested voice model is unknown, disabled, or not user selectable."""
+
+
+class VoiceSpeakerSelectionError(VoiceConversationError):
+    """A requested Provider voice identifier is malformed."""
+
+
+class VoiceProviderError(VoiceConversationError):
+    """Base class for sanitized realtime Provider failures."""
+
+
+class VoiceProviderConfigurationError(VoiceProviderError):
+    """Pinned Provider configuration cannot be used by its adapter."""
+
+
+class VoiceProviderAuthenticationError(VoiceProviderError):
+    """Provider rejected the configured credentials."""
+
+
+class VoiceProviderRateLimitedError(VoiceProviderError):
+    """Provider temporarily rejected the session or audio stream."""
+
+
+class VoiceProviderProtocolError(VoiceProviderError):
+    """Provider sent malformed or internally inconsistent wire data."""
+
+
+class VoiceProviderDisconnectedError(VoiceProviderError):
+    """Provider WebSocket disconnected before a clean session finish."""
+
+
+class VoiceProviderAudioFormatError(VoiceProviderProtocolError):
+    """Provider audio is malformed or incompatible with the pinned format."""

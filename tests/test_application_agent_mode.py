@@ -1,15 +1,22 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
+from oopz_sdk import VoiceCapabilities
 
 import cywl_oopz.application as application_module
 from cywl_oopz.application import BotApplication
 from cywl_oopz.core.errors import ConfigurationError
 from cywl_oopz.features.agent.catalog import ProviderCatalog
 from cywl_oopz.features.agent.commands import AgentModelCommand
-from cywl_oopz.features.agent.models import LlmModel, LlmProvider, ProviderProtocol
+from cywl_oopz.features.agent.models import (
+    LlmModel,
+    LlmProvider,
+    ModelCapability,
+    ProviderProtocol,
+)
 from cywl_oopz.features.chat.commands import ModelCommand
 from cywl_oopz.features.web.errors import BrowserUnavailableError
 from cywl_oopz.settings import AppSettings
@@ -32,6 +39,25 @@ class FakeOopzBot:
         self.did_run = True
 
 
+class IncompleteVoiceContractBot(FakeOopzBot):
+    def __init__(self, config) -> None:
+        super().__init__(config)
+        self.voice = type(
+            "IncompleteVoiceBackend",
+            (),
+            {
+                "capabilities": VoiceCapabilities(
+                    feature_version=0,
+                    remote_audio_subscription=True,
+                    person_audio_subscription=False,
+                    streaming_pcm_output=False,
+                    playback_cursor=False,
+                    typed_playback_handle=False,
+                )
+            },
+        )()
+
+
 def settings(mode: str, **overrides: str) -> AppSettings:
     return AppSettings.from_mapping(
         {
@@ -44,6 +70,11 @@ def settings(mode: str, **overrides: str) -> AppSettings:
             **overrides,
         }
     )
+
+
+async def no_stale_voice_sessions(now) -> int:
+    del now
+    return 0
 
 
 @pytest.mark.asyncio
@@ -114,6 +145,7 @@ async def test_composition_root_registers_music_tools_only_when_music_is_enabled
     assert "enqueue_music" not in disabled.agent_tool_registry.names
     assert enabled.music is not None
     assert enabled.music_playlists is not None
+    assert enabled.music._voice._leases is enabled.voice_channel_sessions
     assert {
         "search_music_catalog",
         "enqueue_music",
@@ -134,6 +166,32 @@ async def test_composition_root_registers_music_tools_only_when_music_is_enabled
 
     await enabled.music.aclose()
     for application in (disabled, enabled):
+        await application.agent_engine.aclose()
+        await application._provider.aclose()
+        await application.database.close()
+
+
+@pytest.mark.asyncio
+async def test_composition_root_registers_experimental_voice_command_only_when_enabled(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(application_module, "OopzBot", FakeOopzBot)
+    disabled = BotApplication(settings("legacy"))
+    enabled = BotApplication(settings("legacy", CYWL_VOICE_ENABLED="true"))
+
+    assert "voice" not in {command.name for command in disabled.commands.commands}
+    assert "voice" in {command.name for command in enabled.commands.commands}
+    assert enabled.voice_conversations._access._leases is enabled.voice_channel_sessions
+    assert enabled.voice_media._bot is enabled.bot
+    assert {check.name: check.state.value for check in enabled.health.snapshot()}[
+        "voice"
+    ] == "pending"
+    health = {check.name: check.state.value for check in enabled.health.snapshot()}
+    assert health["llm"] == "pending"
+    assert health["skills"] == "pending"
+
+    for application in (disabled, enabled):
+        await application.voice_conversations.aclose()
         await application.agent_engine.aclose()
         await application._provider.aclose()
         await application.database.close()
@@ -269,8 +327,16 @@ async def test_browser_startup_failure_degrades_health_without_stopping_bot(
     async def unavailable() -> None:
         raise BrowserUnavailableError
 
+    async def no_stale_agent_runs(before, now) -> int:
+        del before, now
+        return 0
+
     monkeypatch.setattr(application.database, "start", no_op)
     monkeypatch.setattr(application.database, "close", no_op)
+    monkeypatch.setattr(application.voice_sessions, "recover_stale", no_stale_voice_sessions)
+    monkeypatch.setattr(application.agent_runs, "abandon_stale", no_stale_agent_runs)
+    monkeypatch.setattr(application.delegated_task_scheduler, "start", no_op)
+    monkeypatch.setattr(application.delegated_task_text_fallback, "start", no_op)
     assert application.browser is not None
     monkeypatch.setattr(application.browser, "start", unavailable)
 
@@ -280,6 +346,222 @@ async def test_browser_startup_failure_degrades_health_without_stopping_bot(
     assert application.bot.did_run is True
     assert browser_health.state.value == "degraded"
     assert browser_health.detail == "MCP initialization failed"
+
+
+@pytest.mark.asyncio
+async def test_application_keeps_delegated_runtime_active_when_agent_and_voice_are_disabled(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(application_module, "OopzBot", FakeOopzBot)
+    application = BotApplication(settings("legacy"))
+    events: list[str] = []
+
+    async def no_op() -> None:
+        return None
+
+    async def recover_stale(now) -> int:
+        assert now.tzinfo is not None
+        events.append("recover_voice")
+        return 2
+
+    async def abandon_runs(before, now) -> int:
+        assert before < now
+        events.append("abandon_runs")
+        return 1
+
+    async def start_scheduler() -> None:
+        events.append("start_scheduler")
+
+    async def start_fallback() -> None:
+        events.append("start_fallback")
+
+    async def unexpected_catalog_reload() -> None:
+        events.append("reload_catalog")
+
+    async def run_bot() -> None:
+        events.append("run_oopz")
+        application.bot.did_run = True
+
+    monkeypatch.setattr(application.database, "start", no_op)
+    monkeypatch.setattr(application.database, "close", no_op)
+    monkeypatch.setattr(application.voice_sessions, "recover_stale", recover_stale)
+    monkeypatch.setattr(application.agent_models, "reload", unexpected_catalog_reload)
+    monkeypatch.setattr(application.agent_runs, "abandon_stale", abandon_runs)
+    monkeypatch.setattr(application.delegated_task_scheduler, "start", start_scheduler)
+    monkeypatch.setattr(application.delegated_task_text_fallback, "start", start_fallback)
+    monkeypatch.setattr(application.bot, "run", run_bot)
+
+    await application.run()
+
+    assert events == [
+        "recover_voice",
+        "abandon_runs",
+        "start_scheduler",
+        "start_fallback",
+        "run_oopz",
+    ]
+    assert application.bot.did_run is True
+
+
+@pytest.mark.asyncio
+async def test_voice_only_mode_initializes_background_agent_runtime(monkeypatch) -> None:
+    monkeypatch.setattr(application_module, "OopzBot", FakeOopzBot)
+    application = BotApplication(settings("legacy", CYWL_VOICE_ENABLED="true"))
+    application.bot.voice = SimpleNamespace(capabilities=SimpleNamespace(feature_version=1))
+    application.agent_catalog._catalog = ProviderCatalog.build(
+        (
+            LlmProvider(
+                id=PROVIDER_ID,
+                alias="voice-agent",
+                display_name="Voice Agent",
+                protocol=ProviderProtocol.OPENAI_CHAT_COMPATIBLE,
+                base_url="https://llm.example/v1",
+                api_key="database-key",
+                user_selectable=True,
+                enabled=True,
+            ),
+        ),
+        (
+            LlmModel(
+                id=MODEL_ID,
+                provider_id=PROVIDER_ID,
+                alias="tool-model",
+                remote_model_name="tool-model",
+                display_name="Tool model",
+                enabled=True,
+                is_provider_default=True,
+                is_application_default=True,
+                capabilities=frozenset({ModelCapability.TOOL_CALLING}),
+            ),
+        ),
+    )
+    events: list[str] = []
+
+    async def no_op() -> None:
+        return None
+
+    async def recover_voice(now) -> int:
+        del now
+        events.append("recover_voice")
+        return 0
+
+    async def reload_catalog() -> None:
+        events.append("reload_catalog")
+
+    async def abandon_runs(before, now) -> int:
+        assert before < now
+        events.append("abandon_runs")
+        return 1
+
+    async def start_scheduler() -> None:
+        events.append("start_scheduler")
+
+    async def start_fallback() -> None:
+        events.append("start_fallback")
+
+    async def run_bot() -> None:
+        events.append("run_oopz")
+
+    monkeypatch.setattr(
+        application,
+        "voice_capability_gate",
+        SimpleNamespace(validate=lambda capabilities: None),
+    )
+    monkeypatch.setattr(application.database, "start", no_op)
+    monkeypatch.setattr(application.database, "close", no_op)
+    monkeypatch.setattr(application.voice_sessions, "recover_stale", recover_voice)
+    monkeypatch.setattr(application.agent_models, "reload", reload_catalog)
+    monkeypatch.setattr(application.agent_runs, "abandon_stale", abandon_runs)
+    monkeypatch.setattr(application.delegated_task_scheduler, "start", start_scheduler)
+    monkeypatch.setattr(application.delegated_task_text_fallback, "start", start_fallback)
+    monkeypatch.setattr(application.bot, "run", run_bot)
+
+    await application.run()
+
+    assert events == [
+        "recover_voice",
+        "reload_catalog",
+        "abandon_runs",
+        "start_scheduler",
+        "start_fallback",
+        "run_oopz",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_voice_only_mode_requires_tool_capable_background_model(monkeypatch) -> None:
+    monkeypatch.setattr(application_module, "OopzBot", FakeOopzBot)
+    application = BotApplication(settings("legacy", CYWL_VOICE_ENABLED="true"))
+    application.bot.voice = SimpleNamespace(capabilities=SimpleNamespace(feature_version=1))
+    application.agent_catalog._catalog = ProviderCatalog.build(
+        (
+            LlmProvider(
+                id=PROVIDER_ID,
+                alias="text-only",
+                display_name="Text only",
+                protocol=ProviderProtocol.OPENAI_CHAT_COMPATIBLE,
+                base_url="https://llm.example/v1",
+                api_key="database-key",
+                user_selectable=True,
+                enabled=True,
+            ),
+        ),
+        (
+            LlmModel(
+                id=MODEL_ID,
+                provider_id=PROVIDER_ID,
+                alias="model",
+                remote_model_name="model",
+                display_name="Model",
+                enabled=True,
+                is_provider_default=True,
+                is_application_default=True,
+            ),
+        ),
+    )
+
+    async def no_op() -> None:
+        return None
+
+    monkeypatch.setattr(
+        application,
+        "voice_capability_gate",
+        SimpleNamespace(validate=lambda capabilities: None),
+    )
+    monkeypatch.setattr(application.database, "start", no_op)
+    monkeypatch.setattr(application.database, "close", no_op)
+    monkeypatch.setattr(application.voice_sessions, "recover_stale", no_stale_voice_sessions)
+    monkeypatch.setattr(application.agent_models, "reload", no_op)
+
+    with pytest.raises(ConfigurationError, match="application-default"):
+        await application.run()
+
+    assert not hasattr(application.bot, "did_run")
+
+
+@pytest.mark.asyncio
+async def test_voice_sdk_contract_is_validated_before_database_or_oopz_start(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(application_module, "OopzBot", IncompleteVoiceContractBot)
+    application = BotApplication(settings("legacy", CYWL_VOICE_ENABLED="true"))
+    database_started = False
+
+    async def start_database() -> None:
+        nonlocal database_started
+        database_started = True
+
+    async def no_op() -> None:
+        return None
+
+    monkeypatch.setattr(application.database, "start", start_database)
+    monkeypatch.setattr(application.database, "close", no_op)
+
+    with pytest.raises(ConfigurationError, match="newer OOPZ SDK voice contract"):
+        await application.run()
+
+    assert database_started is False
+    assert not hasattr(application.bot, "did_run")
 
 
 @pytest.mark.asyncio
@@ -295,6 +577,7 @@ async def test_agent_mode_fails_before_oopz_when_catalog_has_no_application_defa
     monkeypatch.setattr(application.database, "start", no_op)
     monkeypatch.setattr(application.database, "close", no_op)
     monkeypatch.setattr(application.agent_models, "reload", no_op)
+    monkeypatch.setattr(application.voice_sessions, "recover_stale", no_stale_voice_sessions)
 
     with pytest.raises(ConfigurationError, match="application-default"):
         await application.run()
@@ -339,6 +622,7 @@ async def test_agent_mode_rejects_disabled_application_default(monkeypatch) -> N
     monkeypatch.setattr(application.database, "start", no_op)
     monkeypatch.setattr(application.database, "close", no_op)
     monkeypatch.setattr(application.agent_models, "reload", no_op)
+    monkeypatch.setattr(application.voice_sessions, "recover_stale", no_stale_voice_sessions)
 
     with pytest.raises(ConfigurationError, match="enabled application-default"):
         await application.run()
@@ -383,6 +667,7 @@ async def test_agent_tools_require_a_tool_calling_application_default(monkeypatc
     monkeypatch.setattr(application.database, "start", no_op)
     monkeypatch.setattr(application.database, "close", no_op)
     monkeypatch.setattr(application.agent_models, "reload", no_op)
+    monkeypatch.setattr(application.voice_sessions, "recover_stale", no_stale_voice_sessions)
 
     with pytest.raises(ConfigurationError, match="application-default"):
         await application.run()

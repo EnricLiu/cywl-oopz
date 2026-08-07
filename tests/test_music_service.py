@@ -9,13 +9,18 @@ import pytest
 from cywl_oopz.features.agent.models import AgentIdentity
 from cywl_oopz.features.chat.models import ConversationKey
 from cywl_oopz.features.music.errors import (
+    MusicBackendClosedError,
     MusicQueueFullError,
+    MusicVoiceBusyError,
     MusicVoiceChannelRequiredError,
 )
 from cywl_oopz.features.music.models import (
+    MusicPlaybackEndReason,
+    MusicPlaybackResult,
     MusicTrack,
     PlayableTrack,
     PlaybackMode,
+    PlaybackState,
     VoiceChannelKey,
 )
 from cywl_oopz.features.music.service import MusicRequestService
@@ -27,7 +32,6 @@ def settings(**changes: str) -> MusicSettings:
         {
             "CYWL_MUSIC_ENABLED": "true",
             "CYWL_MUSIC_CATALOG_BASE_URL": "https://music.example",
-            "CYWL_MUSIC_PLAYBACK_POLL_SECONDS": "0.001",
             **changes,
         }
     )
@@ -43,6 +47,7 @@ def identity(person_id: str = "person") -> AgentIdentity:
 class FakeCatalog:
     def __init__(self) -> None:
         self.closed = False
+        self.resolved: list[str] = []
 
     async def search(self, query: str, *, limit: int) -> tuple[MusicTrack, ...]:
         return (
@@ -56,6 +61,7 @@ class FakeCatalog:
         )[:limit]
 
     async def resolve(self, track: MusicTrack) -> PlayableTrack:
+        self.resolved.append(track.source_id)
         return PlayableTrack(track, f"https://music.example/{track.source_id}.mp3")
 
     async def aclose(self) -> None:
@@ -67,44 +73,132 @@ class FakeVoice:
         self.channels = {"person": "voice-a", "other": "voice-b"}
         self.played: list[tuple[VoiceChannelKey, str]] = []
         self.current_finished = asyncio.Event()
+        self.current_playback: FakePlayback | None = None
         self.play_started = asyncio.Event()
         self.paused = False
         self.closed = False
         self.stop_calls = 0
         self.left: list[VoiceChannelKey] = []
+        self.acquired: VoiceChannelKey | None = None
+        self.acquire_calls: list[VoiceChannelKey] = []
+        self.available = True
+        self.release_entered = asyncio.Event()
+        self.release_allowed = asyncio.Event()
+        self.release_allowed.set()
 
     async def voice_channel_for_user(self, area_id: str, person_id: str) -> str | None:
         assert area_id == "area"
         return self.channels.get(person_id)
 
-    async def play(self, channel: VoiceChannelKey, stream_url: str) -> None:
+    async def acquire(self, channel: VoiceChannelKey) -> bool:
+        self.acquire_calls.append(channel)
+        if self.acquired is not None:
+            return self.acquired == channel
+        if not self.available:
+            return False
+        self.acquired = channel
+        return True
+
+    async def start_playback(
+        self,
+        channel: VoiceChannelKey,
+        stream_url: str,
+    ) -> FakePlayback:
+        assert self.acquired == channel
         self.current_finished = asyncio.Event()
+        self.current_playback = FakePlayback(self, self.current_finished)
         self.played.append((channel, stream_url))
         self.play_started.set()
+        return self.current_playback
 
-    async def state(self) -> str:
-        if self.current_finished.is_set():
-            return "finished"
-        return "paused" if self.paused else "playing"
-
-    async def stop(self) -> None:
-        self.stop_calls += 1
-        self.current_finished.set()
-
-    async def pause(self) -> bool:
-        self.paused = True
-        return True
-
-    async def resume(self) -> bool:
-        self.paused = False
-        return True
-
-    async def leave(self, channel: VoiceChannelKey) -> bool:
+    async def release(self, channel: VoiceChannelKey) -> bool:
+        if self.acquired != channel:
+            return False
+        self.release_entered.set()
+        await self.release_allowed.wait()
         self.left.append(channel)
+        self.acquired = None
         return True
 
     async def aclose(self) -> None:
         self.closed = True
+
+
+class FakePlayback:
+    def __init__(self, voice: FakeVoice, finished: asyncio.Event) -> None:
+        self._voice = voice
+        self._finished = finished
+        self._end_reason = MusicPlaybackEndReason.FINISHED
+
+    async def wait_finished(self) -> MusicPlaybackResult:
+        await self._finished.wait()
+        return MusicPlaybackResult(self._end_reason, duration_seconds=1.0)
+
+    async def stop(self) -> None:
+        if not self._finished.is_set():
+            self._voice.stop_calls += 1
+            self._end_reason = MusicPlaybackEndReason.STOPPED
+            self._finished.set()
+
+    async def pause(self) -> bool:
+        self._voice.paused = True
+        return True
+
+    async def resume(self) -> bool:
+        self._voice.paused = False
+        return True
+
+
+class TerminalPlayback:
+    def __init__(self, result: MusicPlaybackResult) -> None:
+        self._result = result
+
+    async def wait_finished(self) -> MusicPlaybackResult:
+        return self._result
+
+    async def stop(self) -> None:
+        return None
+
+    async def pause(self) -> bool:
+        return False
+
+    async def resume(self) -> bool:
+        return False
+
+
+class RecoveringVoice(FakeVoice):
+    def __init__(self, failures: int = 1) -> None:
+        super().__init__()
+        self._failures_remaining = failures
+
+    async def start_playback(
+        self,
+        channel: VoiceChannelKey,
+        stream_url: str,
+    ):
+        if self._failures_remaining:
+            self._failures_remaining -= 1
+            self.played.append((channel, stream_url))
+            self.play_started.set()
+            return TerminalPlayback(MusicPlaybackResult(MusicPlaybackEndReason.BACKEND_CLOSED))
+        return await super().start_playback(channel, stream_url)
+
+
+class StartupRecoveringVoice(FakeVoice):
+    def __init__(self, failures: int = 1) -> None:
+        super().__init__()
+        self._failures_remaining = failures
+
+    async def start_playback(
+        self,
+        channel: VoiceChannelKey,
+        stream_url: str,
+    ):
+        if self._failures_remaining:
+            self._failures_remaining -= 1
+            self.played.append((channel, stream_url))
+            raise MusicBackendClosedError("fixture startup backend failure")
+        return await super().start_playback(channel, stream_url)
 
 
 async def eventually(predicate, *, attempts: int = 100) -> None:
@@ -142,7 +236,7 @@ async def test_music_service_serializes_queue_controls_and_cleans_up() -> None:
     await eventually(lambda: len(voice.played) == 2)
     assert voice.played[1][1].endswith("/second.mp3")
     voice.current_finished.set()
-    await eventually(lambda: not service._tasks.has_active(VoiceChannelKey("area", "voice-a")))
+    await eventually(lambda: service._session(VoiceChannelKey("area", "voice-a")).worker is None)
     assert (await service.queue(identity())).state.value == "idle"
     assert voice.left == [VoiceChannelKey("area", "voice-a")]
 
@@ -152,7 +246,55 @@ async def test_music_service_serializes_queue_controls_and_cleans_up() -> None:
 
 
 @pytest.mark.asyncio
-async def test_music_service_keeps_channel_queues_isolated_and_bounds_capacity() -> None:
+async def test_music_service_reresolves_current_track_once_after_backend_failure() -> None:
+    catalog = FakeCatalog()
+    voice = RecoveringVoice()
+    service = MusicRequestService(settings(), catalog, voice)
+
+    await service.enqueue(identity(), "recover")
+    await eventually(lambda: len(voice.played) == 2)
+
+    assert catalog.resolved == ["recover", "recover"]
+    assert voice.played[0] == voice.played[1]
+    assert (await service.queue(identity())).state is PlaybackState.PLAYING
+    voice.current_finished.set()
+    await eventually(lambda: voice.acquired is None)
+    await service.aclose()
+
+
+@pytest.mark.asyncio
+async def test_music_service_does_not_retry_backend_failure_more_than_once() -> None:
+    catalog = FakeCatalog()
+    voice = RecoveringVoice(failures=2)
+    service = MusicRequestService(settings(), catalog, voice)
+
+    await service.enqueue(identity(), "still-broken")
+    await eventually(lambda: voice.acquired is None)
+
+    assert catalog.resolved == ["still-broken", "still-broken"]
+    assert len(voice.played) == 2
+    assert (await service.queue(identity())).state is PlaybackState.IDLE
+    await service.aclose()
+
+
+@pytest.mark.asyncio
+async def test_music_service_reresolves_once_when_backend_fails_during_startup() -> None:
+    catalog = FakeCatalog()
+    voice = StartupRecoveringVoice()
+    service = MusicRequestService(settings(), catalog, voice)
+
+    await service.enqueue(identity(), "startup-recover")
+    await eventually(lambda: len(voice.played) == 2)
+
+    assert catalog.resolved == ["startup-recover", "startup-recover"]
+    assert (await service.queue(identity())).state is PlaybackState.PLAYING
+    voice.current_finished.set()
+    await eventually(lambda: voice.acquired is None)
+    await service.aclose()
+
+
+@pytest.mark.asyncio
+async def test_music_service_bounds_capacity_and_rejects_a_second_voice_channel() -> None:
     voice = FakeVoice()
     service = MusicRequestService(
         settings(CYWL_MUSIC_MAX_QUEUE_LENGTH="1"),
@@ -166,13 +308,16 @@ async def test_music_service_keeps_channel_queues_isolated_and_bounds_capacity()
         await service.enqueue(identity(), "overflow")
 
     other = replace(identity(), person_id="other", conversation=identity("other").conversation)
-    result = await service.enqueue(other, "other-song")
-    assert result.voice_channel.channel_id == "voice-b"
+    with pytest.raises(MusicVoiceBusyError):
+        await service.enqueue(other, "other-song")
     assert len(voice.played) == 1
 
     voice.current_finished.set()
+    await eventually(lambda: voice.acquired is None)
+    result = await service.enqueue(other, "other-song")
+    assert result.voice_channel.channel_id == "voice-b"
     await eventually(lambda: len(voice.played) == 2)
-    assert voice.played[1][0].channel_id == "voice-b"
+    voice.current_finished.set()
 
     await service.aclose()
 
@@ -295,4 +440,48 @@ async def test_music_service_requires_the_real_callers_voice_channel() -> None:
             )
         )
 
+    await service.aclose()
+
+
+@pytest.mark.asyncio
+async def test_music_service_rejects_enqueue_when_another_feature_owns_voice() -> None:
+    voice = FakeVoice()
+    voice.available = False
+    service = MusicRequestService(settings(), FakeCatalog(), voice)
+
+    with pytest.raises(MusicVoiceBusyError):
+        await service.enqueue(identity(), "song")
+
+    snapshot = await service.queue(identity())
+    assert snapshot.current is None
+    assert snapshot.upcoming == ()
+    assert snapshot.state.value == "idle"
+    await service.aclose()
+
+
+@pytest.mark.asyncio
+async def test_enqueue_during_idle_release_acquires_a_fresh_lease_and_worker() -> None:
+    voice = FakeVoice()
+    service = MusicRequestService(settings(), FakeCatalog(), voice)
+    channel = VoiceChannelKey("area", "voice-a")
+
+    await service.enqueue(identity(), "first")
+    await eventually(lambda: len(voice.played) == 1)
+    voice.release_allowed.clear()
+    voice.current_finished.set()
+    await voice.release_entered.wait()
+
+    enqueue_task = asyncio.create_task(service.enqueue(identity(), "second"))
+    await asyncio.sleep(0)
+    assert enqueue_task.done() is False
+
+    voice.release_allowed.set()
+    result = await enqueue_task
+    assert result.started_worker is True
+    await eventually(lambda: len(voice.played) == 2)
+    assert voice.played[1][1].endswith("/second.mp3")
+    assert voice.acquire_calls == [channel, channel]
+
+    voice.current_finished.set()
+    await eventually(lambda: voice.acquired is None)
     await service.aclose()

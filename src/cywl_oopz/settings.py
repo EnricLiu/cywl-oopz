@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -12,6 +13,7 @@ from dotenv import find_dotenv, load_dotenv
 from oopz_sdk import OopzConfig
 
 from .core.errors import ConfigurationError
+from .features.audio.models import MixerLevels
 from .storage.url import normalize_asyncpg_url
 
 DEFAULT_AGENT_TOOLS = (
@@ -178,9 +180,28 @@ def _positive_float(
         value = float(raw)
     except ValueError as exc:
         raise ConfigurationError(f"{name} must be a number") from exc
+    if not math.isfinite(value):
+        raise ConfigurationError(f"{name} must be a finite number")
     minimum = 0.0 if allow_zero else 0.000001
     if value < minimum:
         raise ConfigurationError(f"{name} must be at least {minimum}")
+    return value
+
+
+def _finite_float(
+    values: Mapping[str, str],
+    name: str,
+    default: float,
+) -> float:
+    raw = values.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ConfigurationError(f"{name} must be a number") from exc
+    if not math.isfinite(value):
+        raise ConfigurationError(f"{name} must be a finite number")
     return value
 
 
@@ -618,7 +639,6 @@ class MusicSettings:
     max_queue_length: int
     max_playlist_tracks: int
     max_query_characters: int
-    playback_poll_seconds: float
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, str]) -> MusicSettings:
@@ -653,12 +673,258 @@ class MusicSettings:
                 "CYWL_MUSIC_MAX_QUERY_CHARACTERS",
                 200,
             ),
-            playback_poll_seconds=_positive_float(
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class AudioMixerSettings:
+    """Shared PCM master and external decoder rollout settings."""
+
+    enabled: bool
+    ffmpeg_path: str
+    master_prebuffer_ms: int
+    master_target_buffer_ms: int
+    master_max_buffer_ms: int
+    music_queue_ms: int
+    voice_queue_ms: int
+    music_solo_gain_db: float
+    music_voice_idle_gain_db: float
+    music_duck_gain_db: float
+    voice_gain_db: float
+    duck_attack_ms: int
+    duck_release_ms: int
+    limiter_threshold_db: float
+    limiter_release_ms: int
+    decoder_start_timeout_seconds: float
+    decoder_read_timeout_seconds: float
+    decoder_stop_timeout_seconds: float
+
+    @classmethod
+    def from_mapping(cls, values: Mapping[str, str]) -> AudioMixerSettings:
+        settings = cls(
+            enabled=_boolean(values, "CYWL_AUDIO_MIXER_ENABLED", False),
+            ffmpeg_path=values.get("CYWL_FFMPEG_PATH", "ffmpeg").strip() or "ffmpeg",
+            master_prebuffer_ms=_positive_integer(
                 values,
-                "CYWL_MUSIC_PLAYBACK_POLL_SECONDS",
+                "CYWL_AUDIO_MASTER_PREBUFFER_MS",
+                40,
+                allow_zero=True,
+            ),
+            master_target_buffer_ms=_positive_integer(
+                values,
+                "CYWL_AUDIO_MASTER_TARGET_BUFFER_MS",
+                60,
+            ),
+            master_max_buffer_ms=_positive_integer(
+                values,
+                "CYWL_AUDIO_MASTER_MAX_BUFFER_MS",
+                160,
+            ),
+            music_queue_ms=_positive_integer(values, "CYWL_AUDIO_MUSIC_QUEUE_MS", 500),
+            voice_queue_ms=_positive_integer(values, "CYWL_AUDIO_VOICE_QUEUE_MS", 60),
+            music_solo_gain_db=_finite_float(
+                values,
+                "CYWL_AUDIO_MUSIC_SOLO_GAIN_DB",
+                -6.0,
+            ),
+            music_voice_idle_gain_db=_finite_float(
+                values,
+                "CYWL_AUDIO_MUSIC_VOICE_IDLE_GAIN_DB",
+                -10.0,
+            ),
+            music_duck_gain_db=_finite_float(
+                values,
+                "CYWL_AUDIO_MUSIC_DUCK_GAIN_DB",
+                -24.0,
+            ),
+            voice_gain_db=_finite_float(values, "CYWL_AUDIO_VOICE_GAIN_DB", -3.0),
+            duck_attack_ms=_positive_integer(values, "CYWL_AUDIO_DUCK_ATTACK_MS", 40),
+            duck_release_ms=_positive_integer(values, "CYWL_AUDIO_DUCK_RELEASE_MS", 500),
+            limiter_threshold_db=_finite_float(
+                values,
+                "CYWL_AUDIO_LIMITER_THRESHOLD_DB",
+                -1.0,
+            ),
+            limiter_release_ms=_positive_integer(
+                values,
+                "CYWL_AUDIO_LIMITER_RELEASE_MS",
+                120,
+            ),
+            decoder_start_timeout_seconds=_positive_float(
+                values,
+                "CYWL_AUDIO_DECODER_START_TIMEOUT_SECONDS",
+                8.0,
+            ),
+            decoder_read_timeout_seconds=_positive_float(
+                values,
+                "CYWL_AUDIO_DECODER_READ_TIMEOUT_SECONDS",
+                10.0,
+            ),
+            decoder_stop_timeout_seconds=_positive_float(
+                values,
+                "CYWL_AUDIO_DECODER_STOP_TIMEOUT_SECONDS",
                 1.0,
             ),
         )
+        if not (
+            settings.master_prebuffer_ms
+            <= settings.master_target_buffer_ms
+            < settings.master_max_buffer_ms
+        ):
+            raise ConfigurationError(
+                "Audio master buffers must satisfy prebuffer <= target < max buffer"
+            )
+        if settings.music_queue_ms < 20 or settings.voice_queue_ms < 20:
+            raise ConfigurationError("Audio source queues must hold at least one 20 ms block")
+        if settings.master_max_buffer_ms > 2_000:
+            raise ConfigurationError("CYWL_AUDIO_MASTER_MAX_BUFFER_MS must not exceed 2000")
+        try:
+            settings.mixer_levels()
+        except ValueError as exc:
+            raise ConfigurationError("Audio mixer dynamics settings are invalid") from exc
+        return settings
+
+    def mixer_levels(self) -> MixerLevels:
+        return MixerLevels(
+            music_solo_gain_db=self.music_solo_gain_db,
+            music_voice_idle_gain_db=self.music_voice_idle_gain_db,
+            music_duck_gain_db=self.music_duck_gain_db,
+            voice_gain_db=self.voice_gain_db,
+            duck_attack_ms=self.duck_attack_ms,
+            duck_release_ms=self.duck_release_ms,
+            limiter_threshold_db=self.limiter_threshold_db,
+            limiter_release_ms=self.limiter_release_ms,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class VoiceSettings:
+    """Runtime bounds for the optional realtime voice conversation feature."""
+
+    enabled: bool
+    experimental: bool
+    start_timeout_seconds: float
+    stop_timeout_seconds: float
+    idle_timeout_seconds: int
+    owner_leave_grace_seconds: int
+    max_session_seconds: int
+    input_queue_ms: int
+    output_queue_ms: int
+    output_prebuffer_ms: int
+    event_queue_size: int
+    provider_connect_attempts: int
+    read_task_concurrency: int
+    per_user_task_concurrency: int
+    mailbox_poll_seconds: float
+    transcript_debug: bool
+
+    @classmethod
+    def from_mapping(cls, values: Mapping[str, str]) -> VoiceSettings:
+        """Build bounded media/session policy without loading Provider credentials."""
+        settings = cls(
+            enabled=_boolean(values, "CYWL_VOICE_ENABLED", False),
+            experimental=_boolean(values, "CYWL_VOICE_EXPERIMENTAL", True),
+            start_timeout_seconds=_positive_float(
+                values,
+                "CYWL_VOICE_START_TIMEOUT_SECONDS",
+                15.0,
+            ),
+            stop_timeout_seconds=_positive_float(
+                values,
+                "CYWL_VOICE_STOP_TIMEOUT_SECONDS",
+                1.5,
+            ),
+            idle_timeout_seconds=_positive_integer(
+                values,
+                "CYWL_VOICE_IDLE_TIMEOUT_SECONDS",
+                180,
+            ),
+            owner_leave_grace_seconds=_positive_integer(
+                values,
+                "CYWL_VOICE_OWNER_LEAVE_GRACE_SECONDS",
+                15,
+                allow_zero=True,
+            ),
+            max_session_seconds=_positive_integer(
+                values,
+                "CYWL_VOICE_MAX_SESSION_SECONDS",
+                1800,
+            ),
+            input_queue_ms=_positive_integer(values, "CYWL_VOICE_INPUT_QUEUE_MS", 200),
+            output_queue_ms=_positive_integer(values, "CYWL_VOICE_OUTPUT_QUEUE_MS", 300),
+            output_prebuffer_ms=_positive_integer(
+                values,
+                "CYWL_VOICE_OUTPUT_PREBUFFER_MS",
+                100,
+            ),
+            event_queue_size=_positive_integer(
+                values,
+                "CYWL_VOICE_EVENT_QUEUE_SIZE",
+                128,
+            ),
+            provider_connect_attempts=_positive_integer(
+                values,
+                "CYWL_VOICE_PROVIDER_CONNECT_ATTEMPTS",
+                3,
+            ),
+            read_task_concurrency=_positive_integer(
+                values,
+                "CYWL_VOICE_READ_TASK_CONCURRENCY",
+                2,
+            ),
+            per_user_task_concurrency=_positive_integer(
+                values,
+                "CYWL_VOICE_PER_USER_TASK_CONCURRENCY",
+                1,
+            ),
+            mailbox_poll_seconds=_positive_float(
+                values,
+                "CYWL_VOICE_MAILBOX_POLL_SECONDS",
+                2.0,
+            ),
+            transcript_debug=_boolean(values, "CYWL_VOICE_TRANSCRIPT_DEBUG", False),
+        )
+        settings._validate_bounds()
+        return settings
+
+    def _validate_bounds(self) -> None:
+        """Reject values that would make the realtime loop unsafe or misleading."""
+        maximums: tuple[tuple[str, int | float, int | float], ...] = (
+            ("CYWL_VOICE_START_TIMEOUT_SECONDS", self.start_timeout_seconds, 60),
+            ("CYWL_VOICE_STOP_TIMEOUT_SECONDS", self.stop_timeout_seconds, 1.6),
+            ("CYWL_VOICE_IDLE_TIMEOUT_SECONDS", self.idle_timeout_seconds, 3600),
+            ("CYWL_VOICE_OWNER_LEAVE_GRACE_SECONDS", self.owner_leave_grace_seconds, 60),
+            ("CYWL_VOICE_MAX_SESSION_SECONDS", self.max_session_seconds, 14400),
+            ("CYWL_VOICE_INPUT_QUEUE_MS", self.input_queue_ms, 1000),
+            ("CYWL_VOICE_OUTPUT_QUEUE_MS", self.output_queue_ms, 2000),
+            ("CYWL_VOICE_OUTPUT_PREBUFFER_MS", self.output_prebuffer_ms, 1000),
+            ("CYWL_VOICE_EVENT_QUEUE_SIZE", self.event_queue_size, 4096),
+            ("CYWL_VOICE_PROVIDER_CONNECT_ATTEMPTS", self.provider_connect_attempts, 5),
+            ("CYWL_VOICE_READ_TASK_CONCURRENCY", self.read_task_concurrency, 8),
+            ("CYWL_VOICE_PER_USER_TASK_CONCURRENCY", self.per_user_task_concurrency, 8),
+            ("CYWL_VOICE_MAILBOX_POLL_SECONDS", self.mailbox_poll_seconds, 30),
+        )
+        for name, value, maximum in maximums:
+            if value > maximum:
+                raise ConfigurationError(f"{name} must not exceed {maximum}")
+        if self.idle_timeout_seconds > self.max_session_seconds:
+            raise ConfigurationError(
+                "CYWL_VOICE_IDLE_TIMEOUT_SECONDS must not exceed CYWL_VOICE_MAX_SESSION_SECONDS"
+            )
+        if self.owner_leave_grace_seconds > self.idle_timeout_seconds:
+            raise ConfigurationError(
+                "CYWL_VOICE_OWNER_LEAVE_GRACE_SECONDS must not exceed "
+                "CYWL_VOICE_IDLE_TIMEOUT_SECONDS"
+            )
+        if self.output_prebuffer_ms > self.output_queue_ms:
+            raise ConfigurationError(
+                "CYWL_VOICE_OUTPUT_PREBUFFER_MS must not exceed CYWL_VOICE_OUTPUT_QUEUE_MS"
+            )
+        if self.per_user_task_concurrency > self.read_task_concurrency:
+            raise ConfigurationError(
+                "CYWL_VOICE_PER_USER_TASK_CONCURRENCY must not exceed "
+                "CYWL_VOICE_READ_TASK_CONCURRENCY"
+            )
 
 
 class WebSearchSafeSearch(StrEnum):
@@ -799,8 +1065,10 @@ class AppSettings:
     chat: ChatSettings
     agent: AgentSettings
     music: MusicSettings
+    audio: AudioMixerSettings
+    voice: VoiceSettings
     web: WebToolsSettings
-    command_prefix: str = "!"
+    command_prefix: str = "/"
     environment: str = "development"
 
     @classmethod
@@ -823,7 +1091,7 @@ class AppSettings:
     @classmethod
     def _build(cls, values: Mapping[str, str], oopz: OopzConfig) -> AppSettings:
         """Build all settings while keeping the SDK login source explicit."""
-        command_prefix = values.get("CYWL_COMMAND_PREFIX", "!").strip()
+        command_prefix = values.get("CYWL_COMMAND_PREFIX", "/").strip()
         if not command_prefix:
             raise ConfigurationError("CYWL_COMMAND_PREFIX must not be empty")
 
@@ -833,6 +1101,8 @@ class AppSettings:
             chat=ChatSettings.from_mapping(values),
             agent=AgentSettings.from_mapping(values),
             music=MusicSettings.from_mapping(values),
+            audio=AudioMixerSettings.from_mapping(values),
+            voice=VoiceSettings.from_mapping(values),
             web=WebToolsSettings.from_mapping(values),
             command_prefix=command_prefix,
             environment=values.get("CYWL_ENV", "development").strip() or "development",

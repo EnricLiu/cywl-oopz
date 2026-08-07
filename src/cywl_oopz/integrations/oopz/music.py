@@ -4,24 +4,102 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+from contextlib import suppress
+from typing import Protocol
 
-from oopz_sdk import OopzBot
+from oopz_sdk import OopzBot, VoicePlayback
 
 from cywl_oopz.core.observability import exception_kind, opaque_ref
-from cywl_oopz.features.music.models import VoiceChannelKey
+from cywl_oopz.features.audio.errors import AudioBusFailedError
+from cywl_oopz.features.audio.models import (
+    AudioChannelKey,
+    VoiceParticipantKind,
+    VoiceParticipantRequest,
+)
+from cywl_oopz.features.audio.ports import AudioDecoder
+from cywl_oopz.features.audio.session import SharedAudioMixerBus
+from cywl_oopz.features.music.errors import MusicBackendClosedError
+from cywl_oopz.features.music.models import (
+    MusicPlaybackEndReason,
+    MusicPlaybackResult,
+    VoiceChannelKey,
+)
+from cywl_oopz.integrations.audio.ffmpeg import FfmpegMusicDecoderFactory
+from cywl_oopz.integrations.audio.music import FfmpegMusicPlayback
+from cywl_oopz.settings import AudioMixerSettings
+
+from .voice_channel_session import (
+    OopzVoiceChannelSessionManager,
+    OopzVoiceParticipant,
+)
 
 DEFAULT_VOLUME = 2  # %
 
 logger = logging.getLogger(__name__)
 
 
-class OopzMusicVoiceGateway:
-    """Translate music operations into the single voice backend owned by OopzBot."""
+class _MusicDecoderFactory(Protocol):
+    async def validate(self) -> None: ...
 
-    def __init__(self, bot: OopzBot) -> None:
+    async def open(self, stream_url: str) -> AudioDecoder: ...
+
+
+class OopzMusicPlayback:
+    """Map one SDK playback handle to the project music port."""
+
+    def __init__(self, playback: VoicePlayback) -> None:
+        self._playback = playback
+
+    @property
+    def finished(self) -> bool:
+        return self._playback.finished
+
+    async def wait_finished(self) -> MusicPlaybackResult:
+        result = await self._playback.wait_finished()
+        return MusicPlaybackResult(
+            end_reason=MusicPlaybackEndReason(result.end_reason.value),
+            duration_seconds=result.duration_seconds,
+            terminal_error=result.terminal_error,
+        )
+
+    async def stop(self) -> None:
+        await self._playback.stop()
+
+    async def pause(self) -> bool:
+        await self._playback.pause()
+        return True
+
+    async def resume(self) -> bool:
+        await self._playback.resume()
+        return True
+
+
+class OopzMusicVoiceGateway:
+    """Translate music operations under one shared OOPZ voice lease."""
+
+    def __init__(
+        self,
+        bot: OopzBot,
+        leases: OopzVoiceChannelSessionManager,
+        audio_settings: AudioMixerSettings | None = None,
+        *,
+        decoder_factory: _MusicDecoderFactory | None = None,
+    ) -> None:
         self._bot = bot
-        self._current_channel: VoiceChannelKey | None = None
+        self._leases = leases
+        self._audio_settings = audio_settings or AudioMixerSettings.from_mapping({})
+        self._decoder_factory = decoder_factory or FfmpegMusicDecoderFactory(self._audio_settings)
+        self._lease: OopzVoiceParticipant | None = None
+        self._channel: VoiceChannelKey | None = None
+        self._playback: OopzMusicPlayback | FfmpegMusicPlayback | None = None
+        self._bus: SharedAudioMixerBus | None = None
+        self._backend_recovery_pending = False
         self._lock = asyncio.Lock()
+
+    async def validate_capabilities(self) -> None:
+        if self._audio_settings.enabled:
+            await self._decoder_factory.validate()
 
     async def voice_channel_for_user(self, area_id: str, person_id: str) -> str | None:
         channel = await self._bot.channels.get_voice_channel_for_user(area_id, person_id)
@@ -33,78 +111,133 @@ class OopzMusicVoiceGateway:
         )
         return channel
 
-    async def play(self, channel: VoiceChannelKey, stream_url: str) -> None:
+    async def acquire(self, channel: VoiceChannelKey) -> bool:
         async with self._lock:
-            if self._current_channel != channel:
-                if self._current_channel is not None:
-                    logger.info("Leaving OOPZ voice channel before switching playback")
-                    await self._bot.voice.leave()
-                    self._current_channel = None
-                logger.info(
-                    "Joining OOPZ voice channel for playback: channel=%s",
-                    self._channel_ref(channel),
+            if self._lease is not None:
+                return self._channel == channel and not self._lease.released
+            lease = await self._leases.try_acquire(
+                VoiceParticipantRequest(
+                    VoiceParticipantKind.MUSIC,
+                    AudioChannelKey(channel.area_id, channel.channel_id),
+                    owner_key=f"music:{channel.area_id}:{channel.channel_id}",
                 )
-                await self._bot.voice.join(
-                    area=channel.area_id,
-                    channel=channel.channel_id,
-                )
-                self._current_channel = channel
-
-            logger.debug(
-                "Starting OOPZ voice playback: channel=%s",
-                self._channel_ref(channel),
             )
-            await self._bot.voice.set_volume(DEFAULT_VOLUME)
-            await self._bot.voice.play_url(stream_url)
-
-    async def state(self) -> str:
-        return await self._bot.voice.get_state()
-
-    async def stop(self) -> None:
-        logger.info("Stopping OOPZ voice playback")
-        await self._bot.voice.stop()
-
-    async def pause(self) -> bool:
-        paused = await self._bot.voice.pause()
-        logger.info("Paused OOPZ voice playback: applied=%s", paused)
-        return paused
-
-    async def resume(self) -> bool:
-        resumed = await self._bot.voice.resume()
-        logger.info("Resumed OOPZ voice playback: applied=%s", resumed)
-        return resumed
-
-    async def leave(self, channel: VoiceChannelKey) -> bool:
-        """Leave only if the requested channel still owns the SDK voice backend."""
-        async with self._lock:
-            if self._current_channel != channel:
+            if lease is None:
                 return False
-            logger.info(
-                "Leaving idle OOPZ voice channel: channel=%s",
+            self._lease = lease
+            self._channel = channel
+            return True
+
+    async def start_playback(
+        self,
+        channel: VoiceChannelKey,
+        stream_url: str,
+    ) -> OopzMusicPlayback | FfmpegMusicPlayback:
+        async with self._lock:
+            if self._lease is None or self._lease.released or self._channel != channel:
+                raise RuntimeError("Music playback requires a matching active voice lease")
+            if self._playback is not None and not self._playback.finished:
+                raise RuntimeError("Music playback already has an active owner handle")
+            logger.debug(
+                "Starting typed OOPZ music playback: channel=%s",
                 self._channel_ref(channel),
             )
-            await self._bot.voice.leave()
-            self._current_channel = None
-            return True
+            if self._audio_settings.enabled:
+                restarting = self._backend_recovery_pending or (
+                    self._bus is not None and self._bus.failed
+                )
+                decoder: AudioDecoder | None = None
+                try:
+                    bus = await self._ensure_bus_locked()
+                    started_at = time.monotonic()
+                    decoder = await self._decoder_factory.open(stream_url)
+                    elapsed_ms = (time.monotonic() - started_at) * 1_000
+                    await bus.record_decoder_start(elapsed_ms, restarted=restarting)
+                    self._backend_recovery_pending = False
+                except BaseException as exc:
+                    if decoder is not None:
+                        with suppress(BaseException):
+                            await asyncio.shield(decoder.aclose())
+                    if isinstance(exc, AudioBusFailedError):
+                        self._backend_recovery_pending = True
+                        raise MusicBackendClosedError(
+                            "Shared music audio backend closed during startup"
+                        ) from exc
+                    raise
+                playback = FfmpegMusicPlayback.from_bus(decoder, bus)
+                self._playback = playback
+                return playback
+            await self._bot.voice.set_volume(DEFAULT_VOLUME)
+            playback = OopzMusicPlayback(await self._bot.voice.start_url_playback(stream_url))
+            self._playback = playback
+            return playback
+
+    async def release(self, channel: VoiceChannelKey) -> bool:
+        async with self._lock:
+            if self._lease is None or self._channel != channel:
+                return False
+            playback = self._playback
+            lease = self._lease
+            if playback is not None and not playback.finished:
+                try:
+                    await playback.stop()
+                except Exception as exc:
+                    logger.warning(
+                        "Could not stop music before releasing voice lease: error=%s",
+                        exception_kind(exc),
+                    )
+                else:
+                    self._playback = None
+            released = await lease.release()
+            if lease.released:
+                self._clear_lease_locked()
+            return released
 
     async def aclose(self) -> None:
         async with self._lock:
-            try:
-                await self._bot.voice.stop()
-            except Exception as exc:
-                logger.warning(
-                    "Could not stop OOPZ voice during close: error=%s", exception_kind(exc)
-                )
-            if self._current_channel is not None:
+            playback = self._playback
+            lease = self._lease
+            if playback is not None and not playback.finished:
                 try:
-                    await self._bot.voice.leave()
+                    await playback.stop()
                 except Exception as exc:
                     logger.warning(
-                        "Could not leave OOPZ voice during close: error=%s",
+                        "Could not stop music during close: error=%s",
                         exception_kind(exc),
                     )
-            self._current_channel = None
-        logger.info("Closed OOPZ voice gateway")
+                else:
+                    self._playback = None
+            if lease is not None:
+                try:
+                    await lease.release()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning(
+                        "Could not release music voice lease during close: error=%s",
+                        exception_kind(exc),
+                    )
+                    return
+                if lease.released:
+                    self._clear_lease_locked()
+            else:
+                self._channel = None
+        logger.info("Closed OOPZ music gateway")
+
+    def _clear_lease_locked(self) -> None:
+        self._playback = None
+        self._bus = None
+        self._backend_recovery_pending = False
+        self._lease = None
+        self._channel = None
+
+    async def _ensure_bus_locked(self) -> SharedAudioMixerBus:
+        if self._bus is not None and not self._bus.closed and not self._bus.failed:
+            return self._bus
+        if self._lease is None or self._lease.released:
+            raise RuntimeError("Music PCM output requires an active voice participant")
+        self._bus = await self._lease.audio_bus()
+        return self._bus
 
     @staticmethod
     def _channel_ref(channel: VoiceChannelKey) -> str:

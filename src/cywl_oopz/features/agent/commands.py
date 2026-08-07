@@ -168,7 +168,7 @@ class AgentModelCommand(ChatCommandController):
         self,
         service: AgentConversationService,
         tasks: ChatTaskSupervisor,
-        prefix: str = "!",
+        prefix: str = "/",
     ) -> None:
         super().__init__(service)
         self._agent = service
@@ -220,7 +220,7 @@ class ProviderCommand(ChatCommandController):
         self,
         service: AgentConversationService,
         tasks: ChatTaskSupervisor,
-        prefix: str = "!",
+        prefix: str = "/",
     ) -> None:
         super().__init__(service)
         self._agent = service
@@ -310,7 +310,7 @@ class ToolsCommand(ChatCommandController):
 
     async def execute(self, command: ParsedCommand, context: EventContext) -> None:
         if command.arguments:
-            await context.reply("用法：!tools")
+            await context.reply("用法：/tools")
             return
         try:
             tools = await self._agent.available_tools(self._key(context))
@@ -347,7 +347,7 @@ class SkillsCommand(ChatCommandController):
     async def execute(self, command: ParsedCommand, context: EventContext) -> None:
         action = command.arguments[0].casefold() if len(command.arguments) == 1 else ""
         if command.arguments and action not in {"owned", "shared", "invitations"}:
-            await context.reply("用法：!skills [owned|shared|invitations]")
+            await context.reply("用法：/skills [owned|shared|invitations]")
             return
         if action:
             await self._show_library_group(action, context)
@@ -607,7 +607,7 @@ class MemoryCommand(ChatCommandController):
                 message = (
                     "长期记忆已开启。"
                     if enabled
-                    else "长期记忆已关闭；已有内容仍保留，可使用 !memory forget all 删除。"
+                    else "长期记忆已关闭；已有内容仍保留，可使用 /memory forget all 删除。"
                 )
                 await context.reply(message)
                 return
@@ -629,10 +629,10 @@ class MemoryCommand(ChatCommandController):
                 await context.reply("已删除该记忆。" if deleted else "没有找到该记忆。")
                 return
             await context.reply(
-                "用法：!memory [status|list|on|off|remember <内容>|forget <ID|all>]"
+                "用法：/memory [status|list|on|off|remember <内容>|forget <ID|all>]"
             )
         except MemoryDisabledError:
-            await context.reply("长期记忆当前已关闭；请先使用 !memory on。")
+            await context.reply("长期记忆当前已关闭；请先使用 /memory on。")
         except MemoryCapacityError:
             await context.reply("长期记忆条目已满；请先删除不需要的内容。")
         except MemoryItemTooLongError:

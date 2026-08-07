@@ -1,0 +1,49 @@
+[
+  {"type": "session.created", "session": {"id": "sess-1"}},
+  {"type": "session.updated", "session": {"id": "sess-1"}},
+  {"type": "input_audio_buffer.speech_started", "item_id": "item-user"},
+  {"type": "input_audio_buffer.speech_stopped", "item_id": "item-user"},
+  {
+    "type": "conversation.item.input_audio_transcription.completed",
+    "item_id": "item-user",
+    "transcript": "你好"
+  },
+  {
+    "type": "response.created",
+    "response": {"id": "response-1", "status": "in_progress"}
+  },
+  {
+    "type": "response.audio_transcript.done",
+    "response_id": "response-1",
+    "item_id": "item-assistant",
+    "transcript": "你好呀"
+  },
+  {
+    "type": "response.audio.delta",
+    "response_id": "response-1",
+    "item_id": "item-assistant",
+    "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  },
+  {
+    "type": "response.done",
+    "response": {
+      "id": "response-1",
+      "status": "completed",
+      "usage": {"input_tokens": 12, "output_tokens": 5, "total_tokens": 17}
+    }
+  },
+  {
+    "type": "error",
+    "error": {"code": "rate_limit_exceeded", "message": "fixture-only"}
+  },
+  {"type": "future.event", "payload": {"ignored": true}},
+  {
+    "type": "response.created",
+    "response": {"id": "response-2", "status": "in_progress"}
+  },
+  {
+    "type": "response.done",
+    "response": {"id": "response-2", "status": "cancelled", "usage": {}}
+  },
+  {"type": "session.finished", "session": {"id": "sess-1"}}
+]

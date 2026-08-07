@@ -17,7 +17,7 @@ from cywl_oopz.features.agent.tools.music import (
     SetMusicPlaybackModeTool,
 )
 from cywl_oopz.features.chat.models import ConversationKey
-from cywl_oopz.features.music.errors import MusicVoiceChannelRequiredError
+from cywl_oopz.features.music.errors import MusicVoiceBusyError, MusicVoiceChannelRequiredError
 from cywl_oopz.features.music.models import (
     EnqueueResult,
     MusicQueueSnapshot,
@@ -147,3 +147,25 @@ async def test_music_tools_map_expected_domain_failures_to_stable_codes() -> Non
         await tool.execute(context(), EnqueueMusicInput(query="Song"))
 
     assert error.value.error_code == "music_voice_channel_required"
+
+
+@pytest.mark.asyncio
+async def test_enqueue_music_tool_reports_shared_voice_conflict() -> None:
+    class BusyVoiceMusic(StubMusic):
+        async def enqueue(
+            self,
+            identity: AgentIdentity,
+            query: str,
+            *,
+            idempotency_key: str = "",
+        ) -> EnqueueResult:
+            del identity, query, idempotency_key
+            raise MusicVoiceBusyError("voice conversation owns the backend")
+
+    music = BusyVoiceMusic(MusicTrack("netease", "42", "Song", (), 1000))
+    tool = EnqueueMusicTool(music, timeout_seconds=1, max_output_characters=2000)
+
+    with pytest.raises(ToolExecutionError) as error:
+        await tool.execute(context(), EnqueueMusicInput(query="Song"))
+
+    assert error.value.error_code == "music_voice_busy"

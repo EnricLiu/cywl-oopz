@@ -27,6 +27,18 @@ from .features.agent.commands import (
     ToolsCommand,
 )
 from .features.agent.context import AgentContextBuilder
+from .features.agent.delegation.mailbox import (
+    DelegatedTaskTextFallbackReconciler,
+    InProcessVoiceTaskCompletionNotifier,
+    VoiceTaskMailboxService,
+)
+from .features.agent.delegation.repository import SqlAlchemyDelegatedTaskRepository
+from .features.agent.delegation.runner import DelegatedAgentTaskRunner
+from .features.agent.delegation.scheduler import DelegatedTaskScheduler
+from .features.agent.delegation.service import (
+    InProcessDelegatedTaskWakeup,
+    VoiceDelegatedTaskService,
+)
 from .features.agent.direct_tools import DirectToolService
 from .features.agent.memory import MemoryService
 from .features.agent.memory_repository import SqlAlchemyMemoryRepository
@@ -41,6 +53,7 @@ from .features.agent.repository import (
     SqlAlchemyProviderCatalogRepository,
     SqlAlchemyToolExecutionRepository,
 )
+from .features.agent.run_service import AgentRunService
 from .features.agent.selection import ProviderSelectionService
 from .features.agent.service import AgentConversationService
 from .features.agent.skills.availability import SkillAvailabilityService
@@ -112,16 +125,34 @@ from .features.music.netease import NeteaseMusicCatalog
 from .features.music.playlist_repository import SqlAlchemyMusicPlaylistRepository
 from .features.music.playlists import MusicPlaylistService
 from .features.music.service import MusicRequestService
+from .features.voice.commands import VoiceCommand
+from .features.voice.repository import (
+    SqlAlchemyVoiceConfigurationRepository,
+    SqlAlchemyVoiceSessionRepository,
+)
+from .features.voice.runtime import RealtimeVoiceSessionRuntimeFactoryImpl
+from .features.voice.service import VoiceConversationService
+from .features.voice.task_tools import VoiceTaskControlTools
 from .features.web.browser import BrowserSessionManager
 from .features.web.errors import BrowserError
 from .features.web.service import WebSearchService
 from .integrations.oopz.agent_presenter import OopzAgentPresenterFactory
 from .integrations.oopz.chat_invocation import OopzChatInvocationFactory
 from .integrations.oopz.editable_messages import OopzEditableMessageGateway
+from .integrations.oopz.master_audio import OopzMasterPcmOutputFactory
 from .integrations.oopz.message_renderer import OopzMessageRenderer
 from .integrations.oopz.music import OopzMusicVoiceGateway
 from .integrations.oopz.reactions import OopzReactionGateway
 from .integrations.oopz.skill_sharing import OopzSkillShareNotifier
+from .integrations.oopz.voice_capabilities import OopzVoiceCapabilityGate
+from .integrations.oopz.voice_channel_session import OopzVoiceChannelSessionManager
+from .integrations.oopz.voice_conversation import (
+    OopzConversationVoiceAccess,
+    OopzVoiceCommandPresenter,
+)
+from .integrations.oopz.voice_media import OopzVoiceMediaGateway
+from .integrations.oopz.voice_task_notifications import OopzVoiceTaskTextGateway
+from .integrations.voice.provider_builder import ConfiguredVoiceProviderBuilder
 from .integrations.web.agent_browser_mcp import AgentBrowserMcpGateway
 from .integrations.web.duckduckgo import DuckDuckGoSearchGateway
 from .settings import (
@@ -147,9 +178,27 @@ class BotApplication:
         self.health = HealthRegistry()
         self.database = Database(settings.database)
         self.bot = OopzBot(settings.oopz)
+        self.voice_capability_gate = OopzVoiceCapabilityGate()
+        self.master_audio = OopzMasterPcmOutputFactory.from_settings(self.bot, settings.audio)
+        self.voice_channel_sessions = OopzVoiceChannelSessionManager(
+            self.bot,
+            allow_mixed_participants=settings.audio.enabled,
+            master_factory=self.master_audio,
+            master_target_buffer_ms=settings.audio.master_target_buffer_ms,
+            music_queue_ms=settings.audio.music_queue_ms,
+            voice_queue_ms=settings.audio.voice_queue_ms,
+            mixer_levels=settings.audio.mixer_levels(),
+        )
+        self.voice_media = OopzVoiceMediaGateway(
+            self.bot,
+            settings.voice,
+            settings.audio,
+            master_factory=self.master_audio,
+        )
         self.chat_invocations = OopzChatInvocationFactory(settings.oopz.person_uid)
+        self.editable_messages = OopzEditableMessageGateway(self.bot)
         self.agent_presenters = OopzAgentPresenterFactory(
-            OopzEditableMessageGateway(self.bot),
+            self.editable_messages,
             OopzMessageRenderer(),
             enabled=settings.agent.enabled and settings.agent.live_display,
             edit_interval_seconds=settings.agent.display_edit_interval_seconds,
@@ -210,12 +259,18 @@ class BotApplication:
             enabled_agent_tools = tuple(
                 name for name in enabled_agent_tools if name not in SKILL_AGENT_TOOLS
             )
+        self.music_voice: OopzMusicVoiceGateway | None = None
         if settings.music.enabled:
             self.music_catalog = NeteaseMusicCatalog(settings.music)
+            self.music_voice = OopzMusicVoiceGateway(
+                self.bot,
+                self.voice_channel_sessions,
+                settings.audio,
+            )
             self.music = MusicRequestService(
                 settings.music,
                 self.music_catalog,
-                OopzMusicVoiceGateway(self.bot),
+                self.music_voice,
             )
             self.music_playlists = MusicPlaylistService(
                 settings.music,
@@ -353,10 +408,11 @@ class BotApplication:
             max_available_skills=settings.agent.max_available_skills,
         )
         logger.info(
-            "Application configured: agent=%s tools=%s music=%s web_search=%s browser=%s",
+            "Application configured: agent=%s tools=%s music=%s voice=%s web_search=%s browser=%s",
             settings.agent.enabled,
             len(self.agent_tool_registry.names),
             self.music is not None,
+            settings.voice.enabled,
             self.web_search is not None,
             self.browser is not None,
         )
@@ -391,15 +447,24 @@ class BotApplication:
             self.agent_models,
             self.agent_tool_executor,
         )
+        self.agent_run_service = AgentRunService(
+            self.agent_engine,
+            self.agent_runs,
+            self.agent_messages,
+            heartbeat_interval_seconds=max(
+                1.0,
+                min(10.0, settings.agent.stale_run_after_seconds / 3),
+            ),
+            health=self.health,
+        )
         self.agent_chat = AgentConversationService(
             settings.agent,
             settings.chat,
-            self.agent_engine,
+            self.agent_run_service,
             self.agent_catalog,
             self.agent_selection,
             selection_repository,
             self.agent_threads,
-            self.agent_runs,
             self.agent_messages,
             self.agent_tool_availability,
             self.agent_skill_repository if settings.agent.skills_enabled else None,
@@ -430,6 +495,77 @@ class BotApplication:
             self.agent_presenters,
             self.chat_invocations,
         )
+        self.voice_configurations = SqlAlchemyVoiceConfigurationRepository(
+            self.database.session_factory
+        )
+        self.voice_sessions = SqlAlchemyVoiceSessionRepository(self.database.session_factory)
+        self.delegated_task_repository = SqlAlchemyDelegatedTaskRepository(
+            self.database.session_factory
+        )
+        self.delegated_task_wakeup = InProcessDelegatedTaskWakeup()
+        self.voice_task_completion_notifier = InProcessVoiceTaskCompletionNotifier()
+        self.voice_delegated_tasks = VoiceDelegatedTaskService(
+            self.delegated_task_repository,
+            self.delegated_task_wakeup,
+            completion_notifier=self.voice_task_completion_notifier,
+        )
+        self.voice_task_mailbox = VoiceTaskMailboxService(
+            self.delegated_task_repository,
+            self.voice_task_completion_notifier,
+            OopzVoiceTaskTextGateway(self.bot),
+        )
+        self.delegated_task_text_fallback = DelegatedTaskTextFallbackReconciler(
+            self.delegated_task_repository,
+            self.voice_task_completion_notifier,
+            self.voice_task_mailbox,
+            poll_seconds=settings.voice.mailbox_poll_seconds,
+        )
+        self.delegated_task_runner = DelegatedAgentTaskRunner(
+            settings.agent,
+            self.delegated_task_repository,
+            self.delegated_task_wakeup,
+            self.agent_run_service,
+            self.agent_catalog,
+            self.agent_threads,
+            self.agent_context,
+            self.agent_tool_registry,
+            self.agent_skill_repository if settings.agent.skills_enabled else None,
+            self.agent_skill_availability if settings.agent.skills_enabled else None,
+            completion_notifier=self.voice_task_completion_notifier,
+            max_task_retries=settings.agent.provider_max_retries,
+            heartbeat_interval_seconds=max(
+                1.0,
+                min(10.0, settings.agent.stale_run_after_seconds / 3),
+            ),
+        )
+        self.delegated_task_scheduler = DelegatedTaskScheduler(
+            self.delegated_task_repository,
+            self.delegated_task_wakeup,
+            self.delegated_task_runner,
+            completion_notifier=self.voice_task_completion_notifier,
+            read_concurrency=settings.voice.read_task_concurrency,
+            per_user_concurrency=settings.voice.per_user_task_concurrency,
+            reconcile_seconds=settings.voice.mailbox_poll_seconds,
+        )
+        self.voice_task_tools = VoiceTaskControlTools(self.voice_delegated_tasks)
+        self.voice_runtimes = RealtimeVoiceSessionRuntimeFactoryImpl(
+            settings.voice,
+            self.voice_media,
+            self.voice_sessions,
+            ConfiguredVoiceProviderBuilder(tool_schemas=self.voice_task_tools.schemas()),
+            self.voice_task_tools,
+            self.voice_task_mailbox,
+        )
+        self.voice_access = OopzConversationVoiceAccess(self.bot, self.voice_channel_sessions)
+        self.voice_conversations = VoiceConversationService(
+            settings.voice,
+            self.voice_access,
+            self.voice_runtimes,
+            self.voice_configurations,
+            self.voice_sessions,
+            self.agent_memory,
+            self.voice_access,
+        )
         self._register_commands()
         self.bot.on_ready(self._on_ready)
         self.bot.on_message(self._on_message)
@@ -437,7 +573,7 @@ class BotApplication:
         self.health.mark(
             "llm",
             HealthState.PENDING
-            if settings.chat.enabled or settings.agent.enabled
+            if settings.chat.enabled or settings.agent.enabled or settings.voice.enabled
             else HealthState.DISABLED,
         )
         self.health.mark("oopz", HealthState.PENDING)
@@ -448,8 +584,13 @@ class BotApplication:
         self.health.mark(
             "skills",
             HealthState.PENDING
-            if settings.agent.enabled and settings.agent.skills_enabled
+            if (settings.agent.enabled or settings.voice.enabled) and settings.agent.skills_enabled
             else HealthState.DISABLED,
+        )
+        self.health.mark(
+            "voice",
+            HealthState.PENDING if settings.voice.enabled else HealthState.DISABLED,
+            "experimental" if settings.voice.enabled else "feature disabled",
         )
 
     def _create_chat_provider(self) -> ChatProvider:
@@ -508,11 +649,28 @@ class BotApplication:
             self.commands.register(MemoryCommand(self.agent_chat, self.agent_memory))
             if self.settings.agent.skills_enabled:
                 self.commands.register(SkillsCommand(self.agent_chat, self.agent_skill_library))
+        if self.settings.voice.enabled:
+            self.commands.register(
+                VoiceCommand(
+                    self.voice_conversations,
+                    self.voice_configurations,
+                    OopzVoiceCommandPresenter(self.editable_messages),
+                    self.settings.command_prefix,
+                )
+            )
 
     async def run(self) -> None:
         """Start the database check before entering the long-running OOPZ client."""
         logger.info("Application startup started")
         try:
+            if self.settings.voice.enabled:
+                self.voice_capability_gate.validate(self.bot.voice.capabilities)
+                logger.info(
+                    "OOPZ realtime voice SDK contract validated: feature_version=%s",
+                    self.bot.voice.capabilities.feature_version,
+                )
+            if self.music_voice is not None:
+                await self.music_voice.validate_capabilities()
             try:
                 await self.database.start()
             except DatabaseError:
@@ -540,7 +698,14 @@ class BotApplication:
                         HealthState.HEALTHY,
                         "MCP contract validated",
                     )
-            if self.settings.agent.enabled:
+            recovered_voice_sessions = await self.voice_sessions.recover_stale(datetime.now(UTC))
+            if recovered_voice_sessions:
+                logger.warning(
+                    "Marked stale voice sessions interrupted after process restart: count=%s",
+                    recovered_voice_sessions,
+                )
+            agent_runtime_enabled = self.settings.agent.enabled or self.settings.voice.enabled
+            if agent_runtime_enabled:
                 await self.agent_models.reload()
                 catalog = self.agent_catalog.snapshot
                 logger.info(
@@ -554,7 +719,7 @@ class BotApplication:
                         default_model_id,
                         required_capabilities=(
                             frozenset({ModelCapability.TOOL_CALLING})
-                            if self.settings.agent.enabled_tools
+                            if self.settings.agent.enabled_tools or self.settings.voice.enabled
                             else frozenset()
                         ),
                         require_user_selectable=False,
@@ -564,23 +729,30 @@ class BotApplication:
                 )
                 if default_model is None:
                     raise ConfigurationError(
-                        "Agent mode requires an enabled application-default LLM model"
+                        "Agent or voice mode requires an enabled application-default LLM model"
                     )
-                now = datetime.now(UTC)
-                abandoned = await self.agent_runs.abandon_stale(
-                    now - timedelta(seconds=self.settings.agent.stale_run_after_seconds),
-                    now,
-                )
-                if abandoned:
-                    logger.warning("Marked stale Agent runs abandoned: count=%s", abandoned)
+            now = datetime.now(UTC)
+            abandoned = await self.agent_runs.abandon_stale(
+                now - timedelta(seconds=self.settings.agent.stale_run_after_seconds),
+                now,
+            )
+            if abandoned:
+                logger.warning("Marked stale Agent runs abandoned: count=%s", abandoned)
+            # Accepted voice tasks outlive the feature flag that created them.
+            await self.delegated_task_scheduler.start()
+            await self.delegated_task_text_fallback.start()
             logger.info("Starting OOPZ client")
             await self.bot.run()
         finally:
             logger.info("Application shutdown started")
             await self.chat_tasks.close()
             await self.agent_summary_tasks.close()
+            await self.voice_conversations.aclose()
+            await self.delegated_task_scheduler.aclose()
+            await self.delegated_task_text_fallback.aclose()
             if self.music is not None:
                 await self.music.aclose()
+            await self.voice_channel_sessions.aclose()
             if self.browser is not None:
                 await self.browser.aclose()
             if self.web_search is not None:
@@ -655,7 +827,7 @@ class BotApplication:
                 "Rejected duplicate chat task: conversation=%s",
                 opaque_ref(key.scope, key.area_id, key.channel_id, key.person_id),
             )
-            await context.reply("当前对话正在生成回复；可使用 !cancel 取消后再试。")
+            await context.reply("当前对话正在生成回复；可使用 /cancel 取消后再试。")
 
     @staticmethod
     def _message_reference(message: OopzMessage, context: EventContext) -> str:

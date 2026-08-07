@@ -463,6 +463,23 @@ class SqlAlchemyAgentRunRepository:
         except SQLAlchemyError as exc:
             raise _database_error("finish Agent run", exc) from exc
 
+    async def heartbeat(self, run_id: UUID, now: datetime) -> bool:
+        """Refresh one running record without extending any conversation lock."""
+        try:
+            async with self._sessions() as session:
+                async with session.begin():
+                    result = await session.execute(
+                        update(AgentRunRecord)
+                        .where(
+                            AgentRunRecord.id == run_id,
+                            AgentRunRecord.status == AgentRunStatus.RUNNING,
+                        )
+                        .values(heartbeat_at=now)
+                    )
+                    return result.rowcount == 1
+        except SQLAlchemyError as exc:
+            raise _database_error("heartbeat Agent run", exc) from exc
+
     async def abandon_stale(self, before: datetime, now: datetime) -> int:
         """Mark runs with an expired heartbeat abandoned after process restart."""
         try:

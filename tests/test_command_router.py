@@ -24,11 +24,11 @@ class EchoCommand:
 
 
 def test_parse_requires_prefix() -> None:
-    router = CommandRouter("!")
+    router = CommandRouter("/")
 
     assert router.parse("hello") is None
-    assert router.parse("!") is None
-    assert router.parse("!ECHO one two") == ParsedCommand("echo", ("one", "two"))
+    assert router.parse("/") is None
+    assert router.parse("/ECHO one two") == ParsedCommand("echo", ("one", "two"))
 
 
 def test_parse_preserves_raw_json_argument_spacing() -> None:
@@ -43,11 +43,11 @@ def test_parse_preserves_raw_json_argument_spacing() -> None:
 
 @pytest.mark.asyncio
 async def test_dispatch_executes_registered_command() -> None:
-    router = CommandRouter("!")
+    router = CommandRouter("/")
     command = EchoCommand()
     router.register(command)
 
-    consumed = await router.dispatch(FakeMessage("!echo hello"), object())
+    consumed = await router.dispatch(FakeMessage("/echo hello"), object())
 
     assert consumed is True
     assert command.received == ParsedCommand("echo", ("hello",))

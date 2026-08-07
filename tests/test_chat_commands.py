@@ -74,17 +74,17 @@ def test_oopz_invocation_factory_keeps_only_trusted_recipient_mentions() -> None
 async def test_chat_and_new_commands_use_the_same_scoped_session(chat_settings) -> None:
     repository = InMemoryConversationRepository()
     chat = ChatService(chat_settings, RecordingChatProvider(["answer"]), repository)
-    router = CommandRouter("!")
+    router = CommandRouter("/")
     router.register(ChatCommand(chat))
     router.register(NewConversationCommand(chat, ChatTaskSupervisor()))
-    message = FakeMessage("!chat hello")
+    message = FakeMessage("/chat hello")
     first_context = context_for(message)
 
     assert await router.dispatch(message, first_context) is True
     assert first_context.replies == ["answer"]
     assert repository.sessions
 
-    reset_message = FakeMessage("!new")
+    reset_message = FakeMessage("/new")
     reset_context = context_for(reset_message)
     assert await router.dispatch(reset_message, reset_context) is True
     assert reset_context.replies == ["已开始新的对话。"]
@@ -96,15 +96,15 @@ async def test_chat_status_does_not_expose_message_contents(chat_settings) -> No
     chat = ChatService(
         chat_settings, RecordingChatProvider(["sensitive answer"]), InMemoryConversationRepository()
     )
-    router = CommandRouter("!")
+    router = CommandRouter("/")
     router.register(ChatCommand(chat))
     router.register(ChatStatusCommand(chat))
     await router.dispatch(
-        FakeMessage("!chat private question"), context_for(FakeMessage("!chat private question"))
+        FakeMessage("/chat private question"), context_for(FakeMessage("/chat private question"))
     )
-    status_context = context_for(FakeMessage("!chat-status"))
+    status_context = context_for(FakeMessage("/chat-status"))
 
-    await router.dispatch(FakeMessage("!chat-status"), status_context)
+    await router.dispatch(FakeMessage("/chat-status"), status_context)
 
     rendered = "\n".join(status_context.replies)
     assert "private question" not in rendered
@@ -134,11 +134,11 @@ async def test_bot_mention_starts_a_scoped_conversation(chat_settings) -> None:
 @pytest.mark.asyncio
 async def test_cancel_command_reports_when_no_response_is_running(chat_settings) -> None:
     chat = ChatService(chat_settings, RecordingChatProvider(), InMemoryConversationRepository())
-    router = CommandRouter("!")
+    router = CommandRouter("/")
     router.register(CancelChatCommand(chat, ChatTaskSupervisor()))
-    context = context_for(FakeMessage("!cancel"))
+    context = context_for(FakeMessage("/cancel"))
 
-    await router.dispatch(FakeMessage("!cancel"), context)
+    await router.dispatch(FakeMessage("/cancel"), context)
 
     assert context.replies == ["当前没有正在生成的文字回复。"]
 
@@ -220,14 +220,14 @@ class ProgressChatService:
 @pytest.mark.asyncio
 async def test_owned_presentation_replaces_the_normal_final_reply() -> None:
     presentation = OwnedPresentation()
-    router = CommandRouter("!")
+    router = CommandRouter("/")
     router.register(
         ChatCommand(
             ProgressChatService(),
             OwnedPresentationFactory(presentation),
         )
     )
-    message = FakeMessage("!chat hello")
+    message = FakeMessage("/chat hello")
     context = context_for(message)
 
     await router.dispatch(message, context)
@@ -242,14 +242,14 @@ async def test_owned_presentation_replaces_the_normal_final_reply() -> None:
 @pytest.mark.asyncio
 async def test_owned_presentation_keeps_safe_failure_in_the_original_message() -> None:
     presentation = OwnedPresentation()
-    router = CommandRouter("!")
+    router = CommandRouter("/")
     router.register(
         ChatCommand(
             FailingChatService(ProviderTimeoutError("timeout")),
             OwnedPresentationFactory(presentation),
         )
     )
-    message = FakeMessage("!chat hello")
+    message = FakeMessage("/chat hello")
     context = context_for(message)
 
     await router.dispatch(message, context)
@@ -276,17 +276,17 @@ async def test_cancel_updates_owned_message_without_a_second_command_reply() -> 
 
     service = WaitingService()
     chat = ChatCommand(service, OwnedPresentationFactory(presentation))
-    source_message = FakeMessage("!chat wait")
+    source_message = FakeMessage("/chat wait")
     source_context = context_for(source_message)
     key = ConversationKey.from_oopz_context(source_context)
     operation = chat.execute(
-        CommandRouter("!").parse(source_message.plain_text),
+        CommandRouter("/").parse(source_message.plain_text),
         source_context,
     )
     assert supervisor.start(key, operation) is True
     await asyncio.wait_for(started.wait(), timeout=1)
 
-    cancel_context = context_for(FakeMessage("!cancel"))
+    cancel_context = context_for(FakeMessage("/cancel"))
     cancel = CancelChatCommand(
         service,
         supervisor,
@@ -310,9 +310,9 @@ async def test_cancel_updates_owned_message_without_a_second_command_reply() -> 
     ],
 )
 async def test_chat_command_maps_expected_failures_to_one_safe_reply(error, expected) -> None:
-    router = CommandRouter("!")
+    router = CommandRouter("/")
     router.register(ChatCommand(FailingChatService(error)))
-    message = FakeMessage("!chat hello")
+    message = FakeMessage("/chat hello")
     context = context_for(message)
 
     await router.dispatch(message, context)

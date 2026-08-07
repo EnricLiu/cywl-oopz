@@ -6,6 +6,7 @@ from typing import Protocol
 from uuid import UUID
 
 from .models import (
+    MusicPlaybackResult,
     MusicPlaylist,
     MusicPlaylistEntry,
     MusicPlaylistSummary,
@@ -42,29 +43,40 @@ class MusicPlaylistSource(Protocol):
         """Return metadata and up to ``limit`` visible tracks."""
 
 
+class MusicPlayback(Protocol):
+    """Owner handle for one complete track playback."""
+
+    async def wait_finished(self) -> MusicPlaybackResult:
+        """Wait for an authoritative terminal playback event."""
+
+    async def stop(self) -> None:
+        """Stop this playback without affecting a replacement owner."""
+
+    async def pause(self) -> bool:
+        """Pause this playback when it is still active."""
+
+    async def resume(self) -> bool:
+        """Resume this playback when it is still active."""
+
+
 class MusicVoiceGateway(Protocol):
-    """OOPZ-independent voice operations required by the queue worker."""
+    """OOPZ-independent lease and playback operations used by music."""
 
     async def voice_channel_for_user(self, area_id: str, person_id: str) -> str | None:
         """Return the user's current voice channel in an area."""
 
-    async def play(self, channel: VoiceChannelKey, stream_url: str) -> None:
-        """Join the channel if needed and begin URL playback."""
+    async def acquire(self, channel: VoiceChannelKey) -> bool:
+        """Reserve the shared backend for this queue without preempting another feature."""
 
-    async def state(self) -> str:
-        """Return the current backend playback state."""
+    async def start_playback(
+        self,
+        channel: VoiceChannelKey,
+        stream_url: str,
+    ) -> MusicPlayback:
+        """Begin one typed URL playback under an existing music lease."""
 
-    async def stop(self) -> None:
-        """Stop the current track."""
-
-    async def pause(self) -> bool:
-        """Pause the current track."""
-
-    async def resume(self) -> bool:
-        """Resume the current track."""
-
-    async def leave(self, channel: VoiceChannelKey) -> bool:
-        """Leave the channel only when it still owns the shared voice backend."""
+    async def release(self, channel: VoiceChannelKey) -> bool:
+        """Release only the matching music lease after its queue drains."""
 
     async def aclose(self) -> None:
         """Stop playback and leave the active voice channel."""

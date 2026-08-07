@@ -2,20 +2,14 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
-from cywl_oopz.core.errors import (
-    DatabaseError,
-    ProviderError,
-    ProviderSelectionError,
-    ProviderTimeoutError,
-)
+from cywl_oopz.core.errors import ProviderSelectionError
 from cywl_oopz.core.health import HealthRegistry, HealthState
-from cywl_oopz.core.observability import exception_kind, opaque_ref
+from cywl_oopz.core.observability import opaque_ref
 from cywl_oopz.core.tasks import TaskSupervisor
 from cywl_oopz.features.chat.history import HistoryTrimmer
 from cywl_oopz.features.chat.locks import ConversationLockPool
@@ -38,13 +32,7 @@ from .catalog import ReloadableProviderCatalog
 from .context import AgentContextBuilder
 from .models import (
     AgentIdentity,
-    AgentMessage,
-    AgentRun,
     AgentRunLimits,
-    AgentRunRequest,
-    AgentRunResult,
-    AgentRunState,
-    AgentStopReason,
     AgentThread,
     ModelCapability,
     ModelCatalogView,
@@ -52,12 +40,11 @@ from .models import (
     SelectableModel,
 )
 from .ports import (
-    AgentEngine,
     AgentMessageRepository,
-    AgentRunRepository,
     AgentThreadRepository,
     ModelSelectionRepository,
 )
+from .run_service import AgentRunService, AgentRunSpec
 from .selection import ProviderSelectionService
 from .skills.availability import SkillAvailabilityService
 from .skills.models import AgentSkillDiscovery
@@ -77,12 +64,11 @@ class AgentConversationService:
         self,
         settings: AgentSettings,
         chat_settings: ChatSettings,
-        engine: AgentEngine,
+        run_service: AgentRunService,
         catalog: ReloadableProviderCatalog,
         selection: ProviderSelectionService,
         selection_repository: ModelSelectionRepository,
         threads: AgentThreadRepository,
-        runs: AgentRunRepository,
         messages: AgentMessageRepository,
         tool_availability: ToolAvailabilityService | None = None,
         skill_repository: AgentSkillReadRepository | None = None,
@@ -96,12 +82,11 @@ class AgentConversationService:
         health: HealthRegistry | None = None,
     ) -> None:
         self._settings = settings
-        self._engine = engine
+        self._run_service = run_service
         self._catalog = catalog
         self._selection = selection
         self._selection_repository = selection_repository
         self._threads = threads
-        self._runs = runs
         self._messages = messages
         self._tool_availability = tool_availability
         self._skill_repository = skill_repository
@@ -203,121 +188,23 @@ class AgentConversationService:
                     identity,
                     available_skills=available_skills,
                 )
-                run_id = uuid4()
-                state = AgentRunState(run_id).start(now)
                 limits = self._run_limits()
-                await self._runs.add(
-                    AgentRun(
-                        id=run_id,
-                        thread_id=thread.id,
-                        provider_id=selection.model.provider_id,
-                        model_id=selection.model.model_id,
+                outcome = await self._run_service.run(
+                    AgentRunSpec(
+                        thread=thread,
+                        identity=identity,
+                        prompt=content,
+                        model=selection.model,
                         selection_source=selection.source,
+                        enabled_tools=enabled_tools,
                         limits=limits,
-                        state=state,
-                        heartbeat_at=now,
-                    )
-                )
-                await self._messages.append(
-                    thread.id,
-                    run_id,
-                    (AgentMessage("user", "text", {"text": content}),),
-                )
-                request = AgentRunRequest(
-                    run_id=run_id,
-                    thread_id=thread.id,
-                    identity=identity,
-                    model=selection.model,
-                    prompt=content,
-                    context=context,
-                    enabled_tools=enabled_tools,
-                    limits=limits,
-                    skill_scope=skill_scope,
-                )
-                logger.info(
-                    "Agent run started: run=%s conversation=%s model=%s/%s "
-                    "context_messages=%s tools=%s skills=%s",
-                    run_id,
-                    conversation,
-                    selection.model.provider_alias,
-                    selection.model.model_alias,
-                    len(context),
-                    len(enabled_tools),
-                    len(available_skills),
-                )
-                try:
-                    result = await self._engine.run(request, progress)
-                except asyncio.CancelledError:
-                    logger.info("Agent run cancelled: run=%s conversation=%s", run_id, conversation)
-                    await self._finish_after_interrupt(
-                        state,
-                        AgentStopReason.CANCELLED,
-                        "cancelled",
-                    )
-                    raise
-                except ProviderTimeoutError as exc:
-                    logger.warning(
-                        "Agent run timed out: run=%s conversation=%s error=%s",
-                        run_id,
-                        conversation,
-                        exception_kind(exc),
-                    )
-                    await self._finish_after_interrupt(
-                        state,
-                        AgentStopReason.TIMEOUT,
-                        "provider_timeout",
-                    )
-                    self._mark_health(HealthState.DEGRADED, "request timed out")
-                    raise
-                except ProviderError as exc:
-                    logger.warning(
-                        "Agent provider failed: run=%s conversation=%s error=%s",
-                        run_id,
-                        conversation,
-                        exception_kind(exc),
-                    )
-                    await self._finish_after_interrupt(
-                        state,
-                        AgentStopReason.PROVIDER_ERROR,
-                        "provider_error",
-                    )
-                    self._mark_health(HealthState.DEGRADED, "request failed")
-                    raise
-                except Exception as exc:
-                    logger.error(
-                        "Agent run failed unexpectedly: run=%s conversation=%s error=%s",
-                        run_id,
-                        conversation,
-                        exception_kind(exc),
-                        exc_info=True,
-                    )
-                    await self._finish_after_interrupt(
-                        state,
-                        AgentStopReason.INVALID_OUTPUT,
-                        "agent_error",
-                    )
-                    self._mark_health(HealthState.DEGRADED, "Agent run failed")
-                    raise
-
-                finished_at = datetime.now(UTC)
-                await self._messages.append(
-                    thread.id,
-                    run_id,
-                    result.intermediate_messages
-                    + (
-                        AgentMessage(
-                            "assistant",
-                            "text",
-                            {"text": result.output},
-                            input_tokens=result.input_tokens,
-                            output_tokens=result.output_tokens,
-                        ),
+                        context=context,
+                        skill_scope=skill_scope,
                     ),
+                    progress,
                 )
-                await self._runs.finish(
-                    state.finish(result.stop_reason, finished_at),
-                    usage=self._usage(result),
-                )
+                result = outcome.result
+                finished_at = datetime.now(UTC)
                 await self._threads.refresh_expiry(
                     thread.id,
                     finished_at + timedelta(seconds=self._settings.session_ttl_seconds),
@@ -330,18 +217,11 @@ class AgentConversationService:
                             selection.model,
                         ),
                     )
-                self._mark_health(HealthState.HEALTHY, "last Agent run succeeded")
-                logger.info(
-                    "Agent run completed: run=%s conversation=%s reason=%s elapsed_seconds=%.3f "
-                    "model_requests=%s tool_calls=%s input_tokens=%s output_tokens=%s",
-                    run_id,
+                logger.debug(
+                    "Agent conversation turn completed: run=%s conversation=%s skills=%s",
+                    opaque_ref(str(outcome.run_id)),
                     conversation,
-                    result.stop_reason.value,
-                    time.perf_counter() - started_at,
-                    result.model_requests,
-                    result.tool_calls,
-                    result.input_tokens,
-                    result.output_tokens,
+                    len(available_skills),
                 )
                 return ChatResponse(
                     content=result.output,
@@ -599,39 +479,6 @@ class AgentConversationService:
             max_total_tokens=self._settings.max_total_tokens,
             max_parallel_tools=self._settings.max_parallel_tools,
         )
-
-    async def _finish_after_interrupt(
-        self,
-        state: AgentRunState,
-        reason: AgentStopReason,
-        error_code: str,
-    ) -> None:
-        try:
-            await self._runs.finish(
-                state.finish(reason, datetime.now(UTC)),
-                usage={},
-                error_code=error_code,
-            )
-        except DatabaseError as exc:
-            logger.warning(
-                "Could not persist interrupted Agent run: run=%s reason=%s error=%s",
-                state.run_id,
-                reason.value,
-                exception_kind(exc),
-            )
-
-    @staticmethod
-    def _usage(result: AgentRunResult) -> dict[str, object]:
-        return {
-            "input_tokens": result.input_tokens,
-            "output_tokens": result.output_tokens,
-            "model_requests": result.model_requests,
-            "tool_calls": result.tool_calls,
-        }
-
-    def _mark_health(self, state: HealthState, detail: str) -> None:
-        if self._health is not None:
-            self._health.mark("llm", state, detail)
 
     @staticmethod
     def _conversation_ref(key: ConversationKey) -> str:

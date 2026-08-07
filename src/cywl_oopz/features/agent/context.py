@@ -45,6 +45,7 @@ class AgentContextBuilder:
         identity: AgentIdentity,
         *,
         available_skills: tuple[AgentSkillDiscovery, ...] = (),
+        include_history: bool = True,
     ) -> tuple[AgentMessage, ...]:
         """Build provider-neutral context in stable priority order."""
         context: list[AgentMessage] = [
@@ -120,12 +121,16 @@ class AgentContextBuilder:
                         },
                     )
                 )
-        history = await self._messages.load(
-            thread.id,
-            limit=self._settings.max_history_messages,
-            after_sequence=thread.summary_through_sequence,
+        history = (
+            await self._messages.load(
+                thread.id,
+                limit=self._settings.max_history_messages,
+                after_sequence=thread.summary_through_sequence,
+            )
+            if include_history
+            else ()
         )
-        retained = self.trim_history(history)
+        retained = self.trim_history(history) if include_history else ()
         context.extend(retained)
         logger.debug(
             "Agent context built: thread=%s conversation=%s skills=%s summary=%s memory=%s "

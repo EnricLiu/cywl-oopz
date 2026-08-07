@@ -27,7 +27,7 @@ class OopzSkillShareNotifier:
             (
                 f"🎁 **技能邀请** {skill.display_name}\n"
                 "有人向你分享了一项只读实时技能。"
-                "可使用 !skills invitations 查看，再让未来接受或拒绝。"
+                "可使用 /skills invitations 查看，再让未来接受或拒绝。"
             ),
             operation="invitation",
             skill_id=skill.id,

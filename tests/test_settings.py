@@ -4,12 +4,15 @@ import pytest
 from oopz_sdk import OopzConfig
 
 from cywl_oopz.core.errors import ConfigurationError
+from cywl_oopz.features.audio.models import MixerLevels
 from cywl_oopz.settings import (
     AgentMode,
     AppSettings,
+    AudioMixerSettings,
     ChatSettings,
     DatabaseSettings,
     MusicSettings,
+    VoiceSettings,
     WebSearchSafeSearch,
     WebToolsSettings,
 )
@@ -99,6 +102,15 @@ def test_app_settings_use_the_injected_oopz_credentials(monkeypatch) -> None:
     assert settings.agent.max_skill_resource_characters == 12000
     assert settings.agent.max_skill_context_characters == 24000
     assert settings.music.enabled is False
+    assert settings.audio.enabled is False
+    assert settings.audio.master_target_buffer_ms == 60
+    assert settings.voice.enabled is False
+    assert settings.voice.experimental is True
+    assert settings.voice.stop_timeout_seconds == 1.5
+    assert settings.voice.input_queue_ms == 200
+    assert settings.voice.output_prebuffer_ms == 100
+    assert settings.voice.provider_connect_attempts == 3
+    assert settings.voice.transcript_debug is False
     assert settings.web.search_enabled is True
     assert settings.web.search_safesearch is WebSearchSafeSearch.MODERATE
     assert settings.web.browser_enabled is False
@@ -263,6 +275,141 @@ def test_enabled_music_requires_http_catalog_and_loads_bounds() -> None:
     assert settings.search_limit == 7
     assert settings.max_queue_length == 12
     assert settings.max_playlist_tracks == 1000
+
+
+def test_audio_mixer_settings_load_and_validate_pcm_bounds() -> None:
+    settings = AudioMixerSettings.from_mapping(
+        {
+            "CYWL_AUDIO_MIXER_ENABLED": "true",
+            "CYWL_FFMPEG_PATH": "/opt/ffmpeg",
+            "CYWL_AUDIO_MASTER_PREBUFFER_MS": "20",
+            "CYWL_AUDIO_MASTER_TARGET_BUFFER_MS": "40",
+            "CYWL_AUDIO_MASTER_MAX_BUFFER_MS": "120",
+            "CYWL_AUDIO_MUSIC_QUEUE_MS": "400",
+            "CYWL_AUDIO_VOICE_QUEUE_MS": "80",
+            "CYWL_AUDIO_MUSIC_SOLO_GAIN_DB": "-4",
+            "CYWL_AUDIO_MUSIC_VOICE_IDLE_GAIN_DB": "-8",
+            "CYWL_AUDIO_MUSIC_DUCK_GAIN_DB": "-20",
+            "CYWL_AUDIO_VOICE_GAIN_DB": "-2",
+            "CYWL_AUDIO_DUCK_ATTACK_MS": "30",
+            "CYWL_AUDIO_DUCK_RELEASE_MS": "450",
+            "CYWL_AUDIO_LIMITER_THRESHOLD_DB": "-0.5",
+            "CYWL_AUDIO_LIMITER_RELEASE_MS": "100",
+            "CYWL_AUDIO_DECODER_START_TIMEOUT_SECONDS": "4",
+            "CYWL_AUDIO_DECODER_READ_TIMEOUT_SECONDS": "5",
+            "CYWL_AUDIO_DECODER_STOP_TIMEOUT_SECONDS": "0.5",
+        }
+    )
+
+    assert settings.enabled is True
+    assert settings.ffmpeg_path == "/opt/ffmpeg"
+    assert settings.master_prebuffer_ms == 20
+    assert settings.master_target_buffer_ms == 40
+    assert settings.master_max_buffer_ms == 120
+    assert settings.music_queue_ms == 400
+    assert settings.voice_queue_ms == 80
+    assert settings.mixer_levels() == MixerLevels(
+        music_solo_gain_db=-4,
+        music_voice_idle_gain_db=-8,
+        music_duck_gain_db=-20,
+        voice_gain_db=-2,
+        duck_attack_ms=30,
+        duck_release_ms=450,
+        limiter_threshold_db=-0.5,
+        limiter_release_ms=100,
+    )
+    assert settings.decoder_stop_timeout_seconds == 0.5
+
+    with pytest.raises(ConfigurationError, match="prebuffer <= target < max"):
+        AudioMixerSettings.from_mapping(
+            {
+                "CYWL_AUDIO_MASTER_PREBUFFER_MS": "100",
+                "CYWL_AUDIO_MASTER_TARGET_BUFFER_MS": "80",
+                "CYWL_AUDIO_MASTER_MAX_BUFFER_MS": "120",
+            }
+        )
+
+    with pytest.raises(ConfigurationError, match="finite number"):
+        AudioMixerSettings.from_mapping({"CYWL_AUDIO_MUSIC_DUCK_GAIN_DB": "nan"})
+
+    with pytest.raises(ConfigurationError, match="dynamics settings"):
+        AudioMixerSettings.from_mapping({"CYWL_AUDIO_LIMITER_THRESHOLD_DB": "1"})
+
+
+def test_voice_settings_load_runtime_bounds() -> None:
+    settings = VoiceSettings.from_mapping(
+        {
+            "CYWL_VOICE_ENABLED": "true",
+            "CYWL_VOICE_EXPERIMENTAL": "false",
+            "CYWL_VOICE_START_TIMEOUT_SECONDS": "12.5",
+            "CYWL_VOICE_STOP_TIMEOUT_SECONDS": "1.25",
+            "CYWL_VOICE_IDLE_TIMEOUT_SECONDS": "240",
+            "CYWL_VOICE_OWNER_LEAVE_GRACE_SECONDS": "10",
+            "CYWL_VOICE_MAX_SESSION_SECONDS": "2400",
+            "CYWL_VOICE_INPUT_QUEUE_MS": "160",
+            "CYWL_VOICE_OUTPUT_QUEUE_MS": "360",
+            "CYWL_VOICE_OUTPUT_PREBUFFER_MS": "90",
+            "CYWL_VOICE_EVENT_QUEUE_SIZE": "256",
+            "CYWL_VOICE_PROVIDER_CONNECT_ATTEMPTS": "2",
+            "CYWL_VOICE_READ_TASK_CONCURRENCY": "4",
+            "CYWL_VOICE_PER_USER_TASK_CONCURRENCY": "2",
+            "CYWL_VOICE_MAILBOX_POLL_SECONDS": "1.5",
+            "CYWL_VOICE_TRANSCRIPT_DEBUG": "true",
+        }
+    )
+
+    assert settings.enabled is True
+    assert settings.experimental is False
+    assert settings.start_timeout_seconds == 12.5
+    assert settings.stop_timeout_seconds == 1.25
+    assert settings.idle_timeout_seconds == 240
+    assert settings.owner_leave_grace_seconds == 10
+    assert settings.max_session_seconds == 2400
+    assert settings.input_queue_ms == 160
+    assert settings.output_queue_ms == 360
+    assert settings.output_prebuffer_ms == 90
+    assert settings.event_queue_size == 256
+    assert settings.provider_connect_attempts == 2
+    assert settings.read_task_concurrency == 4
+    assert settings.per_user_task_concurrency == 2
+    assert settings.mailbox_poll_seconds == 1.5
+    assert settings.transcript_debug is True
+
+
+@pytest.mark.parametrize(
+    ("overrides", "error_name"),
+    [
+        ({"CYWL_VOICE_PROVIDER_CONNECT_ATTEMPTS": "6"}, "PROVIDER_CONNECT_ATTEMPTS"),
+        ({"CYWL_VOICE_STOP_TIMEOUT_SECONDS": "2"}, "STOP_TIMEOUT_SECONDS"),
+        (
+            {
+                "CYWL_VOICE_IDLE_TIMEOUT_SECONDS": "2000",
+                "CYWL_VOICE_MAX_SESSION_SECONDS": "1000",
+            },
+            "IDLE_TIMEOUT_SECONDS",
+        ),
+        (
+            {
+                "CYWL_VOICE_OUTPUT_QUEUE_MS": "80",
+                "CYWL_VOICE_OUTPUT_PREBUFFER_MS": "100",
+            },
+            "OUTPUT_PREBUFFER_MS",
+        ),
+        (
+            {
+                "CYWL_VOICE_READ_TASK_CONCURRENCY": "1",
+                "CYWL_VOICE_PER_USER_TASK_CONCURRENCY": "2",
+            },
+            "PER_USER_TASK_CONCURRENCY",
+        ),
+    ],
+)
+def test_voice_settings_reject_inconsistent_bounds(
+    overrides: dict[str, str],
+    error_name: str,
+) -> None:
+    with pytest.raises(ConfigurationError, match=error_name):
+        VoiceSettings.from_mapping(overrides)
 
 
 def test_web_search_settings_validate_provider_bounds() -> None:

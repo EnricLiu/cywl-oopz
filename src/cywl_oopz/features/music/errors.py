@@ -33,6 +33,22 @@ class MusicPlaybackError(MusicError):
     """Raised when the OOPZ voice backend cannot perform a requested action."""
 
 
+class MusicBackendClosedError(MusicPlaybackError):
+    """The shared voice transport closed and the current track may be retried once."""
+
+
+class MusicDecoderError(MusicPlaybackError):
+    """FFmpeg could not produce a valid bounded canonical PCM stream."""
+
+
+class MusicDecoderUnavailableError(MusicDecoderError):
+    """The configured FFmpeg executable is absent or incompatible."""
+
+
+class MusicVoiceBusyError(MusicPlaybackError):
+    """Raised when music cannot reserve the backend without preempting its owner."""
+
+
 class MusicAreaRequiredError(MusicError):
     """Raised when a shared playlist operation has no OOPZ area scope."""
 
