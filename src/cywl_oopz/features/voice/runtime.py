@@ -1031,6 +1031,7 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                     self._publish_status()
                     continue
                 self._user_speaking = True
+                await self._require_media().set_user_speaking(True)
                 if self._active_response is None:
                     self._set_state(VoiceSessionState.USER_SPEAKING)
                     continue
@@ -1041,6 +1042,7 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                 )
             elif isinstance(model_event, VoiceUserSpeechStopped):
                 self._user_speaking = False
+                await self._require_media().set_user_speaking(False)
                 self._last_user_speech_stopped = time.monotonic()
                 self._set_state(VoiceSessionState.THINKING)
             elif isinstance(model_event, VoiceResponseStarted):

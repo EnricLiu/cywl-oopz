@@ -256,6 +256,7 @@ class FakeVoiceMediaSession:
         self.flushes: list[PlaybackCursor] = []
         self.drain_count = 0
         self.drain_gate: asyncio.Event | None = None
+        self.user_speaking_changes: list[bool] = []
         self.closed = False
 
     async def push_input(self, frame: RemoteAudioFrame) -> None:
@@ -314,6 +315,9 @@ class FakeVoiceMediaSession:
 
     async def current_cursor(self) -> PlaybackCursor:
         return self._cursor
+
+    async def set_user_speaking(self, speaking: bool) -> None:
+        self.user_speaking_changes.append(speaking)
 
     async def aclose(self) -> None:
         if self.closed:

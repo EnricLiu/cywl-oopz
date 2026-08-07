@@ -6,18 +6,31 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Protocol
 
 from oopz_sdk import OopzBot
 
 from cywl_oopz.core.observability import exception_kind, opaque_ref
 from cywl_oopz.features.audio.errors import AudioSessionClosedError
+from cywl_oopz.features.audio.mixer import AudioMixer
 from cywl_oopz.features.audio.models import (
+    AUDIO_BLOCK_FRAMES,
     AudioChannelKey,
+    MixerLevels,
     VoiceParticipantKind,
     VoiceParticipantRequest,
 )
+from cywl_oopz.features.audio.ports import MasterPcmOutput
+from cywl_oopz.features.audio.session import SharedAudioMixerBus, master_buffer_frames
 
 logger = logging.getLogger(__name__)
+
+
+class _MasterOutputFactory(Protocol):
+    @property
+    def max_buffer_ms(self) -> int: ...
+
+    async def open(self) -> MasterPcmOutput: ...
 
 
 class VoiceChannelSessionState(StrEnum):
@@ -63,6 +76,12 @@ class OopzVoiceParticipant:
         self._released = True
         return released
 
+    async def audio_bus(self) -> SharedAudioMixerBus:
+        """Return this generation's session-owned lazy master bus."""
+        if self._released:
+            raise AudioSessionClosedError("Released participant has no audio bus")
+        return await self._manager._audio_bus(self)
+
     async def __aenter__(self) -> OopzVoiceParticipant:
         return self
 
@@ -77,6 +96,8 @@ class SharedVoiceChannelSession:
         self.channel = channel
         self.generation = generation
         self._participants: dict[VoiceParticipantKind, OopzVoiceParticipant] = {}
+        self._bus: SharedAudioMixerBus | None = None
+        self._bus_lock = asyncio.Lock()
 
     @property
     def participants(self) -> tuple[OopzVoiceParticipant, ...]:
@@ -96,6 +117,7 @@ class SharedVoiceChannelSession:
             return None, False
         participant = OopzVoiceParticipant(manager, request, self.generation)
         self._participants[request.kind] = participant
+        self._sync_bus_participants()
         return participant, True
 
     def remove(self, participant: OopzVoiceParticipant) -> bool:
@@ -103,7 +125,45 @@ class SharedVoiceChannelSession:
         if existing is not participant or participant.generation != self.generation:
             return False
         del self._participants[participant.request.kind]
+        self._sync_bus_participants()
         return True
+
+    async def audio_bus(
+        self,
+        factory: _MasterOutputFactory,
+        *,
+        master_target_buffer_ms: int,
+        music_queue_ms: int,
+        voice_queue_ms: int,
+        mixer_levels: MixerLevels,
+    ) -> SharedAudioMixerBus:
+        async with self._bus_lock:
+            if self._bus is not None and not self._bus.closed and not self._bus.failed:
+                return self._bus
+            if self._bus is not None and not self._bus.closed:
+                await self._bus.aclose()
+            master = await factory.open()
+            self._bus = SharedAudioMixerBus(
+                master,
+                max_buffer_frames=(
+                    master_buffer_frames(factory.max_buffer_ms) + AUDIO_BLOCK_FRAMES
+                ),
+                master_target_buffer_ms=master_target_buffer_ms,
+                music_queue_ms=music_queue_ms,
+                voice_queue_ms=voice_queue_ms,
+                mixer=AudioMixer(mixer_levels),
+            )
+            self._sync_bus_participants()
+            return self._bus
+
+    async def aclose_bus(self) -> None:
+        async with self._bus_lock:
+            if self._bus is not None:
+                await self._bus.aclose()
+
+    def _sync_bus_participants(self) -> None:
+        if self._bus is not None:
+            self._bus.update_participants(frozenset(self._participants))
 
     def snapshot(self, state: VoiceChannelSessionState) -> VoiceChannelSessionSnapshot:
         requests = tuple(
@@ -125,12 +185,22 @@ class OopzVoiceChannelSessionManager:
         *,
         transition_wait_seconds: float = 1.0,
         allow_mixed_participants: bool = True,
+        master_factory: _MasterOutputFactory | None = None,
+        master_target_buffer_ms: int = 60,
+        music_queue_ms: int = 500,
+        voice_queue_ms: int = 60,
+        mixer_levels: MixerLevels | None = None,
     ) -> None:
         if transition_wait_seconds <= 0:
             raise ValueError("Voice session transition wait must be positive")
         self._bot = bot
         self._transition_wait_seconds = transition_wait_seconds
         self._allow_mixed_participants = allow_mixed_participants
+        self._master_factory = master_factory
+        self._master_target_buffer_ms = master_target_buffer_ms
+        self._music_queue_ms = music_queue_ms
+        self._voice_queue_ms = voice_queue_ms
+        self._mixer_levels = mixer_levels or MixerLevels()
         self._lock = asyncio.Lock()
         self._close_lock = asyncio.Lock()
         self._session: SharedVoiceChannelSession | None = None
@@ -259,6 +329,8 @@ class OopzVoiceChannelSessionManager:
                     await wait_event.wait()
                     continue
                 try:
+                    if session is not None:
+                        await session.aclose_bus()
                     await self._bot.voice.leave()
                 except asyncio.CancelledError:
                     await self._restore_failed_leave()
@@ -375,6 +447,7 @@ class OopzVoiceChannelSessionManager:
 
             assert session is not None
             try:
+                await session.aclose_bus()
                 await self._bot.voice.leave()
             except BaseException:
                 await self._restore_failed_leave()
@@ -392,6 +465,26 @@ class OopzVoiceChannelSessionManager:
                 session.generation,
             )
             return True
+
+    async def _audio_bus(self, participant: OopzVoiceParticipant) -> SharedAudioMixerBus:
+        async with self._lock:
+            session = self._session
+            if (
+                session is None
+                or session.generation != participant.generation
+                or participant not in session.participants
+            ):
+                raise AudioSessionClosedError("Voice participant generation is no longer active")
+            factory = self._master_factory
+        if factory is None:
+            raise AudioSessionClosedError("Shared voice session has no master output factory")
+        return await session.audio_bus(
+            factory,
+            master_target_buffer_ms=self._master_target_buffer_ms,
+            music_queue_ms=self._music_queue_ms,
+            voice_queue_ms=self._voice_queue_ms,
+            mixer_levels=self._mixer_levels,
+        )
 
     def _begin_leave_locked(self) -> None:
         self._leaving = True

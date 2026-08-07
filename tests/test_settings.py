@@ -4,6 +4,7 @@ import pytest
 from oopz_sdk import OopzConfig
 
 from cywl_oopz.core.errors import ConfigurationError
+from cywl_oopz.features.audio.models import MixerLevels
 from cywl_oopz.settings import (
     AgentMode,
     AppSettings,
@@ -286,6 +287,14 @@ def test_audio_mixer_settings_load_and_validate_pcm_bounds() -> None:
             "CYWL_AUDIO_MASTER_MAX_BUFFER_MS": "120",
             "CYWL_AUDIO_MUSIC_QUEUE_MS": "400",
             "CYWL_AUDIO_VOICE_QUEUE_MS": "80",
+            "CYWL_AUDIO_MUSIC_SOLO_GAIN_DB": "-4",
+            "CYWL_AUDIO_MUSIC_VOICE_IDLE_GAIN_DB": "-8",
+            "CYWL_AUDIO_MUSIC_DUCK_GAIN_DB": "-20",
+            "CYWL_AUDIO_VOICE_GAIN_DB": "-2",
+            "CYWL_AUDIO_DUCK_ATTACK_MS": "30",
+            "CYWL_AUDIO_DUCK_RELEASE_MS": "450",
+            "CYWL_AUDIO_LIMITER_THRESHOLD_DB": "-0.5",
+            "CYWL_AUDIO_LIMITER_RELEASE_MS": "100",
             "CYWL_AUDIO_DECODER_START_TIMEOUT_SECONDS": "4",
             "CYWL_AUDIO_DECODER_READ_TIMEOUT_SECONDS": "5",
             "CYWL_AUDIO_DECODER_STOP_TIMEOUT_SECONDS": "0.5",
@@ -299,6 +308,16 @@ def test_audio_mixer_settings_load_and_validate_pcm_bounds() -> None:
     assert settings.master_max_buffer_ms == 120
     assert settings.music_queue_ms == 400
     assert settings.voice_queue_ms == 80
+    assert settings.mixer_levels() == MixerLevels(
+        music_solo_gain_db=-4,
+        music_voice_idle_gain_db=-8,
+        music_duck_gain_db=-20,
+        voice_gain_db=-2,
+        duck_attack_ms=30,
+        duck_release_ms=450,
+        limiter_threshold_db=-0.5,
+        limiter_release_ms=100,
+    )
     assert settings.decoder_stop_timeout_seconds == 0.5
 
     with pytest.raises(ConfigurationError, match="prebuffer <= target < max"):
@@ -309,6 +328,12 @@ def test_audio_mixer_settings_load_and_validate_pcm_bounds() -> None:
                 "CYWL_AUDIO_MASTER_MAX_BUFFER_MS": "120",
             }
         )
+
+    with pytest.raises(ConfigurationError, match="finite number"):
+        AudioMixerSettings.from_mapping({"CYWL_AUDIO_MUSIC_DUCK_GAIN_DB": "nan"})
+
+    with pytest.raises(ConfigurationError, match="dynamics settings"):
+        AudioMixerSettings.from_mapping({"CYWL_AUDIO_LIMITER_THRESHOLD_DB": "1"})
 
 
 def test_voice_settings_load_runtime_bounds() -> None:

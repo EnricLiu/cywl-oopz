@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -12,6 +13,7 @@ from dotenv import find_dotenv, load_dotenv
 from oopz_sdk import OopzConfig
 
 from .core.errors import ConfigurationError
+from .features.audio.models import MixerLevels
 from .storage.url import normalize_asyncpg_url
 
 DEFAULT_AGENT_TOOLS = (
@@ -178,9 +180,28 @@ def _positive_float(
         value = float(raw)
     except ValueError as exc:
         raise ConfigurationError(f"{name} must be a number") from exc
+    if not math.isfinite(value):
+        raise ConfigurationError(f"{name} must be a finite number")
     minimum = 0.0 if allow_zero else 0.000001
     if value < minimum:
         raise ConfigurationError(f"{name} must be at least {minimum}")
+    return value
+
+
+def _finite_float(
+    values: Mapping[str, str],
+    name: str,
+    default: float,
+) -> float:
+    raw = values.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ConfigurationError(f"{name} must be a number") from exc
+    if not math.isfinite(value):
+        raise ConfigurationError(f"{name} must be a finite number")
     return value
 
 
@@ -666,6 +687,14 @@ class AudioMixerSettings:
     master_max_buffer_ms: int
     music_queue_ms: int
     voice_queue_ms: int
+    music_solo_gain_db: float
+    music_voice_idle_gain_db: float
+    music_duck_gain_db: float
+    voice_gain_db: float
+    duck_attack_ms: int
+    duck_release_ms: int
+    limiter_threshold_db: float
+    limiter_release_ms: int
     decoder_start_timeout_seconds: float
     decoder_read_timeout_seconds: float
     decoder_stop_timeout_seconds: float
@@ -693,6 +722,34 @@ class AudioMixerSettings:
             ),
             music_queue_ms=_positive_integer(values, "CYWL_AUDIO_MUSIC_QUEUE_MS", 500),
             voice_queue_ms=_positive_integer(values, "CYWL_AUDIO_VOICE_QUEUE_MS", 60),
+            music_solo_gain_db=_finite_float(
+                values,
+                "CYWL_AUDIO_MUSIC_SOLO_GAIN_DB",
+                -6.0,
+            ),
+            music_voice_idle_gain_db=_finite_float(
+                values,
+                "CYWL_AUDIO_MUSIC_VOICE_IDLE_GAIN_DB",
+                -10.0,
+            ),
+            music_duck_gain_db=_finite_float(
+                values,
+                "CYWL_AUDIO_MUSIC_DUCK_GAIN_DB",
+                -24.0,
+            ),
+            voice_gain_db=_finite_float(values, "CYWL_AUDIO_VOICE_GAIN_DB", -3.0),
+            duck_attack_ms=_positive_integer(values, "CYWL_AUDIO_DUCK_ATTACK_MS", 40),
+            duck_release_ms=_positive_integer(values, "CYWL_AUDIO_DUCK_RELEASE_MS", 500),
+            limiter_threshold_db=_finite_float(
+                values,
+                "CYWL_AUDIO_LIMITER_THRESHOLD_DB",
+                -1.0,
+            ),
+            limiter_release_ms=_positive_integer(
+                values,
+                "CYWL_AUDIO_LIMITER_RELEASE_MS",
+                120,
+            ),
             decoder_start_timeout_seconds=_positive_float(
                 values,
                 "CYWL_AUDIO_DECODER_START_TIMEOUT_SECONDS",
@@ -721,7 +778,23 @@ class AudioMixerSettings:
             raise ConfigurationError("Audio source queues must hold at least one 20 ms block")
         if settings.master_max_buffer_ms > 2_000:
             raise ConfigurationError("CYWL_AUDIO_MASTER_MAX_BUFFER_MS must not exceed 2000")
+        try:
+            settings.mixer_levels()
+        except ValueError as exc:
+            raise ConfigurationError("Audio mixer dynamics settings are invalid") from exc
         return settings
+
+    def mixer_levels(self) -> MixerLevels:
+        return MixerLevels(
+            music_solo_gain_db=self.music_solo_gain_db,
+            music_voice_idle_gain_db=self.music_voice_idle_gain_db,
+            music_duck_gain_db=self.music_duck_gain_db,
+            voice_gain_db=self.voice_gain_db,
+            duck_attack_ms=self.duck_attack_ms,
+            duck_release_ms=self.duck_release_ms,
+            limiter_threshold_db=self.limiter_threshold_db,
+            limiter_release_ms=self.limiter_release_ms,
+        )
 
 
 @dataclass(frozen=True, slots=True)

@@ -301,5 +301,7 @@ class MixerLevels:
         )
         if not all(math.isfinite(value) for value in gains):
             raise ValueError("Mixer gains must be finite")
+        if self.limiter_threshold_db > 0:
+            raise ValueError("Limiter threshold must not exceed 0 dBFS")
         if min(self.duck_attack_ms, self.duck_release_ms, self.limiter_release_ms) <= 0:
             raise ValueError("Mixer transition durations must be positive")

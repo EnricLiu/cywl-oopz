@@ -49,15 +49,18 @@ class MusicPcmSourceOutput:
 
     async def flush(self) -> SourcePlaybackCursor:
         key = self._key()
-        plan = await self._bus.flush_source(frozenset({key}))
-        cursor = self._cursor_from(plan.source_cursors)
+        if self._accepted_frames:
+            plan = await self._bus.flush_source(frozenset({key}))
+            cursor = self._cursor_from(plan.source_cursors)
+        else:
+            cursor = SourcePlaybackCursor(self._generation, 0, 0)
         self._generation += 1
         self._next_frame = 0
         self._accepted_frames = 0
         return cursor
 
     async def drain(self) -> SourcePlaybackCursor:
-        return self._cursor_from(await self._bus.drain())
+        return self._cursor_from(await self._bus.drain(self._key()))
 
     def _cursor_from(
         self,

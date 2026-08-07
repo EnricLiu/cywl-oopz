@@ -8,6 +8,8 @@ import pytest
 from oopz_sdk import PcmFormat, VoiceAudioEndReason, VoicePlaybackCursor
 from oopz_sdk.models import AgoraAudioTrackData
 
+from cywl_oopz.features.audio.models import AUDIO_BLOCK_FRAMES
+from cywl_oopz.features.audio.session import SharedAudioMixerBus
 from cywl_oopz.features.voice.audio import PROVIDER_OUTPUT_FORMAT
 from cywl_oopz.features.voice.errors import VoiceMediaTransportError
 from cywl_oopz.features.voice.models import (
@@ -17,6 +19,7 @@ from cywl_oopz.features.voice.models import (
     VoiceSessionDescriptor,
     VoiceTextAddress,
 )
+from cywl_oopz.integrations.audio.fake import FakeMasterPcmOutput
 from cywl_oopz.integrations.oopz.voice_media import OopzVoiceMediaGateway
 from cywl_oopz.settings import VoiceSettings
 
@@ -27,6 +30,15 @@ class FakeLease:
     async def release(self) -> bool:
         self.released = True
         return True
+
+
+class SharedBusLease(FakeLease):
+    def __init__(self, bus: SharedAudioMixerBus) -> None:
+        self._bus = bus
+        self.released = False
+
+    async def audio_bus(self) -> SharedAudioMixerBus:
+        return self._bus
 
 
 class FakeSubscription:
@@ -209,6 +221,30 @@ async def test_oopz_media_opens_only_owner_input_and_fixed_output_contract() -> 
     await media.aclose()
     assert subscription.close_count == 1
     assert output.close_count == 1
+
+
+@pytest.mark.asyncio
+async def test_oopz_media_uses_participant_bus_without_closing_shared_master() -> None:
+    subscription = FakeSubscription()
+    sdk_output = FakeOutput()
+    voice = FakeVoice(subscription, sdk_output)
+    master = FakeMasterPcmOutput(max_buffer_frames=AUDIO_BLOCK_FRAMES * 10)
+    bus = SharedAudioMixerBus(master, max_buffer_frames=AUDIO_BLOCK_FRAMES * 11)
+    media = await OopzVoiceMediaGateway(SimpleNamespace(voice=voice), settings()).open(
+        descriptor(),
+        SharedBusLease(bus),
+    )
+
+    await media.write_output(long_output_chunk())
+    await media.drain_output()
+    await media.aclose()
+
+    assert voice.output_calls == []
+    assert subscription.close_count == 1
+    assert master.writes
+    assert master.closed is False
+    await bus.aclose()
+    assert master.closed is True
 
 
 @pytest.mark.asyncio

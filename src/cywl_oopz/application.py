@@ -139,6 +139,7 @@ from .features.web.service import WebSearchService
 from .integrations.oopz.agent_presenter import OopzAgentPresenterFactory
 from .integrations.oopz.chat_invocation import OopzChatInvocationFactory
 from .integrations.oopz.editable_messages import OopzEditableMessageGateway
+from .integrations.oopz.master_audio import OopzMasterPcmOutputFactory
 from .integrations.oopz.message_renderer import OopzMessageRenderer
 from .integrations.oopz.music import OopzMusicVoiceGateway
 from .integrations.oopz.reactions import OopzReactionGateway
@@ -178,11 +179,22 @@ class BotApplication:
         self.database = Database(settings.database)
         self.bot = OopzBot(settings.oopz)
         self.voice_capability_gate = OopzVoiceCapabilityGate()
+        self.master_audio = OopzMasterPcmOutputFactory.from_settings(self.bot, settings.audio)
         self.voice_channel_sessions = OopzVoiceChannelSessionManager(
             self.bot,
-            allow_mixed_participants=False,
+            allow_mixed_participants=settings.audio.enabled,
+            master_factory=self.master_audio,
+            master_target_buffer_ms=settings.audio.master_target_buffer_ms,
+            music_queue_ms=settings.audio.music_queue_ms,
+            voice_queue_ms=settings.audio.voice_queue_ms,
+            mixer_levels=settings.audio.mixer_levels(),
         )
-        self.voice_media = OopzVoiceMediaGateway(self.bot, settings.voice, settings.audio)
+        self.voice_media = OopzVoiceMediaGateway(
+            self.bot,
+            settings.voice,
+            settings.audio,
+            master_factory=self.master_audio,
+        )
         self.chat_invocations = OopzChatInvocationFactory(settings.oopz.person_uid)
         self.editable_messages = OopzEditableMessageGateway(self.bot)
         self.agent_presenters = OopzAgentPresenterFactory(

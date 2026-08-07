@@ -119,4 +119,4 @@ async def test_pcm_music_stop_unblocks_decoder_and_returns_typed_result() -> Non
 
     assert result.end_reason is MusicPlaybackEndReason.STOPPED
     assert decoder.closed is True
-    assert master.flush_count == 1
+    assert master.flush_count == 0

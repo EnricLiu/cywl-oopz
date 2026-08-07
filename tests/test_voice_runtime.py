@@ -822,6 +822,7 @@ async def test_realtime_runtime_barge_in_flushes_then_drops_late_audio() -> None
     assert media.flushes
     assert operation_order == ["flush", "interrupt"]
     assert runtime.state is VoiceSessionState.USER_SPEAKING
+    assert media.user_speaking_changes == [True]
     assert runtime.stats.barge_in_count == 1
     assert runtime.stats.max_barge_in_flush_ms < 200
     output_count = len(media.outputs)
@@ -856,6 +857,7 @@ async def test_realtime_runtime_barge_in_flushes_then_drops_late_audio() -> None
     await provider_session.emit(VoiceResponseCompleted("response-2"))
     await wait_until(lambda: len(media.outputs) == output_count + 1)
     await wait_until(lambda: len(sessions.turns) == 1)
+    assert media.user_speaking_changes == [True, False]
     assert sessions.turns[0][3] == "新回答"
 
     await runtime.request_stop(VoiceStopReason.COMMAND)

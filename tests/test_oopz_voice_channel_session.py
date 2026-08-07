@@ -6,10 +6,12 @@ import pytest
 
 from cywl_oopz.features.audio.errors import AudioSessionClosedError
 from cywl_oopz.features.audio.models import (
+    AUDIO_BLOCK_FRAMES,
     AudioChannelKey,
     VoiceParticipantKind,
     VoiceParticipantRequest,
 )
+from cywl_oopz.integrations.audio.fake import FakeMasterPcmOutput
 from cywl_oopz.integrations.oopz.voice_channel_session import (
     OopzVoiceChannelSessionManager,
     VoiceChannelSessionState,
@@ -60,6 +62,18 @@ class FakeBot:
         self.voice = FakeVoice()
 
 
+class FakeMasterFactory:
+    max_buffer_ms = 160
+
+    def __init__(self) -> None:
+        self.outputs: list[FakeMasterPcmOutput] = []
+
+    async def open(self) -> FakeMasterPcmOutput:
+        output = FakeMasterPcmOutput(max_buffer_frames=AUDIO_BLOCK_FRAMES * 10)
+        self.outputs.append(output)
+        return output
+
+
 @pytest.mark.asyncio
 async def test_same_channel_participants_share_join_until_final_release() -> None:
     bot = FakeBot()
@@ -85,6 +99,31 @@ async def test_same_channel_participants_share_join_until_final_release() -> Non
     assert await conversation.release() is True
     assert bot.voice.leaves == 1
     assert await manager.current() is None
+    await manager.aclose()
+
+
+@pytest.mark.asyncio
+async def test_same_channel_participants_share_master_until_final_release() -> None:
+    bot = FakeBot()
+    masters = FakeMasterFactory()
+    manager = OopzVoiceChannelSessionManager(bot, master_factory=masters)
+    music = await manager.try_acquire(request(VoiceParticipantKind.MUSIC, owner="music"))
+    conversation = await manager.try_acquire(
+        request(VoiceParticipantKind.CONVERSATION, owner="conversation")
+    )
+    assert music is not None
+    assert conversation is not None
+
+    music_bus, voice_bus = await asyncio.gather(music.audio_bus(), conversation.audio_bus())
+
+    assert music_bus is voice_bus
+    assert len(masters.outputs) == 1
+    assert await music.release() is True
+    assert masters.outputs[0].closed is False
+    assert bot.voice.leaves == 0
+    assert await conversation.release() is True
+    assert masters.outputs[0].closed is True
+    assert bot.voice.leaves == 1
     await manager.aclose()
 
 

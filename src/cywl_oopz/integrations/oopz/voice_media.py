@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import AsyncIterator
+from typing import Protocol
 
 from oopz_sdk import (
     OopzBot,
@@ -13,7 +14,9 @@ from oopz_sdk import (
 )
 
 from cywl_oopz.core.observability import exception_kind, opaque_ref
+from cywl_oopz.features.audio.mixer import AudioMixer
 from cywl_oopz.features.audio.models import AUDIO_BLOCK_FRAMES
+from cywl_oopz.features.audio.ports import MasterPcmOutput
 from cywl_oopz.features.audio.session import SharedAudioMixerBus, master_buffer_frames
 from cywl_oopz.features.voice.audio import PROVIDER_OUTPUT_FORMAT
 from cywl_oopz.features.voice.errors import VoiceMediaTransportError
@@ -46,6 +49,13 @@ _END_REASON_MAP = {
     VoiceAudioEndReason.TRANSPORT_LOST: VoiceMediaEndReason.TRANSPORT_LOST,
     VoiceAudioEndReason.QUEUE_OVERFLOW: VoiceMediaEndReason.QUEUE_OVERFLOW,
 }
+
+
+class _MasterOutputFactory(Protocol):
+    @property
+    def max_buffer_ms(self) -> int: ...
+
+    async def open(self) -> MasterPcmOutput: ...
 
 
 class OopzVoiceMediaSession:
@@ -133,6 +143,14 @@ class OopzVoiceMediaSession:
         except Exception as exc:
             raise self._transport_error("current_cursor", exc) from exc
 
+    async def set_user_speaking(self, speaking: bool) -> None:
+        try:
+            await self._output.set_user_speaking(speaking)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            raise self._transport_error("set_user_speaking", exc) from exc
+
     async def aclose(self) -> None:
         async with self._close_lock:
             if self._closed:
@@ -178,12 +196,17 @@ class OopzVoiceMediaGateway:
         bot: OopzBot,
         settings: VoiceSettings,
         audio_settings: AudioMixerSettings | None = None,
+        *,
+        master_factory: _MasterOutputFactory | None = None,
     ) -> None:
         self._bot = bot
         self._settings = settings
-        self._master_outputs = OopzMasterPcmOutputFactory.from_settings(
+        resolved_audio_settings = audio_settings or AudioMixerSettings.from_mapping({})
+        self._audio_settings = resolved_audio_settings
+        self._master_target_buffer_ms = resolved_audio_settings.master_target_buffer_ms
+        self._master_outputs = master_factory or OopzMasterPcmOutputFactory.from_settings(
             bot,
-            audio_settings or AudioMixerSettings.from_mapping({}),
+            resolved_audio_settings,
         )
 
     async def open(
@@ -216,16 +239,23 @@ class OopzVoiceMediaGateway:
             raise VoiceMediaTransportError("open_input", exception_kind(exc)) from exc
 
         try:
-            master = await self._master_outputs.open()
-            output = VoicePcmSourceOutput(
-                SharedAudioMixerBus(
+            audio_bus = getattr(lease, "audio_bus", None)
+            if callable(audio_bus):
+                bus = await audio_bus()
+                owns_bus = False
+            else:
+                master = await self._master_outputs.open()
+                bus = SharedAudioMixerBus(
                     master,
                     max_buffer_frames=(
                         master_buffer_frames(self._master_outputs.max_buffer_ms)
                         + AUDIO_BLOCK_FRAMES
                     ),
+                    master_target_buffer_ms=self._master_target_buffer_ms,
+                    mixer=AudioMixer(self._audio_settings.mixer_levels()),
                 )
-            )
+                owns_bus = True
+            output = VoicePcmSourceOutput(bus, owns_bus=owns_bus)
         except asyncio.CancelledError:
             await asyncio.shield(self._close_failed_subscription(subscription))
             raise

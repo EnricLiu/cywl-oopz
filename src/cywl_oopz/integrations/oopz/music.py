@@ -10,13 +10,12 @@ from oopz_sdk import OopzBot, VoicePlayback
 
 from cywl_oopz.core.observability import exception_kind, opaque_ref
 from cywl_oopz.features.audio.models import (
-    AUDIO_BLOCK_FRAMES,
     AudioChannelKey,
     VoiceParticipantKind,
     VoiceParticipantRequest,
 )
-from cywl_oopz.features.audio.ports import AudioDecoder, MasterPcmOutput
-from cywl_oopz.features.audio.session import SharedAudioMixerBus, master_buffer_frames
+from cywl_oopz.features.audio.ports import AudioDecoder
+from cywl_oopz.features.audio.session import SharedAudioMixerBus
 from cywl_oopz.features.music.models import (
     MusicPlaybackEndReason,
     MusicPlaybackResult,
@@ -26,7 +25,6 @@ from cywl_oopz.integrations.audio.ffmpeg import FfmpegMusicDecoderFactory
 from cywl_oopz.integrations.audio.music import FfmpegMusicPlayback
 from cywl_oopz.settings import AudioMixerSettings
 
-from .master_audio import OopzMasterPcmOutputFactory
 from .voice_channel_session import (
     OopzVoiceChannelSessionManager,
     OopzVoiceParticipant,
@@ -41,13 +39,6 @@ class _MusicDecoderFactory(Protocol):
     async def validate(self) -> None: ...
 
     async def open(self, stream_url: str) -> AudioDecoder: ...
-
-
-class _MasterOutputFactory(Protocol):
-    @property
-    def max_buffer_ms(self) -> int: ...
-
-    async def open(self) -> MasterPcmOutput: ...
 
 
 class OopzMusicPlayback:
@@ -90,16 +81,11 @@ class OopzMusicVoiceGateway:
         audio_settings: AudioMixerSettings | None = None,
         *,
         decoder_factory: _MusicDecoderFactory | None = None,
-        master_factory: _MasterOutputFactory | None = None,
     ) -> None:
         self._bot = bot
         self._leases = leases
         self._audio_settings = audio_settings or AudioMixerSettings.from_mapping({})
         self._decoder_factory = decoder_factory or FfmpegMusicDecoderFactory(self._audio_settings)
-        self._master_factory = master_factory or OopzMasterPcmOutputFactory.from_settings(
-            bot,
-            self._audio_settings,
-        )
         self._lease: OopzVoiceParticipant | None = None
         self._channel: VoiceChannelKey | None = None
         self._playback: OopzMusicPlayback | FfmpegMusicPlayback | None = None
@@ -178,8 +164,6 @@ class OopzMusicVoiceGateway:
                     )
                 else:
                     self._playback = None
-            if not await self._close_bus_locked("releasing voice participant"):
-                return False
             released = await lease.release()
             if lease.released:
                 self._clear_lease_locked()
@@ -199,8 +183,6 @@ class OopzMusicVoiceGateway:
                     )
                 else:
                     self._playback = None
-            if not await self._close_bus_locked("closing music gateway"):
-                return
             if lease is not None:
                 try:
                     await lease.release()
@@ -227,30 +209,10 @@ class OopzMusicVoiceGateway:
     async def _ensure_bus_locked(self) -> SharedAudioMixerBus:
         if self._bus is not None and not self._bus.closed:
             return self._bus
-        master = await self._master_factory.open()
-        self._bus = SharedAudioMixerBus(
-            master,
-            max_buffer_frames=(
-                master_buffer_frames(self._master_factory.max_buffer_ms) + AUDIO_BLOCK_FRAMES
-            ),
-        )
+        if self._lease is None or self._lease.released:
+            raise RuntimeError("Music PCM output requires an active voice participant")
+        self._bus = await self._lease.audio_bus()
         return self._bus
-
-    async def _close_bus_locked(self, operation: str) -> bool:
-        if self._bus is None or self._bus.closed:
-            return True
-        try:
-            await self._bus.aclose()
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            logger.warning(
-                "Could not close music master while %s: error=%s",
-                operation,
-                exception_kind(exc),
-            )
-            return False
-        return True
 
     @staticmethod
     def _channel_ref(channel: VoiceChannelKey) -> str:

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
-from cywl_oopz.features.audio.models import AUDIO_BLOCK_FRAMES
+from cywl_oopz.features.audio.models import AUDIO_BLOCK_FRAMES, VoiceParticipantKind
 from cywl_oopz.features.audio.session import SharedAudioMixerBus
 from cywl_oopz.features.voice.audio import PROVIDER_OUTPUT_FORMAT
 from cywl_oopz.features.voice.models import PcmChunk
@@ -77,3 +79,39 @@ async def test_voice_source_close_is_idempotent_and_blocks_further_output() -> N
     assert master.closed is True
     with pytest.raises(RuntimeError, match="closed"):
         await source.write(chunk(20))
+
+
+@pytest.mark.asyncio
+async def test_empty_voice_flush_advances_generation_without_flushing_master() -> None:
+    source, master = source_fixture()
+
+    cursor = await source.flush()
+
+    assert cursor.generation == 0
+    assert cursor.accepted_samples == cursor.rendered_samples == 0
+    assert master.flush_count == 0
+    assert (await source.current_cursor()).generation == 1
+    await source.aclose()
+
+
+@pytest.mark.asyncio
+async def test_voice_drain_uses_source_barrier_while_music_participant_is_active() -> None:
+    master = FakeMasterPcmOutput(max_buffer_frames=AUDIO_BLOCK_FRAMES * 20)
+    bus = SharedAudioMixerBus(master, max_buffer_frames=AUDIO_BLOCK_FRAMES * 21)
+    bus.update_participants(
+        frozenset({VoiceParticipantKind.MUSIC, VoiceParticipantKind.CONVERSATION})
+    )
+    source = VoicePcmSourceOutput(bus)
+    await source.write(chunk(40))
+    draining = asyncio.create_task(source.drain())
+    for _ in range(100):
+        if master.cursor.accepted_frames >= AUDIO_BLOCK_FRAMES * 2:
+            break
+        await asyncio.sleep(0.001)
+
+    await master.advance_rendered(master.cursor.accepted_frames)
+    cursor = await draining
+
+    assert cursor.accepted_samples == cursor.rendered_samples == 960
+    assert master.drain_count == 0
+    await source.aclose()

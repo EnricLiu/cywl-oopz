@@ -31,8 +31,9 @@ class _VoiceSourceSegment:
 class VoicePcmSourceOutput:
     """Expose the legacy voice media cursor contract over a canonical VOICE source."""
 
-    def __init__(self, bus: SharedAudioMixerBus) -> None:
+    def __init__(self, bus: SharedAudioMixerBus, *, owns_bus: bool = True) -> None:
         self._bus = bus
+        self._owns_bus = owns_bus
         self._source_id = uuid4()
         self._source_generation = 0
         self._provider_generation = 0
@@ -64,8 +65,12 @@ class VoicePcmSourceOutput:
         async with self._operation_lock:
             self._require_open()
             discard = frozenset(segment.key for segment in self._segments)
-            plan = await self._bus.flush_voice(discard)
-            old_cursor = self._cursor_from(plan.source_cursors)
+            if any(segment.canonical_frames for segment in self._segments):
+                plan = await self._bus.flush_voice(discard)
+                old_cursor = self._cursor_from(plan.source_cursors)
+            else:
+                await self._bus.set_voice_playout(False)
+                old_cursor = self._cursor_from({})
             self._provider_generation += 1
             self._accepted_native_frames = 0
             self._segments.clear()
@@ -77,14 +82,21 @@ class VoicePcmSourceOutput:
         async with self._operation_lock:
             self._require_open()
             if self._active_segment is not None:
+                segment = self._active_segment
                 blocks = self._converter.flush(generation=self._source_generation)
-                self._active_segment.canonical_frames = self._converter.generation_output_frames
-                self._active_segment.closed = True
+                segment.canonical_frames = self._converter.generation_output_frames
+                segment.closed = True
                 await self._bus.write_voice(blocks)
                 self._active_segment = None
                 self._reset_converter()
-            cursors = await self._bus.drain()
+            else:
+                segment = self._segments[-1] if self._segments else None
+            cursors = await self._bus.drain(segment.key if segment is not None else None)
+            await self._bus.set_voice_playout(False)
             return self._cursor_from(cursors)
+
+    async def set_user_speaking(self, speaking: bool) -> None:
+        await self._bus.set_user_speaking(speaking)
 
     async def current_cursor(self) -> PlaybackCursor:
         async with self._operation_lock:
@@ -95,7 +107,13 @@ class VoicePcmSourceOutput:
         async with self._close_lock:
             if self._closed:
                 return
-            await self._bus.aclose()
+            await self._bus.set_user_speaking(False)
+            await self._bus.set_voice_playout(False)
+            if self._owns_bus:
+                await self._bus.aclose()
+            elif self._segments and not self._bus.failed and not self._bus.closed:
+                discard = frozenset(segment.key for segment in self._segments)
+                await self._bus.flush_voice(discard)
             self._closed = True
 
     def _ensure_active_segment(self) -> _VoiceSourceSegment:

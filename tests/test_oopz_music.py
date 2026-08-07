@@ -209,15 +209,14 @@ async def test_oopz_music_gateway_reuses_one_lease_and_typed_playback() -> None:
 @pytest.mark.asyncio
 async def test_oopz_music_gateway_reuses_one_pcm_master_across_tracks() -> None:
     bot = FakeBot()
-    sessions = OopzVoiceChannelSessionManager(bot)
     decoders = FakeDecoderFactory()
     masters = FakeMasterFactory()
+    sessions = OopzVoiceChannelSessionManager(bot, master_factory=masters)
     gateway = OopzMusicVoiceGateway(
         bot,
         sessions,
         pcm_settings(),
         decoder_factory=decoders,
-        master_factory=masters,
     )
     channel = VoiceChannelKey("area", "voice")
 
