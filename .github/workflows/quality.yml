@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:17-alpine
+        image: postgres:18-alpine
         env:
           POSTGRES_USER: cywl
           POSTGRES_PASSWORD: test-password
@@ -26,6 +26,7 @@ jobs:
       DATABASE_URL: postgresql+asyncpg://cywl:test-password@127.0.0.1:5432/cywl_test
     steps:
       - uses: actions/checkout@v4
+      - run: git submodule update --init --recursive
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.13"
