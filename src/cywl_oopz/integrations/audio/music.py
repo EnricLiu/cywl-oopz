@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import AsyncIterator
 from contextlib import suppress
 from uuid import uuid4
 
@@ -159,8 +160,20 @@ class FfmpegMusicPlayback:
     async def aclose(self) -> None:
         await self.stop()
 
+    def _start_log_decoder_stderr(self) -> None:
+        if (aiter := self._decoder.status_logs()) is not None:
+
+            async def _log_decoder_stderr(logs: AsyncIterator[str]) -> None:
+                async for line in logs:
+                    logger.debug("Music ffmpeg stderr: %s", line)
+                logger.debug("Music ffmpeg stderr closed")
+
+            logger.debug("Starting music decoder stderr log task")
+            asyncio.create_task(_log_decoder_stderr(aiter), name="music-decoder-logs")
+
     async def _run(self) -> None:
         try:
+            self._start_log_decoder_stderr()
             async for block in self._decoder:
                 await self._resume.wait()
                 if self._stop_requested:

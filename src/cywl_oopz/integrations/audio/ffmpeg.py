@@ -161,7 +161,8 @@ class FfmpegMusicDecoder:
         self._settings = settings
         self._stdout = process.stdout
         self._stderr = process.stderr
-        self._stderr_tail = bytearray()
+        self._stderr_queue = asyncio.Queue[bytes]()
+        self._stderr_queue_subscribed = False
         self._stderr_task = asyncio.create_task(
             self._drain_stderr(),
             name=f"ffmpeg-stderr:{self._source_ref}",
@@ -224,6 +225,7 @@ class FfmpegMusicDecoder:
             "-hide_banner",
             "-loglevel",
             "warning",
+            "-stats",
         ]
         if urlparse(stream_url).scheme.casefold() in {"http", "https"}:
             command.extend(
@@ -411,13 +413,40 @@ class FfmpegMusicDecoder:
 
     async def _drain_stderr(self) -> None:
         while True:
-            chunk = await self._stderr.read(4096)
-            if not chunk:
+            line = await self._stderr.readline()
+            if not line:
+                await self._stderr_queue.put(b"")
                 return
             self._stats = replace(
                 self._stats,
-                stderr_bytes=self._stats.stderr_bytes + len(chunk),
+                stderr_bytes=self._stats.stderr_bytes + len(line),
             )
-            self._stderr_tail.extend(chunk)
-            if len(self._stderr_tail) > _STDERR_TAIL_BYTES:
-                del self._stderr_tail[: len(self._stderr_tail) - _STDERR_TAIL_BYTES]
+
+            if self._stderr_queue.full():
+                try:
+                    self._stderr_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+            try:
+                self._stderr_queue.put_nowait(line)
+            except asyncio.QueueFull:
+                pass
+
+    async def _stderr_lines(self) -> AsyncIterator[str]:
+        """Asynchronously yield lines from FFmpeg stderr, without blocking the decoder."""
+
+        while True:
+            line_bytes = await self._stderr_queue.get()
+            if not line_bytes:
+                return
+            yield line_bytes.decode(errors="replace").rstrip("\r\n")
+
+    def status_logs(self) -> AsyncIterator[str] | None:
+        if self._stderr_queue_subscribed:
+            logger.warning(
+                "FFmpeg decoder stderr logs already subscribed: source=%s", self._source_ref
+            )
+            return None
+        self._stderr_queue_subscribed = True
+        
+        return self._stderr_lines()
