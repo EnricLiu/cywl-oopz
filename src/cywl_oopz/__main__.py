@@ -4,6 +4,8 @@ import asyncio
 import logging
 import os
 
+import dotenv
+
 from .application import BotApplication
 from .core.errors import ConfigurationError
 from .settings import AppSettings
@@ -13,6 +15,8 @@ logger = logging.getLogger(__name__)
 
 def main() -> None:
     """Load configuration and run the bot until it disconnects."""
+    dotenv.load_dotenv()
+
     logging.basicConfig(
         level=os.getenv("CYWL_LOG_LEVEL", "INFO").upper(),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
