@@ -121,6 +121,9 @@ class FakeDecoder:
     def __aiter__(self):
         return self
 
+    def status_logs(self) -> None:
+        return None
+
     async def __anext__(self) -> DecodedAudioBlock:
         if self._delivered:
             raise StopAsyncIteration
