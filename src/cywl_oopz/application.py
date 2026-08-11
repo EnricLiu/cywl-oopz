@@ -75,6 +75,7 @@ from .features.agent.tools.builtin import (
 )
 from .features.agent.tools.executor import ToolExecutor
 from .features.agent.tools.music import (
+    ClearMusicQueueTool,
     EnqueueMusicTool,
     GetMusicQueueTool,
     PauseMusicTool,
@@ -85,13 +86,16 @@ from .features.agent.tools.music import (
 )
 from .features.agent.tools.playlists import (
     AddMusicPlaylistTrackTool,
+    ClearMusicPlaylistTool,
     CreateMusicPlaylistTool,
+    DeleteMusicPlaylistTool,
     GetMusicPlaylistTool,
     ImportNeteasePlaylistTool,
     ListMusicPlaylistsTool,
     LoadMusicPlaylistTool,
     PreviewNeteasePlaylistTool,
     RemoveMusicPlaylistTrackTool,
+    RenameMusicPlaylistTool,
 )
 from .features.agent.tools.policy import ToolAvailabilityService, ToolPolicy
 from .features.agent.tools.registry import ToolRegistry
@@ -297,6 +301,7 @@ class BotApplication:
                     SkipMusicTool(self.music, **music_tool_options),
                     PauseMusicTool(self.music, **music_tool_options),
                     ResumeMusicTool(self.music, **music_tool_options),
+                    ClearMusicQueueTool(self.music, **music_tool_options),
                     SetMusicPlaybackModeTool(self.music, **music_tool_options),
                     CreateMusicPlaylistTool(self.music_playlists, **music_tool_options),
                     ListMusicPlaylistsTool(self.music_playlists, **music_tool_options),
@@ -306,6 +311,9 @@ class BotApplication:
                         self.music_playlists,
                         **music_tool_options,
                     ),
+                    RenameMusicPlaylistTool(self.music_playlists, **music_tool_options),
+                    DeleteMusicPlaylistTool(self.music_playlists, **music_tool_options),
+                    ClearMusicPlaylistTool(self.music_playlists, **music_tool_options),
                     LoadMusicPlaylistTool(self.music_playlists, **music_tool_options),
                     PreviewNeteasePlaylistTool(
                         self.music_playlists,

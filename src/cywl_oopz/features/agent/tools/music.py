@@ -320,6 +320,62 @@ class MusicControlOutput(BaseModel):
     applied: bool
 
 
+class MusicQueueClearOutput(BaseModel):
+    """Committed transient queue clear result."""
+
+    voice_channel_id: str
+    stopped_current: bool
+    removed_count: int
+
+
+class ClearMusicQueueTool(_MusicTool):
+    """Stop playback and clear the transient queue without touching shared playlists."""
+
+    def __init__(
+        self,
+        music: MusicRequestService,
+        *,
+        timeout_seconds: float,
+        max_output_characters: int,
+    ) -> None:
+        self._music = music
+        self._descriptor = ToolDescriptor(
+            name="clear_music_queue",
+            display_name="清空播放队列",
+            description=(
+                "停止用户当前语音频道正在播放的歌曲并清空临时播放队列；"
+                "不会修改 PostgreSQL 共享歌单。"
+            ),
+            input_model=EmptyToolInput,
+            output_model=MusicQueueClearOutput,
+            effect=ToolEffect.WRITE,
+            timeout_seconds=timeout_seconds,
+            max_output_characters=max_output_characters,
+            concurrency_safe=False,
+            idempotent=True,
+        )
+
+    @property
+    def descriptor(self) -> ToolDescriptor:
+        return self._descriptor
+
+    async def execute(
+        self,
+        context: ToolExecutionContext,
+        arguments: BaseModel,
+    ) -> BaseModel:
+        del arguments
+        try:
+            result = await self._music.clear(context.identity)
+        except MusicError as exc:
+            self._raise_tool_error(exc)
+        return MusicQueueClearOutput(
+            voice_channel_id=result.voice_channel.channel_id,
+            stopped_current=result.stopped_current,
+            removed_count=result.removed_count,
+        )
+
+
 class MusicPlaybackModeInput(BaseModel):
     """A partial playback policy update; omitted dimensions stay unchanged."""
 

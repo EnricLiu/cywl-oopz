@@ -220,6 +220,32 @@ def test_browser_and_music_results_have_compact_human_summaries() -> None:
         },
         succeeded=True,
     )
+    renamed = catalog.result(
+        "rename_music_playlist",
+        {
+            "ok": True,
+            "data": {"old_name": "夜间电台", "new_name": "深夜电台", "changed": True},
+        },
+        succeeded=True,
+    )
+    cleared_playlist = catalog.result(
+        "clear_music_playlist",
+        {"ok": True, "data": {"name": "深夜电台", "removed_track_count": 23}},
+        succeeded=True,
+    )
+    deleted_playlist = catalog.result(
+        "delete_music_playlist",
+        {
+            "ok": True,
+            "data": {"name": "深夜电台", "deleted": True, "removed_track_count": 0},
+        },
+        succeeded=True,
+    )
+    cleared_queue = catalog.result(
+        "clear_music_queue",
+        {"ok": True, "data": {"stopped_current": True, "removed_count": 8}},
+        succeeded=True,
+    )
 
     assert page.summary == "Example Domain"
     assert music.summary == "歌曲「Tell Your World」 · 队列第 2 位"
@@ -230,6 +256,10 @@ def test_browser_and_music_results_have_compact_human_summaries() -> None:
     assert loaded_playlist.summary == "歌单「夜间电台」· 已载入 3 首"
     assert preview_import.summary == ("歌单「Miku Favorites」· 可导入 50/80 首 · 需要确认部分导入")
     assert imported.summary == "歌单「Miku Favorites」· 已导入 50 首 · 跳过 30 首"
+    assert renamed.summary == "「夜间电台」→「深夜电台」"
+    assert cleared_playlist.summary == "歌单「深夜电台」· 已移除 23 首"
+    assert deleted_playlist.summary == "歌单「深夜电台」已删除"
+    assert cleared_queue.summary == "已停止播放 · 已移除 8 首"
     assert "voice_channel_id" not in repr(loaded_playlist)
     assert "snapshot" not in repr(page)
     assert "source_id" not in repr(music)

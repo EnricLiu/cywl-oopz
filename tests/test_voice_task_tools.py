@@ -275,6 +275,9 @@ async def test_mutation_profile_is_server_owned_area_serial_and_excludes_media_c
     assert {
         "create_music_playlist",
         "add_music_playlist_track",
+        "rename_music_playlist",
+        "delete_music_playlist",
+        "clear_music_playlist",
         "create_agent_skill",
         "update_agent_skill",
     }.issubset(created.allowed_tool_names)
@@ -282,6 +285,7 @@ async def test_mutation_profile_is_server_owned_area_serial_and_excludes_media_c
         "enqueue_music",
         "load_music_playlist",
         "set_music_playback_mode",
+        "clear_music_queue",
         "delegate_agent_task",
     }.isdisjoint(created.allowed_tool_names)
     runner.release.set()

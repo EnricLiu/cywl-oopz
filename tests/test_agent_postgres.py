@@ -172,6 +172,10 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
             "invite_agent_skill_share",
             "respond_agent_skill_share",
             "revoke_agent_skill_share",
+            "clear_music_queue",
+            "rename_music_playlist",
+            "delete_music_playlist",
+            "clear_music_playlist",
         ]
 
         async with test_engine.begin() as connection:
@@ -207,6 +211,7 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
             "skip_music",
             "pause_music",
             "resume_music",
+            "clear_music_queue",
             "search_web",
             "read_web_page",
             "set_music_playback_mode",
@@ -215,6 +220,9 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
             "get_music_playlist",
             "add_music_playlist_track",
             "remove_music_playlist_track",
+            "rename_music_playlist",
+            "delete_music_playlist",
+            "clear_music_playlist",
             "load_music_playlist",
             "load_agent_skill",
             "read_agent_skill_resource",
@@ -350,7 +358,7 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
         assert import_bundle is not None
         assert authoring_bundle is not None
         assert web_bundle is not None
-        assert music_skill.version == "1.0.0"
+        assert music_skill.version == "1.1.0"
         assert music_skill.required_tools == frozenset(
             {
                 "search_music_catalog",
@@ -359,6 +367,10 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
                 "list_music_playlists",
                 "get_music_playlist",
                 "add_music_playlist_track",
+                "rename_music_playlist",
+                "delete_music_playlist",
+                "clear_music_playlist",
+                "clear_music_queue",
                 "load_music_playlist",
             }
         )

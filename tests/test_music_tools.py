@@ -9,6 +9,7 @@ from pydantic import ValidationError
 from cywl_oopz.features.agent.models import AgentIdentity, AgentRunLimits
 from cywl_oopz.features.agent.tools.models import ToolExecutionContext, ToolExecutionError
 from cywl_oopz.features.agent.tools.music import (
+    ClearMusicQueueTool,
     EnqueueMusicInput,
     EnqueueMusicTool,
     GetMusicQueueTool,
@@ -22,6 +23,7 @@ from cywl_oopz.features.music.errors import MusicVoiceBusyError, MusicVoiceChann
 from cywl_oopz.features.music.models import (
     EnqueueResult,
     MusicPlaybackPolicy,
+    MusicQueueClearResult,
     MusicQueueSnapshot,
     MusicTrack,
     PlaybackOrder,
@@ -84,6 +86,10 @@ class StubMusic:
             True,
         )
 
+    async def clear(self, identity: AgentIdentity) -> MusicQueueClearResult:
+        assert identity.person_id == "person"
+        return MusicQueueClearResult(VoiceChannelKey("area", "voice"), True, 3)
+
 
 def context() -> ToolExecutionContext:
     identity = AgentIdentity(
@@ -99,6 +105,7 @@ def context() -> ToolExecutionContext:
             "enqueue_music",
             "get_music_queue",
             "set_music_playback_mode",
+            "clear_music_queue",
         ),
     )
 
@@ -111,6 +118,7 @@ async def test_music_tools_expose_bounded_metadata_and_trusted_voice_target() ->
     enqueue = EnqueueMusicTool(music, **options)
     queue = GetMusicQueueTool(music, **options)
     mode = SetMusicPlaybackModeTool(music, **options)
+    clear = ClearMusicQueueTool(music, **options)
 
     search_output = await search.execute(
         context(),
@@ -128,6 +136,7 @@ async def test_music_tools_expose_bounded_metadata_and_trusted_voice_target() ->
             repeat=RepeatPolicy.ALL,
         ),
     )
+    clear_output = await clear.execute(context(), clear.descriptor.input_model())
 
     assert search_output.model_dump()["tracks"][0]["source_id"] == "42"
     assert enqueue_output.model_dump()["voice_channel_id"] == "voice"
@@ -138,6 +147,11 @@ async def test_music_tools_expose_bounded_metadata_and_trusted_voice_target() ->
         "order": PlaybackOrder.SHUFFLE,
         "repeat": RepeatPolicy.ALL,
         "changed": True,
+    }
+    assert clear_output.model_dump() == {
+        "voice_channel_id": "voice",
+        "stopped_current": True,
+        "removed_count": 3,
     }
 
 

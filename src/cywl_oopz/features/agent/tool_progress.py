@@ -251,11 +251,12 @@ class MusicProgressProjector(_ProjectionSupport):
                 }
                 reason = failure_names.get(str(failure_code), "播放发生错误")
                 return ToolProgressPresentation(summary=f"播放已中断 · 保留 {count} 首 · {reason}")
-            summary = (
-                f"正在播放 · 后续 {count} 首 · {policy}"
-                if current
-                else f"当前未播放 · 后续 {count} 首 · {policy}"
-            )
+            if current:
+                summary = f"正在播放 · 后续 {count} 首 · {policy}"
+            elif count:
+                summary = f"当前未播放 · 后续 {count} 首 · {policy}"
+            else:
+                summary = "当前未播放 · 队列为空"
             return ToolProgressPresentation(summary=summary)
         if tool_name == "set_music_playback_mode":
             order = "随机" if values.get("order") == "shuffle" else "顺序"
@@ -295,6 +296,33 @@ class MusicProgressProjector(_ProjectionSupport):
             return ToolProgressPresentation(
                 summary=("歌曲已移出歌单" if values.get("removed") else "歌单中没有该条目")
             )
+        if tool_name == "rename_music_playlist":
+            old_name = self.scalar(values.get("old_name"))
+            new_name = self.scalar(values.get("new_name"))
+            summary = (
+                f"「{old_name}」→「{new_name}」"
+                if values.get("changed")
+                else f"已经叫「{new_name}」"
+            )
+            return ToolProgressPresentation(summary=summary)
+        if tool_name == "delete_music_playlist":
+            name = self.scalar(values.get("name"))
+            if not values.get("deleted"):
+                return ToolProgressPresentation(summary="共享歌单已不存在")
+            count = values.get("removed_track_count")
+            count = count if isinstance(count, int) else 0
+            suffix = f" · 同时移除 {count} 首" if count else ""
+            return ToolProgressPresentation(summary=f"歌单「{name}」已删除{suffix}")
+        if tool_name == "clear_music_playlist":
+            name = self.scalar(values.get("name"))
+            count = values.get("removed_track_count")
+            count = count if isinstance(count, int) else 0
+            return ToolProgressPresentation(summary=f"歌单「{name}」· 已移除 {count} 首")
+        if tool_name == "clear_music_queue":
+            count = values.get("removed_count")
+            count = count if isinstance(count, int) else 0
+            stopped = "已停止播放 · " if values.get("stopped_current") else ""
+            return ToolProgressPresentation(summary=f"{stopped}已移除 {count} 首")
         if tool_name == "load_music_playlist":
             name = self.scalar(values.get("playlist_name"))
             count = values.get("loaded_count")

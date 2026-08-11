@@ -69,6 +69,7 @@ DEFAULT_AGENT_TOOLS = text(
     '"skip_music",'
     '"pause_music",'
     '"resume_music",'
+    '"clear_music_queue",'
     '"search_web",'
     '"read_web_page",'
     '"set_music_playback_mode",'
@@ -77,6 +78,9 @@ DEFAULT_AGENT_TOOLS = text(
     '"get_music_playlist",'
     '"add_music_playlist_track",'
     '"remove_music_playlist_track",'
+    '"rename_music_playlist",'
+    '"delete_music_playlist",'
+    '"clear_music_playlist",'
     '"load_music_playlist",'
     '"load_agent_skill",'
     '"read_agent_skill_resource",'
@@ -245,6 +249,7 @@ class ChannelSettingsRecord(Base):
             "skip_music",
             "pause_music",
             "resume_music",
+            "clear_music_queue",
             "search_web",
             "read_web_page",
             "set_music_playback_mode",
@@ -253,6 +258,9 @@ class ChannelSettingsRecord(Base):
             "get_music_playlist",
             "add_music_playlist_track",
             "remove_music_playlist_track",
+            "rename_music_playlist",
+            "delete_music_playlist",
+            "clear_music_playlist",
             "load_music_playlist",
             "load_agent_skill",
             "read_agent_skill_resource",

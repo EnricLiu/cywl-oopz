@@ -411,6 +411,185 @@ class RemoveMusicPlaylistTrackTool(_PlaylistTool):
         )
 
 
+class RenameMusicPlaylistInput(PlaylistIdInput):
+    """Area playlist target and normalized display name."""
+
+    name: str = Field(min_length=1, max_length=80, description="新的共享歌单名称")
+
+
+class RenameMusicPlaylistOutput(BaseModel):
+    """Idempotent shared playlist rename result."""
+
+    playlist_id: UUID
+    old_name: str
+    new_name: str
+    changed: bool
+
+
+class RenameMusicPlaylistTool(_PlaylistTool):
+    """Rename one shared playlist without changing its entries."""
+
+    def __init__(
+        self,
+        playlists: MusicPlaylistService,
+        *,
+        timeout_seconds: float,
+        max_output_characters: int,
+    ) -> None:
+        self._playlists = playlists
+        self._descriptor = ToolDescriptor(
+            name="rename_music_playlist",
+            display_name="重命名共享歌单",
+            description="重命名当前 OOPZ area 的共享歌单，不改变其中歌曲。",
+            input_model=RenameMusicPlaylistInput,
+            output_model=RenameMusicPlaylistOutput,
+            effect=ToolEffect.WRITE,
+            timeout_seconds=timeout_seconds,
+            max_output_characters=max_output_characters,
+            concurrency_safe=False,
+            idempotent=True,
+        )
+
+    @property
+    def descriptor(self) -> ToolDescriptor:
+        return self._descriptor
+
+    async def execute(
+        self,
+        context: ToolExecutionContext,
+        arguments: BaseModel,
+    ) -> BaseModel:
+        values = RenameMusicPlaylistInput.model_validate(arguments)
+        try:
+            result = await self._playlists.rename(
+                context.identity,
+                values.playlist_id,
+                values.name,
+            )
+        except (MusicError, DatabaseError) as exc:
+            self._raise_tool_error(exc)
+        return RenameMusicPlaylistOutput(
+            playlist_id=result.playlist_id,
+            old_name=result.old_name,
+            new_name=result.new_name,
+            changed=result.changed,
+        )
+
+
+class DeleteMusicPlaylistOutput(BaseModel):
+    """Idempotent shared playlist deletion result."""
+
+    playlist_id: UUID
+    name: str | None
+    deleted: bool
+    removed_track_count: int
+
+
+class DeleteMusicPlaylistTool(_PlaylistTool):
+    """Delete a shared playlist and all of its persisted entries."""
+
+    def __init__(
+        self,
+        playlists: MusicPlaylistService,
+        *,
+        timeout_seconds: float,
+        max_output_characters: int,
+    ) -> None:
+        self._playlists = playlists
+        self._descriptor = ToolDescriptor(
+            name="delete_music_playlist",
+            display_name="删除共享歌单",
+            description=(
+                "删除当前 OOPZ area 的共享歌单及其数据库条目；"
+                "不会改变已经从该歌单载入的临时播放队列。"
+            ),
+            input_model=PlaylistIdInput,
+            output_model=DeleteMusicPlaylistOutput,
+            effect=ToolEffect.WRITE,
+            timeout_seconds=timeout_seconds,
+            max_output_characters=max_output_characters,
+            concurrency_safe=False,
+            idempotent=True,
+        )
+
+    @property
+    def descriptor(self) -> ToolDescriptor:
+        return self._descriptor
+
+    async def execute(
+        self,
+        context: ToolExecutionContext,
+        arguments: BaseModel,
+    ) -> BaseModel:
+        values = PlaylistIdInput.model_validate(arguments)
+        try:
+            result = await self._playlists.delete(context.identity, values.playlist_id)
+        except (MusicError, DatabaseError) as exc:
+            self._raise_tool_error(exc)
+        return DeleteMusicPlaylistOutput(
+            playlist_id=result.playlist_id,
+            name=result.name,
+            deleted=result.deleted,
+            removed_track_count=result.removed_track_count,
+        )
+
+
+class ClearMusicPlaylistOutput(BaseModel):
+    """Shared playlist entry clear result that preserves the playlist."""
+
+    playlist_id: UUID
+    name: str
+    removed_track_count: int
+
+
+class ClearMusicPlaylistTool(_PlaylistTool):
+    """Clear persisted entries while preserving the area playlist."""
+
+    def __init__(
+        self,
+        playlists: MusicPlaylistService,
+        *,
+        timeout_seconds: float,
+        max_output_characters: int,
+    ) -> None:
+        self._playlists = playlists
+        self._descriptor = ToolDescriptor(
+            name="clear_music_playlist",
+            display_name="清空共享歌单",
+            description=(
+                "清空当前 OOPZ area 共享歌单的 PostgreSQL 歌曲条目，但保留歌单本身；"
+                "不会清空临时播放队列。"
+            ),
+            input_model=PlaylistIdInput,
+            output_model=ClearMusicPlaylistOutput,
+            effect=ToolEffect.WRITE,
+            timeout_seconds=timeout_seconds,
+            max_output_characters=max_output_characters,
+            concurrency_safe=False,
+            idempotent=True,
+        )
+
+    @property
+    def descriptor(self) -> ToolDescriptor:
+        return self._descriptor
+
+    async def execute(
+        self,
+        context: ToolExecutionContext,
+        arguments: BaseModel,
+    ) -> BaseModel:
+        values = PlaylistIdInput.model_validate(arguments)
+        try:
+            result = await self._playlists.clear(context.identity, values.playlist_id)
+        except (MusicError, DatabaseError) as exc:
+            self._raise_tool_error(exc)
+        return ClearMusicPlaylistOutput(
+            playlist_id=result.playlist_id,
+            name=result.name,
+            removed_track_count=result.removed_track_count,
+        )
+
+
 class NeteasePlaylistReferenceInput(BaseModel):
     """A numeric Netease playlist ID or canonical music.163.com URL."""
 

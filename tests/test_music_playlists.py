@@ -12,8 +12,10 @@ from cywl_oopz.features.agent.tools.models import ToolExecutionContext, ToolExec
 from cywl_oopz.features.agent.tools.playlists import (
     AddMusicPlaylistTrackInput,
     AddMusicPlaylistTrackTool,
+    ClearMusicPlaylistTool,
     CreateMusicPlaylistInput,
     CreateMusicPlaylistTool,
+    DeleteMusicPlaylistTool,
     GetMusicPlaylistTool,
     ImportNeteasePlaylistInput,
     ImportNeteasePlaylistTool,
@@ -24,6 +26,8 @@ from cywl_oopz.features.agent.tools.playlists import (
     PreviewNeteasePlaylistTool,
     RemoveMusicPlaylistTrackInput,
     RemoveMusicPlaylistTrackTool,
+    RenameMusicPlaylistInput,
+    RenameMusicPlaylistTool,
 )
 from cywl_oopz.features.chat.models import ConversationKey
 from cywl_oopz.features.music.errors import (
@@ -418,6 +422,9 @@ def tool_context() -> ToolExecutionContext:
             "get_music_playlist",
             "add_music_playlist_track",
             "remove_music_playlist_track",
+            "rename_music_playlist",
+            "delete_music_playlist",
+            "clear_music_playlist",
             "load_music_playlist",
             "preview_netease_playlist",
             "import_netease_playlist",
@@ -434,6 +441,9 @@ async def test_playlist_agent_tools_cover_the_shared_playlist_lifecycle() -> Non
     get = GetMusicPlaylistTool(playlists, **options)
     add = AddMusicPlaylistTrackTool(playlists, **options)
     remove = RemoveMusicPlaylistTrackTool(playlists, **options)
+    rename = RenameMusicPlaylistTool(playlists, **options)
+    clear = ClearMusicPlaylistTool(playlists, **options)
+    delete = DeleteMusicPlaylistTool(playlists, **options)
     load = LoadMusicPlaylistTool(playlists, **options)
     context = tool_context()
 
@@ -453,6 +463,17 @@ async def test_playlist_agent_tools_cover_the_shared_playlist_lifecycle() -> Non
             entry_id=added.entry.id,
         ),
     )
+    renamed = await rename.execute(
+        context,
+        RenameMusicPlaylistInput(playlist_id=playlist_id, name="Miku Favorites"),
+    )
+    await add.execute(
+        context,
+        AddMusicPlaylistTrackInput(playlist_id=playlist_id, query="World is Mine"),
+    )
+    cleared = await clear.execute(context, PlaylistIdInput(playlist_id=playlist_id))
+    deleted = await delete.execute(context, PlaylistIdInput(playlist_id=playlist_id))
+    deleted_again = await delete.execute(context, PlaylistIdInput(playlist_id=playlist_id))
 
     assert listed.playlists[0].track_count == 1
     assert detailed.entries[0].track.title == "Melt"
@@ -460,6 +481,12 @@ async def test_playlist_agent_tools_cover_the_shared_playlist_lifecycle() -> Non
     assert loaded.replaced_current is True
     assert [track.title for track in music.replaced] == ["Melt"]
     assert removed.removed is True
+    assert renamed.new_name == "Miku Favorites"
+    assert renamed.changed is True
+    assert cleared.removed_track_count == 1
+    assert deleted.name == "Miku Favorites"
+    assert deleted.deleted is True
+    assert deleted_again.deleted is False
 
 
 @pytest.mark.asyncio
