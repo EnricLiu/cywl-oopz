@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Never
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -17,6 +18,7 @@ from cywl_oopz.features.music.errors import (
     MusicVoiceChannelRequiredError,
 )
 from cywl_oopz.features.music.models import (
+    MusicFailure,
     MusicQueueSnapshot,
     MusicTrack,
     PlaybackMode,
@@ -214,6 +216,26 @@ class QueuedMusicOutput(BaseModel):
         )
 
 
+class MusicFailureOutput(BaseModel):
+    """Stable recent failure without provider exception text or stream URLs."""
+
+    code: str
+    scope: str
+    recoverable: bool
+    retry_count: int
+    occurred_at: datetime
+
+    @classmethod
+    def from_failure(cls, failure: MusicFailure) -> MusicFailureOutput:
+        return cls(
+            code=failure.code.value,
+            scope=failure.scope.value,
+            recoverable=failure.recoverable,
+            retry_count=failure.retry_count,
+            occurred_at=failure.occurred_at,
+        )
+
+
 class MusicQueueOutput(BaseModel):
     """Bounded queue state visible to the model."""
 
@@ -223,6 +245,7 @@ class MusicQueueOutput(BaseModel):
     current: QueuedMusicOutput | None
     upcoming: tuple[QueuedMusicOutput, ...]
     revision: int
+    last_failure: MusicFailureOutput | None
 
     @classmethod
     def from_snapshot(cls, snapshot: MusicQueueSnapshot) -> MusicQueueOutput:
@@ -237,6 +260,11 @@ class MusicQueueOutput(BaseModel):
             ),
             upcoming=tuple(QueuedMusicOutput.from_item(item) for item in snapshot.upcoming),
             revision=snapshot.revision,
+            last_failure=(
+                MusicFailureOutput.from_failure(snapshot.last_failure)
+                if snapshot.last_failure is not None
+                else None
+            ),
         )
 
 

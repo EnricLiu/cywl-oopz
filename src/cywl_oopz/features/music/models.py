@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from uuid import UUID, uuid4
 
@@ -66,6 +66,8 @@ class PlaybackState(StrEnum):
     LOADING = "loading"
     PLAYING = "playing"
     PAUSED = "paused"
+    RECOVERING = "recovering"
+    RELEASING = "releasing"
     FAILED = "failed"
 
 
@@ -89,6 +91,36 @@ class MusicPlaybackEndReason(StrEnum):
     BACKEND_CLOSED = "backend_closed"
 
 
+class MusicFailureCode(StrEnum):
+    """Stable failure category safe to expose through queue snapshots."""
+
+    TRACK_ERROR = "track_error"
+    CATALOG_ERROR = "catalog_error"
+    VOICE_LEFT = "voice_left"
+    BACKEND_CLOSED = "backend_closed"
+    RELEASE_FAILED = "release_failed"
+
+
+class MusicFailureScope(StrEnum):
+    """Subsystem that must recover before playback can progress."""
+
+    TRACK = "track"
+    CATALOG = "catalog"
+    VOICE_SESSION = "voice_session"
+
+
+@dataclass(frozen=True, slots=True)
+class MusicFailure:
+    """Bounded historical failure independent from the current playback phase."""
+
+    code: MusicFailureCode
+    scope: MusicFailureScope
+    recoverable: bool
+    track_id: UUID | None
+    retry_count: int
+    occurred_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+
+
 @dataclass(frozen=True, slots=True)
 class MusicPlaybackResult:
     """One complete playback outcome returned by the voice gateway."""
@@ -108,6 +140,7 @@ class MusicQueueSnapshot:
     current: QueuedTrack | None
     upcoming: tuple[QueuedTrack, ...]
     revision: int
+    last_failure: MusicFailure | None = None
 
 
 @dataclass(frozen=True, slots=True)

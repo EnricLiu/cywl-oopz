@@ -242,6 +242,18 @@ class MusicProgressProjector(_ProjectionSupport):
                 "shuffle": "随机播放",
             }
             mode = mode_names.get(str(values.get("mode", "")), "顺序播放")
+            if values.get("state") == "failed":
+                failure = values.get("last_failure")
+                failure_code = failure.get("code") if isinstance(failure, Mapping) else ""
+                failure_names = {
+                    "voice_left": "语音连接已断开",
+                    "backend_closed": "音频后端已关闭",
+                    "catalog_error": "歌曲地址解析失败",
+                    "track_error": "歌曲播放失败",
+                    "release_failed": "暂时无法退出语音频道",
+                }
+                reason = failure_names.get(str(failure_code), "播放发生错误")
+                return ToolProgressPresentation(summary=f"播放已中断 · 保留 {count} 首 · {reason}")
             summary = (
                 f"正在播放 · 后续 {count} 首 · {mode}"
                 if current

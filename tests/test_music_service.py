@@ -15,6 +15,8 @@ from cywl_oopz.features.music.errors import (
     MusicVoiceChannelRequiredError,
 )
 from cywl_oopz.features.music.models import (
+    MusicFailureCode,
+    MusicFailureScope,
     MusicPlaybackEndReason,
     MusicPlaybackResult,
     MusicTrack,
@@ -85,6 +87,8 @@ class FakeVoice:
         self.release_entered = asyncio.Event()
         self.release_allowed = asyncio.Event()
         self.release_allowed.set()
+        self.release_calls = 0
+        self.release_failures = 0
 
     async def voice_channel_for_user(self, area_id: str, person_id: str) -> str | None:
         assert area_id == "area"
@@ -112,10 +116,14 @@ class FakeVoice:
         return self.current_playback
 
     async def release(self, channel: VoiceChannelKey) -> bool:
+        self.release_calls += 1
         if self.acquired != channel:
             return False
         self.release_entered.set()
         await self.release_allowed.wait()
+        if self.release_failures:
+            self.release_failures -= 1
+            raise RuntimeError("fixture release failure")
         self.left.append(channel)
         self.acquired = None
         return True
@@ -272,6 +280,55 @@ async def test_music_service_serializes_queue_controls_and_cleans_up() -> None:
 
 
 @pytest.mark.asyncio
+async def test_music_service_retries_transient_voice_release_failure() -> None:
+    voice = FakeVoice()
+    voice.release_failures = 2
+    service = MusicRequestService(settings(), FakeCatalog(), voice)
+
+    await service.enqueue(identity(), "release-retry")
+    await voice.play_started.wait()
+    voice.current_finished.set()
+    await eventually(lambda: voice.acquired is None, attempts=500)
+
+    snapshot = await service.queue(identity())
+    assert voice.release_calls == 3
+    assert snapshot.state is PlaybackState.IDLE
+    assert snapshot.last_failure is None
+    await service.aclose()
+
+
+@pytest.mark.asyncio
+async def test_music_service_keeps_ownership_when_voice_release_retries_are_exhausted() -> None:
+    voice = FakeVoice()
+    voice.release_failures = 3
+    service = MusicRequestService(settings(), FakeCatalog(), voice)
+    channel = VoiceChannelKey("area", "voice-a")
+
+    await service.enqueue(identity(), "release-broken")
+    await voice.play_started.wait()
+    voice.current_finished.set()
+    await eventually(lambda: service._session(channel).worker is None, attempts=500)
+
+    snapshot = await service.queue(identity())
+    assert voice.release_calls == 3
+    assert voice.acquired == channel
+    assert service._session(channel).voice_reserved is True
+    assert snapshot.state is PlaybackState.FAILED
+    assert snapshot.last_failure is not None
+    assert snapshot.last_failure.code is MusicFailureCode.RELEASE_FAILED
+    assert snapshot.last_failure.scope is MusicFailureScope.VOICE_SESSION
+    assert snapshot.last_failure.recoverable is True
+    assert snapshot.last_failure.track_id is None
+
+    await service.enqueue(identity(), "reuse-owned-voice")
+    await eventually(lambda: len(voice.played) == 2)
+    assert voice.acquire_calls == [channel]
+    voice.current_finished.set()
+    await eventually(lambda: voice.acquired is None)
+    await service.aclose()
+
+
+@pytest.mark.asyncio
 async def test_music_service_reresolves_current_track_once_after_backend_failure() -> None:
     catalog = FakeCatalog()
     voice = RecoveringVoice()
@@ -302,6 +359,11 @@ async def test_music_service_does_not_retry_backend_failure_more_than_once() -> 
     snapshot = await service.queue(identity())
     assert snapshot.state is PlaybackState.FAILED
     assert [item.track.title for item in snapshot.upcoming] == ["still-broken"]
+    assert snapshot.last_failure is not None
+    assert snapshot.last_failure.code is MusicFailureCode.BACKEND_CLOSED
+    assert snapshot.last_failure.scope is MusicFailureScope.VOICE_SESSION
+    assert snapshot.last_failure.recoverable is False
+    assert snapshot.last_failure.retry_count == 1
     await service.aclose()
 
 

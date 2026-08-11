@@ -146,6 +146,20 @@ def test_browser_and_music_results_have_compact_human_summaries() -> None:
         },
         succeeded=True,
     )
+    failed_queue = catalog.result(
+        "get_music_queue",
+        {
+            "ok": True,
+            "data": {
+                "state": "failed",
+                "current": None,
+                "upcoming": [{"track": {"title": "39"}}],
+                "mode": "sequential",
+                "last_failure": {"code": "voice_left"},
+            },
+        },
+        succeeded=True,
+    )
     mode = catalog.result(
         "set_music_playback_mode",
         {
@@ -208,6 +222,7 @@ def test_browser_and_music_results_have_compact_human_summaries() -> None:
     assert page.summary == "Example Domain"
     assert music.summary == "歌曲「Tell Your World」 · 队列第 2 位"
     assert queue.summary == "正在播放 · 后续 1 首 · 随机播放"
+    assert failed_queue.summary == "播放已中断 · 保留 1 首 · 语音连接已断开"
     assert mode.summary == "列表循环已设置"
     assert playlists.summary == "找到 2 个共享歌单"
     assert loaded_playlist.summary == "歌单「夜间电台」· 已载入 3 首"
