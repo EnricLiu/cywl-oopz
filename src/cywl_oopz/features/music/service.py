@@ -404,6 +404,7 @@ class MusicRequestService:
                 playback: MusicPlayback | None = None
                 completed = False
                 retry_current = False
+                halt_after_failure = False
                 try:
                     logger.info(
                         "Music track resolving: channel=%s",
@@ -430,26 +431,43 @@ class MusicRequestService:
                     )
                     result = await playback.wait_finished()
                     completed = result.end_reason is MusicPlaybackEndReason.FINISHED
-                    if (
-                        result.end_reason is MusicPlaybackEndReason.BACKEND_CLOSED
-                        and backend_retries.get(item.id, 0) < 1
-                        and not session.skip_requested.is_set()
+                    if result.end_reason in {
+                        MusicPlaybackEndReason.BACKEND_CLOSED,
+                        MusicPlaybackEndReason.VOICE_LEFT,
+                    } and (
+                        backend_retries.get(item.id, 0) < 1 and not session.skip_requested.is_set()
                     ):
                         backend_retries[item.id] = backend_retries.get(item.id, 0) + 1
-                        retry_current = True
+                        if result.end_reason is MusicPlaybackEndReason.VOICE_LEFT:
+                            retry_current = await self._reacquire_voice(channel, session)
+                            halt_after_failure = not retry_current
+                            message = "physical voice generation loss"
+                        else:
+                            retry_current = True
+                            message = "shared backend failure"
                         logger.warning(
-                            "Retrying music track after shared backend failure: "
-                            "channel=%s attempt=%s",
+                            "Retrying music track after %s: channel=%s attempt=%s fresh_voice=%s",
+                            message,
                             self._channel_ref(channel),
                             backend_retries[item.id],
+                            result.end_reason is MusicPlaybackEndReason.VOICE_LEFT,
                         )
                     elif not completed and result.end_reason not in {
                         MusicPlaybackEndReason.STOPPED,
                         MusicPlaybackEndReason.REPLACED,
                     }:
-                        raise MusicPlaybackError(
-                            f"Music playback ended with {result.end_reason.value}"
-                        ) from result.terminal_error
+                        if result.end_reason in {
+                            MusicPlaybackEndReason.BACKEND_CLOSED,
+                            MusicPlaybackEndReason.VOICE_LEFT,
+                        }:
+                            halt_after_failure = True
+                            async with session.lock:
+                                session.state = PlaybackState.FAILED
+                                session.revision += 1
+                        else:
+                            raise MusicPlaybackError(
+                                f"Music playback ended with {result.end_reason.value}"
+                            ) from result.terminal_error
                 except asyncio.CancelledError:
                     if playback is not None:
                         with suppress(Exception):
@@ -475,6 +493,7 @@ class MusicRequestService:
                         async with session.lock:
                             session.state = PlaybackState.FAILED
                             session.revision += 1
+                        halt_after_failure = True
                 except Exception as exc:
                     logger.error(
                         "Music playback failed: channel=%s error=%s",
@@ -489,7 +508,10 @@ class MusicRequestService:
                         session.revision += 1
                 finally:
                     async with session.lock:
-                        if not session.skip_requested.is_set() and completed:
+                        if halt_after_failure and not session.skip_requested.is_set():
+                            session.queue.appendleft(item)
+                            backend_retries.pop(item.id, None)
+                        elif not session.skip_requested.is_set() and completed:
                             self._retain_completed(session, item)
                             backend_retries.pop(item.id, None)
                         elif not session.skip_requested.is_set() and retry_current:
@@ -507,6 +529,8 @@ class MusicRequestService:
                         "Music playback state reset: channel=%s",
                         self._channel_ref(channel),
                     )
+                if halt_after_failure:
+                    return
         finally:
             if not drained_normally:
                 async with session.lock:
@@ -517,7 +541,7 @@ class MusicRequestService:
                     session.voice_reserved = False
                     if session.worker is asyncio.current_task():
                         session.worker = None
-                    if session.state is not PlaybackState.IDLE:
+                    if session.state not in {PlaybackState.IDLE, PlaybackState.FAILED}:
                         session.state = PlaybackState.IDLE
                         session.revision += 1
                     if reserved:
@@ -565,6 +589,30 @@ class MusicRequestService:
             )
             raise MusicVoiceBusyError("OOPZ voice is currently used by another feature")
         session.voice_reserved = True
+
+    async def _reacquire_voice(
+        self,
+        channel: VoiceChannelKey,
+        session: _MusicSession,
+    ) -> bool:
+        """Replace one stale physical voice generation without holding session.lock."""
+        async with session.lock:
+            session.voice_reserved = False
+            session.state = PlaybackState.LOADING
+            session.revision += 1
+        try:
+            await self._voice.reset(channel)
+            acquired = await self._voice.acquire(channel)
+        except Exception as exc:
+            logger.warning(
+                "Could not acquire a fresh OOPZ voice generation for music: channel=%s error=%s",
+                self._channel_ref(channel),
+                type(exc).__name__,
+            )
+            return False
+        async with session.lock:
+            session.voice_reserved = acquired
+        return acquired
 
     def _start_worker_locked(
         self,

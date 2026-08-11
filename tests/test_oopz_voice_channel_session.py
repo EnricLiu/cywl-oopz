@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
+from oopz_sdk import VoiceConnectionState
 
 from cywl_oopz.features.audio.errors import AudioBusFailedError, AudioSessionClosedError
 from cywl_oopz.features.audio.models import (
@@ -15,6 +17,7 @@ from cywl_oopz.integrations.audio.fake import FakeMasterPcmOutput
 from cywl_oopz.integrations.oopz.voice_channel_session import (
     OopzVoiceChannelSessionManager,
     VoiceChannelSessionState,
+    VoiceParticipantTerminationReason,
 )
 
 
@@ -60,6 +63,24 @@ class FakeVoice:
 class FakeBot:
     def __init__(self) -> None:
         self.voice = FakeVoice()
+
+
+class HealthAwareVoice(FakeVoice):
+    def __init__(self) -> None:
+        super().__init__()
+        self.connection_state = VoiceConnectionState.JOINED
+        self.agora_client_joined = True
+
+    async def get_health(self):
+        return SimpleNamespace(
+            connection_state=self.connection_state,
+            agora_client_joined=self.agora_client_joined,
+        )
+
+
+class HealthAwareBot:
+    def __init__(self) -> None:
+        self.voice = HealthAwareVoice()
 
 
 class FakeMasterFactory:
@@ -366,4 +387,50 @@ async def test_stale_participant_cannot_release_new_generation() -> None:
     snapshot = await manager.current()
     assert snapshot is not None
     assert snapshot.generation == 2
+    await manager.aclose()
+
+
+@pytest.mark.asyncio
+async def test_participant_wait_terminated_reports_normal_release() -> None:
+    bot = FakeBot()
+    manager = OopzVoiceChannelSessionManager(bot)
+    participant = await manager.try_acquire(request(VoiceParticipantKind.MUSIC))
+    assert participant is not None
+
+    waiting = asyncio.create_task(participant.wait_terminated())
+    assert await participant.release() is True
+    termination = await waiting
+
+    assert termination.generation == 1
+    assert termination.reason is VoiceParticipantTerminationReason.RELEASED
+    await manager.aclose()
+
+
+@pytest.mark.asyncio
+async def test_unhealthy_backend_invalidates_generation_and_allows_fresh_join() -> None:
+    bot = HealthAwareBot()
+    manager = OopzVoiceChannelSessionManager(
+        bot,
+        health_check_interval_seconds=0.001,
+        health_failure_threshold=1,
+    )
+    first = await manager.try_acquire(request(VoiceParticipantKind.MUSIC, owner="first"))
+    assert first is not None
+    bot.voice.connection_state = VoiceConnectionState.FAILED
+    bot.voice.agora_client_joined = False
+
+    termination = await asyncio.wait_for(first.wait_terminated(), timeout=0.1)
+
+    assert termination.generation == 1
+    assert termination.reason is VoiceParticipantTerminationReason.BACKEND_FAILED
+    assert first.released is True
+    assert await manager.current() is None
+    assert bot.voice.leaves == 1
+
+    bot.voice.connection_state = VoiceConnectionState.JOINED
+    bot.voice.agora_client_joined = True
+    second = await manager.try_acquire(request(VoiceParticipantKind.MUSIC, owner="second"))
+    assert second is not None
+    assert second.generation == 2
+    assert len(bot.voice.joins) == 2
     await manager.aclose()

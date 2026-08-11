@@ -78,6 +78,9 @@ class MusicVoiceGateway(Protocol):
     async def release(self, channel: VoiceChannelKey) -> bool:
         """Release only the matching music lease after its queue drains."""
 
+    async def reset(self, channel: VoiceChannelKey) -> None:
+        """Invalidate a stale physical voice generation before a fresh acquire."""
+
     async def aclose(self) -> None:
         """Stop playback and leave the active voice channel."""
 

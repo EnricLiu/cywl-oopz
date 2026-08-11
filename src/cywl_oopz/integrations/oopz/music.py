@@ -32,6 +32,7 @@ from cywl_oopz.settings import AudioMixerSettings
 from .voice_channel_session import (
     OopzVoiceChannelSessionManager,
     OopzVoiceParticipant,
+    VoiceParticipantTerminationReason,
 )
 
 DEFAULT_VOLUME = 2  # %
@@ -75,6 +76,80 @@ class OopzMusicPlayback:
         return True
 
 
+class ObservedMusicPlayback:
+    """Complete playback when either media or its physical voice generation ends."""
+
+    def __init__(
+        self,
+        playback: OopzMusicPlayback | FfmpegMusicPlayback,
+        participant: OopzVoiceParticipant,
+    ) -> None:
+        self._playback = playback
+        self._participant = participant
+        self._result = asyncio.create_task(
+            self._observe(),
+            name=f"music-playback-generation:{participant.generation}",
+        )
+
+    @property
+    def finished(self) -> bool:
+        return self._result.done()
+
+    async def wait_finished(self) -> MusicPlaybackResult:
+        return await asyncio.shield(self._result)
+
+    async def stop(self) -> None:
+        if self.finished:
+            return
+        await self._playback.stop()
+
+    async def pause(self) -> bool:
+        if self.finished:
+            return False
+        return await self._playback.pause()
+
+    async def resume(self) -> bool:
+        if self.finished:
+            return False
+        return await self._playback.resume()
+
+    async def _observe(self) -> MusicPlaybackResult:
+        playback_wait = asyncio.create_task(
+            self._playback.wait_finished(),
+            name="music-playback-terminal",
+        )
+        participant_wait = asyncio.create_task(
+            self._participant.wait_terminated(),
+            name=f"music-participant-terminal:{self._participant.generation}",
+        )
+        try:
+            done, _pending = await asyncio.wait(
+                {playback_wait, participant_wait},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if playback_wait in done:
+                return playback_wait.result()
+            termination = participant_wait.result()
+            with suppress(Exception):
+                async with asyncio.timeout(1.0):
+                    await self._playback.stop()
+            reason = (
+                MusicPlaybackEndReason.VOICE_LEFT
+                if termination.reason
+                in {
+                    VoiceParticipantTerminationReason.BACKEND_FAILED,
+                    VoiceParticipantTerminationReason.MANAGER_CLOSED,
+                }
+                else MusicPlaybackEndReason.STOPPED
+            )
+            return MusicPlaybackResult(reason)
+        finally:
+            for waiting in (playback_wait, participant_wait):
+                if not waiting.done():
+                    waiting.cancel()
+            await asyncio.gather(playback_wait, participant_wait, return_exceptions=True)
+
+
 class OopzMusicVoiceGateway:
     """Translate music operations under one shared OOPZ voice lease."""
 
@@ -92,7 +167,7 @@ class OopzMusicVoiceGateway:
         self._decoder_factory = decoder_factory or FfmpegMusicDecoderFactory(self._audio_settings)
         self._lease: OopzVoiceParticipant | None = None
         self._channel: VoiceChannelKey | None = None
-        self._playback: OopzMusicPlayback | FfmpegMusicPlayback | None = None
+        self._playback: ObservedMusicPlayback | None = None
         self._bus: SharedAudioMixerBus | None = None
         self._backend_recovery_pending = False
         self._lock = asyncio.Lock()
@@ -114,7 +189,10 @@ class OopzMusicVoiceGateway:
     async def acquire(self, channel: VoiceChannelKey) -> bool:
         async with self._lock:
             if self._lease is not None:
-                return self._channel == channel and not self._lease.released
+                if self._lease.released:
+                    self._clear_lease_locked()
+                else:
+                    return self._channel == channel
             lease = await self._leases.try_acquire(
                 VoiceParticipantRequest(
                     VoiceParticipantKind.MUSIC,
@@ -132,7 +210,7 @@ class OopzMusicVoiceGateway:
         self,
         channel: VoiceChannelKey,
         stream_url: str,
-    ) -> OopzMusicPlayback | FfmpegMusicPlayback:
+    ) -> ObservedMusicPlayback:
         async with self._lock:
             if self._lease is None or self._lease.released or self._channel != channel:
                 raise RuntimeError("Music playback requires a matching active voice lease")
@@ -164,11 +242,15 @@ class OopzMusicVoiceGateway:
                             "Shared music audio backend closed during startup"
                         ) from exc
                     raise
-                playback = FfmpegMusicPlayback.from_bus(decoder, bus)
+                source_playback = FfmpegMusicPlayback.from_bus(decoder, bus)
+                playback = ObservedMusicPlayback(source_playback, self._lease)
                 self._playback = playback
                 return playback
             await self._bot.voice.set_volume(DEFAULT_VOLUME)
-            playback = OopzMusicPlayback(await self._bot.voice.start_url_playback(stream_url))
+            source_playback = OopzMusicPlayback(
+                await self._bot.voice.start_url_playback(stream_url)
+            )
+            playback = ObservedMusicPlayback(source_playback, self._lease)
             self._playback = playback
             return playback
 
@@ -192,6 +274,22 @@ class OopzMusicVoiceGateway:
             if lease.released:
                 self._clear_lease_locked()
             return released
+
+    async def reset(self, channel: VoiceChannelKey) -> None:
+        """Invalidate only the matching stale physical generation."""
+        async with self._lock:
+            if self._lease is None or self._channel != channel:
+                return
+            lease = self._lease
+            playback = self._playback
+        if playback is not None and not playback.finished:
+            with suppress(Exception):
+                await playback.stop()
+        if not lease.released:
+            await self._leases.invalidate_backend(expected_generation=lease.generation)
+        async with self._lock:
+            if self._lease is lease and lease.released:
+                self._clear_lease_locked()
 
     async def aclose(self) -> None:
         async with self._lock:

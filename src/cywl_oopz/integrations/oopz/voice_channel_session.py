@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
 
-from oopz_sdk import OopzBot
+from oopz_sdk import OopzBot, VoiceConnectionState
 
 from cywl_oopz.core.observability import exception_kind, opaque_ref
 from cywl_oopz.features.audio.errors import AudioBusFailedError, AudioSessionClosedError
@@ -41,6 +41,22 @@ class VoiceChannelSessionState(StrEnum):
     LEAVING = "leaving"
 
 
+class VoiceParticipantTerminationReason(StrEnum):
+    """Why one generation-scoped participant can no longer be used."""
+
+    RELEASED = "released"
+    MANAGER_CLOSED = "manager_closed"
+    BACKEND_FAILED = "backend_failed"
+
+
+@dataclass(frozen=True, slots=True)
+class VoiceParticipantTermination:
+    """Immutable terminal signal observed by feature-owned runtime tasks."""
+
+    generation: int
+    reason: VoiceParticipantTerminationReason
+
+
 @dataclass(frozen=True, slots=True)
 class VoiceChannelSessionSnapshot:
     """Immutable session view without exposing mutable participant tokens."""
@@ -64,6 +80,7 @@ class OopzVoiceParticipant:
         self.request = request
         self.generation = generation
         self._released = False
+        self._termination = asyncio.get_running_loop().create_future()
 
     @property
     def released(self) -> bool:
@@ -73,8 +90,12 @@ class OopzVoiceParticipant:
         if self._released:
             return False
         released = await self._manager._release(self)
-        self._released = True
+        self._finish(VoiceParticipantTerminationReason.RELEASED)
         return released
+
+    async def wait_terminated(self) -> VoiceParticipantTermination:
+        """Wait until this exact participant generation becomes unusable."""
+        return await asyncio.shield(self._termination)
 
     async def audio_bus(self) -> SharedAudioMixerBus:
         """Return this generation's session-owned lazy master bus."""
@@ -87,6 +108,12 @@ class OopzVoiceParticipant:
 
     async def __aexit__(self, *_exc_info: object) -> None:
         await self.release()
+
+    def _finish(self, reason: VoiceParticipantTerminationReason) -> None:
+        if self._released:
+            return
+        self._released = True
+        self._termination.set_result(VoiceParticipantTermination(self.generation, reason))
 
 
 class SharedVoiceChannelSession:
@@ -200,9 +227,15 @@ class OopzVoiceChannelSessionManager:
         music_queue_ms: int = 500,
         voice_queue_ms: int = 60,
         mixer_levels: MixerLevels | None = None,
+        health_check_interval_seconds: float = 0.5,
+        health_failure_threshold: int = 2,
     ) -> None:
         if transition_wait_seconds <= 0:
             raise ValueError("Voice session transition wait must be positive")
+        if health_check_interval_seconds <= 0:
+            raise ValueError("Voice session health check interval must be positive")
+        if health_failure_threshold <= 0:
+            raise ValueError("Voice session health failure threshold must be positive")
         self._bot = bot
         self._transition_wait_seconds = transition_wait_seconds
         self._allow_mixed_participants = allow_mixed_participants
@@ -211,6 +244,8 @@ class OopzVoiceChannelSessionManager:
         self._music_queue_ms = music_queue_ms
         self._voice_queue_ms = voice_queue_ms
         self._mixer_levels = mixer_levels or MixerLevels()
+        self._health_check_interval_seconds = health_check_interval_seconds
+        self._health_failure_threshold = health_failure_threshold
         self._lock = asyncio.Lock()
         self._close_lock = asyncio.Lock()
         self._session: SharedVoiceChannelSession | None = None
@@ -224,6 +259,7 @@ class OopzVoiceChannelSessionManager:
         self._joined_without_session = False
         self._generation = 0
         self._closed = False
+        self._health_task: asyncio.Task[None] | None = None
 
     async def try_acquire(
         self,
@@ -353,6 +389,7 @@ class OopzVoiceChannelSessionManager:
                     await wait_event.wait()
                     continue
                 try:
+                    await self._cancel_health_monitor()
                     if session is not None:
                         await session.aclose_bus()
                     await self._bot.voice.leave()
@@ -373,7 +410,7 @@ class OopzVoiceChannelSessionManager:
                     if session is not None and self._session is session:
                         self._session = None
                         for participant in session.participants:
-                            participant._released = True
+                            participant._finish(VoiceParticipantTerminationReason.MANAGER_CLOSED)
                     self._joined_without_session = False
                     self._finish_leave_locked()
                 logger.info("Closed shared OOPZ voice channel session")
@@ -410,6 +447,7 @@ class OopzVoiceChannelSessionManager:
                 participant, _added = session.try_add(self, request)
                 assert participant is not None
                 self._session = session
+                self._start_health_monitor_locked(session)
                 self._clear_pending_locked()
 
         if should_leave:
@@ -454,6 +492,7 @@ class OopzVoiceChannelSessionManager:
                         return False
                     if len(session.participants) > 1:
                         session.remove(participant)
+                        participant._finish(VoiceParticipantTerminationReason.RELEASED)
                         logger.info(
                             "Removed OOPZ voice participant: kind=%s channel=%s generation=%s",
                             participant.request.kind.value,
@@ -471,6 +510,7 @@ class OopzVoiceChannelSessionManager:
 
             assert session is not None
             try:
+                await self._cancel_health_monitor()
                 await session.aclose_bus()
                 await self._bot.voice.leave()
             except BaseException:
@@ -481,6 +521,7 @@ class OopzVoiceChannelSessionManager:
                 if self._session is session:
                     session.remove(participant)
                     self._session = None
+                    participant._finish(VoiceParticipantTerminationReason.RELEASED)
                 self._finish_leave_locked()
             logger.info(
                 "Released final OOPZ voice participant: kind=%s channel=%s generation=%s",
@@ -489,6 +530,53 @@ class OopzVoiceChannelSessionManager:
                 session.generation,
             )
             return True
+
+    async def invalidate_backend(self, *, expected_generation: int | None = None) -> bool:
+        """Discard one unhealthy physical generation and wake all participants."""
+        async with self._lock:
+            session = self._session
+            if (
+                session is None
+                or self._leaving
+                or (expected_generation is not None and session.generation != expected_generation)
+            ):
+                return False
+            self._begin_leave_locked()
+            for participant in session.participants:
+                participant._finish(VoiceParticipantTerminationReason.BACKEND_FAILED)
+
+        await self._cancel_health_monitor()
+        try:
+            await session.aclose_bus()
+        except Exception as exc:
+            logger.warning(
+                "Could not close shared audio bus while invalidating voice backend: "
+                "channel=%s generation=%s error=%s",
+                self._channel_ref(session.channel),
+                session.generation,
+                exception_kind(exc),
+            )
+        try:
+            await self._bot.voice.leave()
+        except Exception as exc:
+            logger.warning(
+                "Could not leave failed OOPZ voice backend during invalidation: "
+                "channel=%s generation=%s error=%s",
+                self._channel_ref(session.channel),
+                session.generation,
+                exception_kind(exc),
+            )
+
+        async with self._lock:
+            if self._session is session:
+                self._session = None
+            self._finish_leave_locked()
+        logger.warning(
+            "Invalidated unhealthy OOPZ voice generation: channel=%s generation=%s",
+            self._channel_ref(session.channel),
+            session.generation,
+        )
+        return True
 
     async def _audio_bus(self, participant: OopzVoiceParticipant) -> SharedAudioMixerBus:
         async with self._lock:
@@ -510,6 +598,57 @@ class OopzVoiceChannelSessionManager:
             mixer_levels=self._mixer_levels,
         )
 
+    def _start_health_monitor_locked(self, session: SharedVoiceChannelSession) -> None:
+        get_health = getattr(self._bot.voice, "get_health", None)
+        if not callable(get_health):
+            return
+        if self._health_task is not None and not self._health_task.done():
+            raise RuntimeError("Voice session health monitor already owns a generation")
+        self._health_task = asyncio.create_task(
+            self._monitor_health(session, get_health),
+            name=f"oopz-voice-health:{session.generation}",
+        )
+
+    async def _monitor_health(self, session: SharedVoiceChannelSession, get_health) -> None:
+        failures = 0
+        try:
+            while True:
+                await asyncio.sleep(self._health_check_interval_seconds)
+                async with self._lock:
+                    if self._session is not session or self._leaving or self._closed:
+                        return
+                try:
+                    health = await get_health()
+                    healthy = (
+                        health.connection_state is VoiceConnectionState.JOINED
+                        and health.agora_client_joined
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    healthy = False
+                    logger.warning(
+                        "Could not inspect OOPZ voice health: channel=%s generation=%s error=%s",
+                        self._channel_ref(session.channel),
+                        session.generation,
+                        exception_kind(exc),
+                    )
+                failures = 0 if healthy else failures + 1
+                if failures < self._health_failure_threshold:
+                    continue
+                await self.invalidate_backend(expected_generation=session.generation)
+                return
+        except asyncio.CancelledError:
+            raise
+
+    async def _cancel_health_monitor(self) -> None:
+        task = self._health_task
+        self._health_task = None
+        if task is None or task is asyncio.current_task():
+            return
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
     def _begin_leave_locked(self) -> None:
         self._leaving = True
         self._leaving_done.clear()
@@ -521,6 +660,8 @@ class OopzVoiceChannelSessionManager:
     async def _restore_failed_leave(self) -> None:
         async with self._lock:
             self._finish_leave_locked()
+            if not self._closed and self._session is not None:
+                self._start_health_monitor_locked(self._session)
 
     def _clear_pending_locked(self) -> None:
         self._pending_request = None

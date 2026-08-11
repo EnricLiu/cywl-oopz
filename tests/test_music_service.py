@@ -120,6 +120,10 @@ class FakeVoice:
         self.acquired = None
         return True
 
+    async def reset(self, channel: VoiceChannelKey) -> None:
+        if self.acquired == channel:
+            self.acquired = None
+
     async def aclose(self) -> None:
         self.closed = True
 
@@ -201,6 +205,28 @@ class StartupRecoveringVoice(FakeVoice):
         return await super().start_playback(channel, stream_url)
 
 
+class VoiceLeftRecoveringVoice(FakeVoice):
+    def __init__(self) -> None:
+        super().__init__()
+        self._failed = False
+        self.reset_calls = 0
+
+    async def start_playback(
+        self,
+        channel: VoiceChannelKey,
+        stream_url: str,
+    ):
+        if not self._failed:
+            self._failed = True
+            self.played.append((channel, stream_url))
+            return TerminalPlayback(MusicPlaybackResult(MusicPlaybackEndReason.VOICE_LEFT))
+        return await super().start_playback(channel, stream_url)
+
+    async def reset(self, channel: VoiceChannelKey) -> None:
+        self.reset_calls += 1
+        await super().reset(channel)
+
+
 async def eventually(predicate, *, attempts: int = 100) -> None:
     for _ in range(attempts):
         if predicate():
@@ -273,7 +299,30 @@ async def test_music_service_does_not_retry_backend_failure_more_than_once() -> 
 
     assert catalog.resolved == ["still-broken", "still-broken"]
     assert len(voice.played) == 2
-    assert (await service.queue(identity())).state is PlaybackState.IDLE
+    snapshot = await service.queue(identity())
+    assert snapshot.state is PlaybackState.FAILED
+    assert [item.track.title for item in snapshot.upcoming] == ["still-broken"]
+    await service.aclose()
+
+
+@pytest.mark.asyncio
+async def test_music_service_rejoins_after_physical_voice_generation_is_lost() -> None:
+    catalog = FakeCatalog()
+    voice = VoiceLeftRecoveringVoice()
+    service = MusicRequestService(settings(), catalog, voice)
+
+    await service.enqueue(identity(), "rejoin")
+    await eventually(lambda: len(voice.played) == 2)
+
+    assert voice.reset_calls == 1
+    assert voice.acquire_calls == [
+        VoiceChannelKey("area", "voice-a"),
+        VoiceChannelKey("area", "voice-a"),
+    ]
+    assert catalog.resolved == ["rejoin", "rejoin"]
+    assert (await service.queue(identity())).state is PlaybackState.PLAYING
+    voice.current_finished.set()
+    await eventually(lambda: voice.acquired is None)
     await service.aclose()
 
 

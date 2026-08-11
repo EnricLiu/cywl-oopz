@@ -417,3 +417,28 @@ async def test_oopz_music_gateway_close_retries_failed_lease_release() -> None:
     assert bot.voice.playbacks[0].stop_calls == 1
     assert bot.voice.leaves == 1
     await leases.aclose()
+
+
+@pytest.mark.asyncio
+async def test_oopz_music_playback_finishes_when_voice_generation_is_invalidated() -> None:
+    bot = FakeBot()
+    sessions = OopzVoiceChannelSessionManager(bot)
+    gateway = OopzMusicVoiceGateway(bot, sessions)
+    channel = VoiceChannelKey("area", "voice")
+    assert await gateway.acquire(channel) is True
+    playback = await gateway.start_playback(
+        channel,
+        "https://music.example/stuck.mp3",
+    )
+
+    waiting = asyncio.create_task(playback.wait_finished())
+    assert await sessions.invalidate_backend(expected_generation=1) is True
+    result = await asyncio.wait_for(waiting, timeout=0.1)
+
+    assert result.end_reason is MusicPlaybackEndReason.VOICE_LEFT
+    assert gateway._lease is not None and gateway._lease.released is True
+    assert await gateway.acquire(channel) is True
+    assert gateway._lease is not None and gateway._lease.generation == 2
+    assert len(bot.voice.joins) == 2
+    await gateway.aclose()
+    await sessions.aclose()
