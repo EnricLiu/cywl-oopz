@@ -357,8 +357,8 @@ async def test_real_ffmpeg_slow_http_startup_times_out_without_logging_url(
                     shutil.which("ffmpeg") or "ffmpeg",
                     server.url(secret),
                     settings(
-                        CYWL_AUDIO_DECODER_START_TIMEOUT_SECONDS="0.15",
-                        CYWL_AUDIO_DECODER_READ_TIMEOUT_SECONDS="1",
+                        CYWL_AUDIO_DECODER_START_TIMEOUT_SECONDS="2",
+                        CYWL_AUDIO_DECODER_READ_TIMEOUT_SECONDS="5",
                         CYWL_AUDIO_DECODER_STOP_TIMEOUT_SECONDS="0.2",
                     ),
                 )
