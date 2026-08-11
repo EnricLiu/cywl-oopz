@@ -192,6 +192,15 @@ class QueueRebuildResult:
 
 
 @dataclass(frozen=True, slots=True)
+class MusicQueueClearResult:
+    """Result of stopping and clearing one transient playback session."""
+
+    voice_channel: VoiceChannelKey
+    stopped_current: bool
+    removed_count: int
+
+
+@dataclass(frozen=True, slots=True)
 class MusicPlaylistEntry:
     """One stable, ordered track snapshot stored in a shared area playlist."""
 
@@ -239,6 +248,35 @@ class PlaylistTrackRemoval:
     playlist_id: UUID
     entry_id: UUID
     removed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class PlaylistRename:
+    """Idempotent area-scoped playlist rename result."""
+
+    playlist_id: UUID
+    old_name: str
+    new_name: str
+    changed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class PlaylistDeletion:
+    """Idempotent playlist deletion and cascaded track count."""
+
+    playlist_id: UUID
+    name: str | None
+    deleted: bool
+    removed_track_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class PlaylistClear:
+    """Track deletion result that preserves the shared playlist."""
+
+    playlist_id: UUID
+    name: str
+    removed_track_count: int
 
 
 @dataclass(frozen=True, slots=True)

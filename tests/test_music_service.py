@@ -604,6 +604,39 @@ async def test_music_service_updates_policy_dimensions_independently() -> None:
 
 
 @pytest.mark.asyncio
+async def test_music_service_clear_stops_current_and_discards_every_cycle_item() -> None:
+    voice = FakeVoice()
+    service = MusicRequestService(settings(), FakeCatalog(), voice)
+    await service.set_policy(identity(), repeat=RepeatPolicy.ALL)
+
+    await service.enqueue(identity(), "first")
+    await eventually(lambda: len(voice.played) == 1)
+    await service.enqueue(identity(), "second")
+    await service.enqueue(identity(), "third")
+    voice.current_finished.set()
+    await eventually(lambda: len(voice.played) == 2)
+
+    result = await service.clear(identity())
+    assert result.stopped_current is True
+    assert result.removed_count == 3
+    await eventually(lambda: voice.acquired is None)
+    await asyncio.sleep(0)
+    assert len(voice.played) == 2
+    snapshot = await service.queue(identity())
+    assert snapshot.state is PlaybackState.IDLE
+    assert snapshot.current is None
+    assert snapshot.upcoming == ()
+    assert snapshot.cycle_completed_count == 0
+    assert snapshot.policy == MusicPlaybackPolicy()
+    assert snapshot.last_failure is None
+
+    repeated = await service.clear(identity())
+    assert repeated.stopped_current is False
+    assert repeated.removed_count == 0
+    await service.aclose()
+
+
+@pytest.mark.asyncio
 async def test_music_service_selects_random_upcoming_tracks_in_shuffle_mode() -> None:
     voice = FakeVoice()
     service = MusicRequestService(

@@ -31,6 +31,7 @@ from .models import (
     MusicFailureScope,
     MusicPlaybackEndReason,
     MusicPlaybackPolicy,
+    MusicQueueClearResult,
     MusicQueueSnapshot,
     MusicTrack,
     PlaybackOrder,
@@ -147,18 +148,17 @@ class MusicRequestService:
             session.state = PlaybackState.WAITING if session.current is None else session.state
             position = len(session.queue) + (1 if session.current is not None else 0)
             started = self._start_worker_locked(channel, session)
+            result = EnqueueResult(channel, item, position, started)
+            if idempotency_key:
+                session.idempotent_enqueues[idempotency_key] = result
+                while len(session.idempotent_enqueues) > 256:
+                    session.idempotent_enqueues.popitem(last=False)
         logger.info(
             "Music enqueued: channel=%s position=%s playback_worker_started=%s",
             self._channel_ref(channel),
             position,
             started,
         )
-        result = EnqueueResult(channel, item, position, started)
-        if idempotency_key:
-            async with session.lock:
-                session.idempotent_enqueues[idempotency_key] = result
-                while len(session.idempotent_enqueues) > 256:
-                    session.idempotent_enqueues.popitem(last=False)
         return result
 
     async def queue(self, identity: AgentIdentity) -> MusicQueueSnapshot:
@@ -262,6 +262,47 @@ class MusicRequestService:
             started,
         )
         return QueueRebuildResult(channel, len(tracks), replaced_current, started)
+
+    async def clear(self, identity: AgentIdentity) -> MusicQueueClearResult:
+        """Stop current playback and clear every transient queue cycle item."""
+        channel = await self._channel_for(identity)
+        session = self._session(channel)
+        async with session.lock:
+            stopped_current = session.current is not None and not session.skip_requested.is_set()
+            removed_count = (
+                len(session.queue) + len(session.cycle_history) + (1 if stopped_current else 0)
+            )
+            session.queue.clear()
+            session.cycle_history.clear()
+            session.idempotent_enqueues.clear()
+            session.policy = MusicPlaybackPolicy()
+            session.last_failure = None
+            playback = session.playback if stopped_current else None
+            if stopped_current:
+                session.retain_skipped_for_cycle = False
+                session.skip_requested.set()
+            elif session.voice_reserved:
+                session.state = PlaybackState.WAITING
+                self._start_worker_locked(channel, session)
+            else:
+                session.state = PlaybackState.IDLE
+            session.revision += 1
+        if playback is not None:
+            try:
+                await playback.stop()
+            except Exception as exc:
+                logger.warning(
+                    "Could not stop current track while clearing queue: channel=%s error=%s",
+                    self._channel_ref(channel),
+                    type(exc).__name__,
+                )
+        logger.info(
+            "Music queue cleared: channel=%s stopped_current=%s removed=%s",
+            self._channel_ref(channel),
+            stopped_current,
+            removed_count,
+        )
+        return MusicQueueClearResult(channel, stopped_current, removed_count)
 
     async def skip(self, identity: AgentIdentity) -> bool:
         """Request one current track to stop; repeated calls before advance are harmless."""

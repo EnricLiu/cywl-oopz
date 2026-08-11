@@ -42,6 +42,9 @@ from cywl_oopz.features.music.models import (
     MusicPlaylistSummary,
     MusicTrack,
     NeteasePlaylistSnapshot,
+    PlaylistClear,
+    PlaylistDeletion,
+    PlaylistRename,
     PlaylistTrackRemoval,
     QueueRebuildResult,
     VoiceChannelKey,
@@ -221,6 +224,60 @@ class InMemoryPlaylistRepository:
         assert imported is not None
         return imported
 
+    async def rename(
+        self,
+        area_id: str,
+        playlist_id: UUID,
+        name: str,
+        normalized_name: str,
+    ) -> PlaylistRename:
+        playlist = await self.get(area_id, playlist_id)
+        if playlist is None:
+            raise MusicPlaylistNotFoundError
+        if any(
+            item.id != playlist_id
+            and item.area_id == area_id
+            and item.normalized_name == normalized_name
+            for item in self.playlists.values()
+        ):
+            raise MusicPlaylistConflictError
+        changed = playlist.name != name or playlist.normalized_name != normalized_name
+        if changed:
+            self.playlists[playlist_id] = MusicPlaylist(
+                playlist.id,
+                playlist.area_id,
+                name,
+                normalized_name,
+                playlist.created_by_person_id,
+                playlist.entries,
+                playlist.created_at,
+                datetime.now(UTC),
+            )
+        return PlaylistRename(playlist_id, playlist.name, name, changed)
+
+    async def delete(self, area_id: str, playlist_id: UUID) -> PlaylistDeletion:
+        playlist = await self.get(area_id, playlist_id)
+        if playlist is None:
+            return PlaylistDeletion(playlist_id, None, False, 0)
+        del self.playlists[playlist_id]
+        return PlaylistDeletion(playlist_id, playlist.name, True, playlist.track_count)
+
+    async def clear(self, area_id: str, playlist_id: UUID) -> PlaylistClear:
+        playlist = await self.get(area_id, playlist_id)
+        if playlist is None:
+            raise MusicPlaylistNotFoundError
+        self.playlists[playlist_id] = MusicPlaylist(
+            playlist.id,
+            playlist.area_id,
+            playlist.name,
+            playlist.normalized_name,
+            playlist.created_by_person_id,
+            (),
+            playlist.created_at,
+            datetime.now(UTC),
+        )
+        return PlaylistClear(playlist_id, playlist.name, playlist.track_count)
+
 
 @dataclass
 class FakeMusic:
@@ -312,6 +369,41 @@ async def test_playlist_service_rejects_private_scope_and_empty_load() -> None:
     empty = await playlists.create(identity(), "empty")
     with pytest.raises(MusicPlaylistEmptyError):
         await playlists.load(identity(), empty.id)
+
+
+@pytest.mark.asyncio
+async def test_playlist_service_renames_clears_and_deletes_inside_one_area() -> None:
+    playlists, _, _ = service()
+    first = await playlists.create(identity(), " First ")
+    second = await playlists.create(identity(), "Second")
+    await playlists.add(identity(), first.id, "Melt")
+
+    renamed = await playlists.rename(identity("other"), first.id, "  Favorites  ")
+    unchanged = await playlists.rename(identity(), first.id, "Favorites")
+    assert (renamed.old_name, renamed.new_name, renamed.changed) == (
+        "First",
+        "Favorites",
+        True,
+    )
+    assert unchanged.changed is False
+    with pytest.raises(MusicPlaylistConflictError):
+        await playlists.rename(identity(), first.id, second.name.casefold())
+
+    cleared = await playlists.clear(identity("other"), first.id)
+    cleared_again = await playlists.clear(identity(), first.id)
+    assert cleared.removed_track_count == 1
+    assert cleared_again.removed_track_count == 0
+    assert (await playlists.get(identity(), first.id)).entries == ()
+
+    deleted = await playlists.delete(identity(), first.id)
+    deleted_again = await playlists.delete(identity(), first.id)
+    assert (deleted.name, deleted.deleted, deleted.removed_track_count) == (
+        "Favorites",
+        True,
+        0,
+    )
+    assert deleted_again == PlaylistDeletion(first.id, None, False, 0)
+    assert (await playlists.delete(identity(area_id="other-area"), second.id)).deleted is False
 
 
 def tool_context() -> ToolExecutionContext:

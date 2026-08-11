@@ -26,7 +26,10 @@ from .models import (
     MusicPlaylistSummary,
     NeteasePlaylistImport,
     NeteasePlaylistSnapshot,
+    PlaylistClear,
+    PlaylistDeletion,
     PlaylistQueueLoad,
+    PlaylistRename,
     PlaylistTrackRemoval,
 )
 from .ports import MusicPlaylistRepository, MusicPlaylistSource
@@ -125,6 +128,59 @@ class MusicPlaylistService:
             playlist_id,
             entry_id,
             result.removed,
+        )
+        return result
+
+    async def rename(
+        self,
+        identity: AgentIdentity,
+        playlist_id: UUID,
+        name: str,
+    ) -> PlaylistRename:
+        area_id = self._area_id(identity)
+        display_name, normalized_name = self._normalize_name(name)
+        result = await self._repository.rename(
+            area_id,
+            playlist_id,
+            display_name,
+            normalized_name,
+        )
+        logger.info(
+            "Music playlist renamed: area=%s playlist=%s changed=%s",
+            opaque_ref(area_id),
+            playlist_id,
+            result.changed,
+        )
+        return result
+
+    async def delete(
+        self,
+        identity: AgentIdentity,
+        playlist_id: UUID,
+    ) -> PlaylistDeletion:
+        area_id = self._area_id(identity)
+        result = await self._repository.delete(area_id, playlist_id)
+        logger.info(
+            "Music playlist deleted: area=%s playlist=%s deleted=%s removed_tracks=%s",
+            opaque_ref(area_id),
+            playlist_id,
+            result.deleted,
+            result.removed_track_count,
+        )
+        return result
+
+    async def clear(
+        self,
+        identity: AgentIdentity,
+        playlist_id: UUID,
+    ) -> PlaylistClear:
+        area_id = self._area_id(identity)
+        result = await self._repository.clear(area_id, playlist_id)
+        logger.info(
+            "Music playlist cleared: area=%s playlist=%s removed_tracks=%s",
+            opaque_ref(area_id),
+            playlist_id,
+            result.removed_track_count,
         )
         return result
 

@@ -23,6 +23,9 @@ from .models import (
     MusicPlaylistEntry,
     MusicPlaylistSummary,
     MusicTrack,
+    PlaylistClear,
+    PlaylistDeletion,
+    PlaylistRename,
     PlaylistTrackRemoval,
 )
 
@@ -295,6 +298,82 @@ class SqlAlchemyMusicPlaylistRepository:
         except SQLAlchemyError as exc:
             raise _database_error("remove music playlist track", exc) from exc
         return PlaylistTrackRemoval(playlist_id, entry_id, True)
+
+    async def rename(
+        self,
+        area_id: str,
+        playlist_id: UUID,
+        name: str,
+        normalized_name: str,
+    ) -> PlaylistRename:
+        now = datetime.now(UTC)
+        try:
+            async with self._sessions() as session:
+                async with session.begin():
+                    playlist = await self._locked_playlist(session, area_id, playlist_id)
+                    old_name = playlist.name
+                    changed = playlist.name != name or playlist.normalized_name != normalized_name
+                    if changed:
+                        playlist.name = name
+                        playlist.normalized_name = normalized_name
+                        playlist.updated_at = now
+        except MusicPlaylistNotFoundError:
+            raise
+        except IntegrityError as exc:
+            raise MusicPlaylistConflictError(
+                "This area already has a playlist with that name"
+            ) from exc
+        except SQLAlchemyError as exc:
+            raise _database_error("rename music playlist", exc) from exc
+        return PlaylistRename(playlist_id, old_name, name, changed)
+
+    async def delete(self, area_id: str, playlist_id: UUID) -> PlaylistDeletion:
+        try:
+            async with self._sessions() as session:
+                async with session.begin():
+                    playlist = await session.scalar(
+                        select(MusicPlaylistRecord)
+                        .where(
+                            MusicPlaylistRecord.id == playlist_id,
+                            MusicPlaylistRecord.area_id == area_id,
+                        )
+                        .with_for_update()
+                    )
+                    if playlist is None:
+                        return PlaylistDeletion(playlist_id, None, False, 0)
+                    track_count = (
+                        await session.scalar(
+                            select(func.count(MusicPlaylistTrackRecord.id)).where(
+                                MusicPlaylistTrackRecord.playlist_id == playlist_id
+                            )
+                        )
+                        or 0
+                    )
+                    name = playlist.name
+                    await session.delete(playlist)
+        except SQLAlchemyError as exc:
+            raise _database_error("delete music playlist", exc) from exc
+        return PlaylistDeletion(playlist_id, name, True, int(track_count))
+
+    async def clear(self, area_id: str, playlist_id: UUID) -> PlaylistClear:
+        try:
+            async with self._sessions() as session:
+                async with session.begin():
+                    playlist = await self._locked_playlist(session, area_id, playlist_id)
+                    removed_ids = (
+                        await session.scalars(
+                            delete(MusicPlaylistTrackRecord)
+                            .where(MusicPlaylistTrackRecord.playlist_id == playlist_id)
+                            .returning(MusicPlaylistTrackRecord.id)
+                        )
+                    ).all()
+                    playlist.updated_at = datetime.now(UTC)
+                    name = playlist.name
+        except MusicPlaylistNotFoundError:
+            raise
+        except SQLAlchemyError as exc:
+            raise _database_error("clear music playlist", exc) from exc
+        return PlaylistClear(playlist_id, name, len(removed_ids))
 
     @staticmethod
     async def _locked_playlist(
