@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -64,6 +65,7 @@ from cywl_oopz.features.chat.models import ConversationKey
 from cywl_oopz.features.music.errors import (
     MusicPlaylistConflictError,
     MusicPlaylistFullError,
+    MusicPlaylistNotFoundError,
 )
 from cywl_oopz.features.music.models import MusicTrack
 from cywl_oopz.features.music.playlist_repository import (
@@ -214,6 +216,13 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
             "clear_music_queue",
             "search_web",
             "read_web_page",
+            "browser_open",
+            "browser_snapshot",
+            "browser_wait",
+            "browser_close",
+            "browser_click",
+            "browser_fill",
+            "browser_press",
             "set_music_playback_mode",
             "create_music_playlist",
             "list_music_playlists",
@@ -791,6 +800,111 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
         assert "过大导入" not in {
             summary.name for summary in await playlist_repository.list("shared-area")
         }
+
+        renamed = await playlist_repository.rename(
+            "shared-area",
+            playlist.id,
+            "Favorites",
+            "favorites",
+        )
+        unchanged = await playlist_repository.rename(
+            "shared-area",
+            playlist.id,
+            "Favorites",
+            "favorites",
+        )
+        assert (renamed.old_name, renamed.new_name, renamed.changed) == (
+            "夜间 电台",
+            "Favorites",
+            True,
+        )
+        assert unchanged.changed is False
+        with pytest.raises(MusicPlaylistConflictError):
+            await playlist_repository.rename(
+                "shared-area",
+                playlist.id,
+                imported_playlist.name,
+                imported_playlist.normalized_name,
+            )
+        with pytest.raises(MusicPlaylistNotFoundError):
+            await playlist_repository.rename(
+                "other-area",
+                playlist.id,
+                "Invisible",
+                "invisible",
+            )
+
+        cleared = await playlist_repository.clear("shared-area", playlist.id)
+        cleared_again = await playlist_repository.clear("shared-area", playlist.id)
+        assert cleared.removed_track_count == 1
+        assert cleared_again.removed_track_count == 0
+
+        deleted = await playlist_repository.delete("shared-area", imported_playlist.id)
+        deleted_again = await playlist_repository.delete("shared-area", imported_playlist.id)
+        assert (deleted.deleted, deleted.removed_track_count) == (True, 2)
+        assert deleted_again.deleted is False
+        async with test_engine.connect() as connection:
+            assert (
+                await connection.scalar(
+                    text("SELECT count(*) FROM music_playlist_tracks WHERE playlist_id = :id"),
+                    {"id": imported_playlist.id},
+                )
+                == 0
+            )
+
+        append_clear = await playlist_repository.create(
+            "shared-area",
+            "append-clear-race",
+            "append-clear-race",
+            "person",
+        )
+        append_result, clear_result = await asyncio.gather(
+            playlist_repository.append(
+                "shared-area",
+                append_clear.id,
+                MusicTrack("netease", "race", "Race", (), None),
+                "person",
+                max_tracks=3,
+            ),
+            playlist_repository.clear("shared-area", append_clear.id),
+        )
+        assert append_result.playlist_id == append_clear.id
+        assert clear_result.playlist_id == append_clear.id
+        append_clear_readback = await playlist_repository.get("shared-area", append_clear.id)
+        assert append_clear_readback is not None
+        assert [entry.position for entry in append_clear_readback.entries] in ([], [1])
+
+        append_delete = await playlist_repository.create(
+            "shared-area",
+            "append-delete-race",
+            "append-delete-race",
+            "person",
+        )
+        append_outcome, delete_outcome = await asyncio.gather(
+            playlist_repository.append(
+                "shared-area",
+                append_delete.id,
+                MusicTrack("netease", "late", "Late", (), None),
+                "person",
+                max_tracks=3,
+            ),
+            playlist_repository.delete("shared-area", append_delete.id),
+            return_exceptions=True,
+        )
+        assert not isinstance(delete_outcome, BaseException)
+        assert not isinstance(append_outcome, BaseException) or isinstance(
+            append_outcome,
+            MusicPlaylistNotFoundError,
+        )
+        assert await playlist_repository.get("shared-area", append_delete.id) is None
+        async with test_engine.connect() as connection:
+            assert (
+                await connection.scalar(
+                    text("SELECT count(*) FROM music_playlist_tracks WHERE playlist_id = :id"),
+                    {"id": append_delete.id},
+                )
+                == 0
+            )
 
         async with test_engine.begin() as connection:
             triggered_updated_at = await connection.scalar(
