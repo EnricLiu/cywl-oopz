@@ -141,7 +141,8 @@ def test_browser_and_music_results_have_compact_human_summaries() -> None:
             "data": {
                 "current": {"track": {"title": "Tell Your World"}},
                 "upcoming": [{"track": {"title": "39"}}],
-                "mode": "shuffle",
+                "order": "shuffle",
+                "repeat": "all",
             },
         },
         succeeded=True,
@@ -154,7 +155,8 @@ def test_browser_and_music_results_have_compact_human_summaries() -> None:
                 "state": "failed",
                 "current": None,
                 "upcoming": [{"track": {"title": "39"}}],
-                "mode": "sequential",
+                "order": "sequential",
+                "repeat": "off",
                 "last_failure": {"code": "voice_left"},
             },
         },
@@ -164,7 +166,7 @@ def test_browser_and_music_results_have_compact_human_summaries() -> None:
         "set_music_playback_mode",
         {
             "ok": True,
-            "data": {"mode": "repeat_all", "changed": True},
+            "data": {"order": "shuffle", "repeat": "all", "changed": True},
         },
         succeeded=True,
     )
@@ -221,9 +223,9 @@ def test_browser_and_music_results_have_compact_human_summaries() -> None:
 
     assert page.summary == "Example Domain"
     assert music.summary == "歌曲「Tell Your World」 · 队列第 2 位"
-    assert queue.summary == "正在播放 · 后续 1 首 · 随机播放"
+    assert queue.summary == "正在播放 · 后续 1 首 · 随机 · 列表循环"
     assert failed_queue.summary == "播放已中断 · 保留 1 首 · 语音连接已断开"
-    assert mode.summary == "列表循环已设置"
+    assert mode.summary == "随机 · 列表循环已设置"
     assert playlists.summary == "找到 2 个共享歌单"
     assert loaded_playlist.summary == "歌单「夜间电台」· 已载入 3 首"
     assert preview_import.summary == ("歌单「Miku Favorites」· 可导入 50/80 首 · 需要确认部分导入")

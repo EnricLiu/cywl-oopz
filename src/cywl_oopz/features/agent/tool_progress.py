@@ -235,13 +235,10 @@ class MusicProgressProjector(_ProjectionSupport):
                 else 0
             )
             current = values.get("current")
-            mode_names = {
-                "sequential": "顺序播放",
-                "repeat_one": "单曲循环",
-                "repeat_all": "列表循环",
-                "shuffle": "随机播放",
-            }
-            mode = mode_names.get(str(values.get("mode", "")), "顺序播放")
+            order = "随机" if values.get("order") == "shuffle" else "顺序"
+            repeat_names = {"off": "不循环", "one": "单曲循环", "all": "列表循环"}
+            repeat = repeat_names.get(str(values.get("repeat", "")), "不循环")
+            policy = f"{order} · {repeat}"
             if values.get("state") == "failed":
                 failure = values.get("last_failure")
                 failure_code = failure.get("code") if isinstance(failure, Mapping) else ""
@@ -255,21 +252,18 @@ class MusicProgressProjector(_ProjectionSupport):
                 reason = failure_names.get(str(failure_code), "播放发生错误")
                 return ToolProgressPresentation(summary=f"播放已中断 · 保留 {count} 首 · {reason}")
             summary = (
-                f"正在播放 · 后续 {count} 首 · {mode}"
+                f"正在播放 · 后续 {count} 首 · {policy}"
                 if current
-                else f"当前未播放 · 后续 {count} 首 · {mode}"
+                else f"当前未播放 · 后续 {count} 首 · {policy}"
             )
             return ToolProgressPresentation(summary=summary)
         if tool_name == "set_music_playback_mode":
-            mode_names = {
-                "sequential": "顺序播放",
-                "repeat_one": "单曲循环",
-                "repeat_all": "列表循环",
-                "shuffle": "随机播放",
-            }
-            mode = mode_names.get(str(values.get("mode", "")), "播放模式")
+            order = "随机" if values.get("order") == "shuffle" else "顺序"
+            repeat_names = {"off": "不循环", "one": "单曲循环", "all": "列表循环"}
+            repeat = repeat_names.get(str(values.get("repeat", "")), "不循环")
+            policy = f"{order} · {repeat}"
             return ToolProgressPresentation(
-                summary=f"{mode}已设置" if values.get("changed") else f"已是{mode}"
+                summary=f"{policy}已设置" if values.get("changed") else f"已是{policy}"
             )
         if tool_name == "create_music_playlist":
             playlist = values.get("playlist")

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from uuid import uuid4
 
 import pytest
+from pydantic import ValidationError
 
 from cywl_oopz.features.agent.models import AgentIdentity, AgentRunLimits
 from cywl_oopz.features.agent.tools.models import ToolExecutionContext, ToolExecutionError
@@ -20,12 +21,14 @@ from cywl_oopz.features.chat.models import ConversationKey
 from cywl_oopz.features.music.errors import MusicVoiceBusyError, MusicVoiceChannelRequiredError
 from cywl_oopz.features.music.models import (
     EnqueueResult,
+    MusicPlaybackPolicy,
     MusicQueueSnapshot,
     MusicTrack,
-    PlaybackMode,
-    PlaybackModeChange,
+    PlaybackOrder,
+    PlaybackPolicyChange,
     PlaybackState,
     QueuedTrack,
+    RepeatPolicy,
     VoiceChannelKey,
 )
 
@@ -57,19 +60,29 @@ class StubMusic:
         return MusicQueueSnapshot(
             VoiceChannelKey("area", "voice"),
             PlaybackState.PLAYING,
-            PlaybackMode.SEQUENTIAL,
+            MusicPlaybackPolicy(),
             item,
             (),
+            0,
             2,
         )
 
-    async def set_mode(
+    async def set_policy(
         self,
         identity: AgentIdentity,
-        mode: PlaybackMode,
-    ) -> PlaybackModeChange:
+        *,
+        order: PlaybackOrder | None = None,
+        repeat: RepeatPolicy | None = None,
+    ) -> PlaybackPolicyChange:
         assert identity.person_id == "person"
-        return PlaybackModeChange(VoiceChannelKey("area", "voice"), mode, True)
+        return PlaybackPolicyChange(
+            VoiceChannelKey("area", "voice"),
+            MusicPlaybackPolicy(
+                order=order or PlaybackOrder.SEQUENTIAL,
+                repeat=repeat or RepeatPolicy.OFF,
+            ),
+            True,
+        )
 
 
 def context() -> ToolExecutionContext:
@@ -110,17 +123,27 @@ async def test_music_tools_expose_bounded_metadata_and_trusted_voice_target() ->
     queue_output = await queue.execute(context(), queue.descriptor.input_model())
     mode_output = await mode.execute(
         context(),
-        MusicPlaybackModeInput(mode=PlaybackMode.REPEAT_ALL),
+        MusicPlaybackModeInput(
+            order=PlaybackOrder.SHUFFLE,
+            repeat=RepeatPolicy.ALL,
+        ),
     )
 
     assert search_output.model_dump()["tracks"][0]["source_id"] == "42"
     assert enqueue_output.model_dump()["voice_channel_id"] == "voice"
     assert queue_output.model_dump()["state"] == "playing"
-    assert queue_output.model_dump()["mode"] == PlaybackMode.SEQUENTIAL
+    assert queue_output.model_dump()["order"] == PlaybackOrder.SEQUENTIAL
+    assert queue_output.model_dump()["repeat"] == RepeatPolicy.OFF
     assert mode_output.model_dump() == {
-        "mode": PlaybackMode.REPEAT_ALL,
+        "order": PlaybackOrder.SHUFFLE,
+        "repeat": RepeatPolicy.ALL,
         "changed": True,
     }
+
+
+def test_music_playback_policy_input_requires_at_least_one_dimension() -> None:
+    with pytest.raises(ValidationError):
+        MusicPlaybackModeInput()
 
 
 @pytest.mark.asyncio

@@ -71,13 +71,31 @@ class PlaybackState(StrEnum):
     FAILED = "failed"
 
 
-class PlaybackMode(StrEnum):
-    """Queue selection and completed-track retention policy."""
+class PlaybackOrder(StrEnum):
+    """How one queue cycle selects its remaining tracks."""
 
     SEQUENTIAL = "sequential"
-    REPEAT_ONE = "repeat_one"
-    REPEAT_ALL = "repeat_all"
     SHUFFLE = "shuffle"
+
+
+class RepeatPolicy(StrEnum):
+    """How completed tracks are retained across queue cycles."""
+
+    OFF = "off"
+    ONE = "one"
+    ALL = "all"
+
+
+@dataclass(frozen=True, slots=True)
+class MusicPlaybackPolicy:
+    """Orthogonal playback order and repeat behavior for one active session."""
+
+    order: PlaybackOrder = PlaybackOrder.SEQUENTIAL
+    repeat: RepeatPolicy = RepeatPolicy.OFF
+
+    def __post_init__(self) -> None:
+        if self.order is PlaybackOrder.SHUFFLE and self.repeat is RepeatPolicy.ONE:
+            raise ValueError("Shuffle order cannot be combined with repeat-one")
 
 
 class MusicPlaybackEndReason(StrEnum):
@@ -136,9 +154,10 @@ class MusicQueueSnapshot:
 
     voice_channel: VoiceChannelKey
     state: PlaybackState
-    mode: PlaybackMode
+    policy: MusicPlaybackPolicy
     current: QueuedTrack | None
     upcoming: tuple[QueuedTrack, ...]
+    cycle_completed_count: int
     revision: int
     last_failure: MusicFailure | None = None
 
@@ -154,11 +173,11 @@ class EnqueueResult:
 
 
 @dataclass(frozen=True, slots=True)
-class PlaybackModeChange:
+class PlaybackPolicyChange:
     """Result of changing one voice channel's playback policy."""
 
     voice_channel: VoiceChannelKey
-    mode: PlaybackMode
+    policy: MusicPlaybackPolicy
     changed: bool
 
 

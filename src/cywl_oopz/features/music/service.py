@@ -30,13 +30,15 @@ from .models import (
     MusicFailureCode,
     MusicFailureScope,
     MusicPlaybackEndReason,
+    MusicPlaybackPolicy,
     MusicQueueSnapshot,
     MusicTrack,
-    PlaybackMode,
-    PlaybackModeChange,
+    PlaybackOrder,
+    PlaybackPolicyChange,
     PlaybackState,
     QueuedTrack,
     QueueRebuildResult,
+    RepeatPolicy,
     VoiceChannelKey,
 )
 from .ports import MusicCatalog, MusicPlayback, MusicVoiceGateway
@@ -49,15 +51,17 @@ class _MusicSession:
     """Mutable state protected by one voice-channel lock."""
 
     queue: deque[QueuedTrack] = field(default_factory=deque)
+    cycle_history: deque[QueuedTrack] = field(default_factory=deque)
     current: QueuedTrack | None = None
     state: PlaybackState = PlaybackState.IDLE
-    mode: PlaybackMode = PlaybackMode.SEQUENTIAL
+    policy: MusicPlaybackPolicy = field(default_factory=MusicPlaybackPolicy)
     revision: int = 0
     playback: MusicPlayback | None = None
     voice_reserved: bool = False
     worker: asyncio.Task[None] | None = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     skip_requested: asyncio.Event = field(default_factory=asyncio.Event)
+    retain_skipped_for_cycle: bool = False
     idempotent_enqueues: OrderedDict[str, EnqueueResult] = field(default_factory=OrderedDict)
     last_failure: MusicFailure | None = None
 
@@ -171,33 +175,46 @@ class MusicRequestService:
             return MusicQueueSnapshot(
                 voice_channel=channel,
                 state=session.state,
-                mode=session.mode,
+                policy=session.policy,
                 current=session.current,
                 upcoming=tuple(session.queue),
+                cycle_completed_count=len(session.cycle_history),
                 revision=session.revision,
                 last_failure=session.last_failure,
             )
 
-    async def set_mode(
+    async def set_policy(
         self,
         identity: AgentIdentity,
-        mode: PlaybackMode,
-    ) -> PlaybackModeChange:
+        *,
+        order: PlaybackOrder | None = None,
+        repeat: RepeatPolicy | None = None,
+    ) -> PlaybackPolicyChange:
         """Change playback policy for the caller's current voice channel."""
+        if order is None and repeat is None:
+            raise MusicQueryError("At least one music playback policy field is required")
         channel = await self._channel_for(identity)
         session = self._session(channel)
         async with session.lock:
-            changed = session.mode is not mode
+            try:
+                policy = MusicPlaybackPolicy(
+                    order=order or session.policy.order,
+                    repeat=repeat or session.policy.repeat,
+                )
+            except ValueError as exc:
+                raise MusicQueryError(str(exc)) from exc
+            changed = session.policy != policy
             if changed:
-                session.mode = mode
+                session.policy = policy
                 session.revision += 1
         logger.info(
-            "Music playback mode selected: channel=%s mode=%s changed=%s",
+            "Music playback policy selected: channel=%s order=%s repeat=%s changed=%s",
             self._channel_ref(channel),
-            mode.value,
+            policy.order.value,
+            policy.repeat.value,
             changed,
         )
-        return PlaybackModeChange(channel, mode, changed)
+        return PlaybackPolicyChange(channel, policy, changed)
 
     async def replace_queue(
         self,
@@ -216,9 +233,11 @@ class MusicRequestService:
             await self._reserve_voice_locked(channel, session)
             replaced_current = session.current is not None
             session.queue = items
+            session.cycle_history.clear()
             session.idempotent_enqueues.clear()
             session.last_failure = None
             if replaced_current:
+                session.retain_skipped_for_cycle = False
                 session.skip_requested.set()
             else:
                 session.state = PlaybackState.WAITING
@@ -256,6 +275,7 @@ class MusicRequestService:
                 )
                 return False
             session.skip_requested.set()
+            session.retain_skipped_for_cycle = session.policy.repeat is RepeatPolicy.ALL
             session.revision += 1
             playback = session.playback
         if playback is not None:
@@ -385,6 +405,20 @@ class MusicRequestService:
         try:
             while True:
                 async with session.lock:
+                    if (
+                        not session.queue
+                        and session.policy.repeat is RepeatPolicy.ALL
+                        and session.cycle_history
+                    ):
+                        session.queue.extend(session.cycle_history)
+                        session.cycle_history.clear()
+                        session.revision += 1
+                        logger.info(
+                            "Music repeat cycle rebuilt: channel=%s tracks=%s order=%s",
+                            self._channel_ref(channel),
+                            len(session.queue),
+                            session.policy.order.value,
+                        )
                     if not session.queue:
                         session.current = None
                         session.state = PlaybackState.RELEASING
@@ -400,6 +434,9 @@ class MusicRequestService:
                         session.voice_reserved = not released
                         if released:
                             session.state = PlaybackState.IDLE
+                            session.policy = MusicPlaybackPolicy()
+                            session.cycle_history.clear()
+                            session.idempotent_enqueues.clear()
                         else:
                             session.state = PlaybackState.FAILED
                             self._record_failure_locked(
@@ -421,6 +458,7 @@ class MusicRequestService:
                         session.state = PlaybackState.LOADING
                         session.revision += 1
                         session.skip_requested.clear()
+                        session.retain_skipped_for_cycle = False
                 playback: MusicPlayback | None = None
                 completed = False
                 retry_current = False
@@ -583,12 +621,16 @@ class MusicRequestService:
                             session.queue.appendleft(item)
                             session.state = PlaybackState.WAITING
                             session.revision += 1
+                        elif session.retain_skipped_for_cycle:
+                            session.cycle_history.append(item)
+                            backend_retries.pop(item.id, None)
                         else:
                             backend_retries.pop(item.id, None)
                         if session.playback is playback:
                             session.playback = None
                         session.current = None
                         session.skip_requested.clear()
+                        session.retain_skipped_for_cycle = False
                         session.revision += 1
                     logger.debug(
                         "Music playback state reset: channel=%s",
@@ -603,6 +645,7 @@ class MusicRequestService:
                     session.playback = None
                     session.current = None
                     session.skip_requested.clear()
+                    session.retain_skipped_for_cycle = False
                     session.voice_reserved = False
                     if session.worker is asyncio.current_task():
                         session.worker = None
@@ -625,7 +668,7 @@ class MusicRequestService:
                             session.revision += 1
 
     def _take_next(self, session: _MusicSession) -> QueuedTrack:
-        if session.mode is PlaybackMode.SHUFFLE and len(session.queue) > 1:
+        if session.policy.order is PlaybackOrder.SHUFFLE and len(session.queue) > 1:
             index = self._rng.randrange(len(session.queue))
             session.queue.rotate(-index)
             item = session.queue.popleft()
@@ -635,10 +678,10 @@ class MusicRequestService:
 
     @staticmethod
     def _retain_completed(session: _MusicSession, item: QueuedTrack) -> None:
-        if session.mode is PlaybackMode.REPEAT_ONE:
+        if session.policy.repeat is RepeatPolicy.ONE:
             session.queue.appendleft(item)
-        elif session.mode is PlaybackMode.REPEAT_ALL:
-            session.queue.append(item)
+        else:
+            session.cycle_history.append(item)
 
     async def _reserve_voice_locked(
         self,

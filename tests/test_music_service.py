@@ -10,6 +10,8 @@ from cywl_oopz.features.agent.models import AgentIdentity
 from cywl_oopz.features.chat.models import ConversationKey
 from cywl_oopz.features.music.errors import (
     MusicBackendClosedError,
+    MusicCatalogError,
+    MusicQueryError,
     MusicQueueFullError,
     MusicVoiceBusyError,
     MusicVoiceChannelRequiredError,
@@ -18,11 +20,13 @@ from cywl_oopz.features.music.models import (
     MusicFailureCode,
     MusicFailureScope,
     MusicPlaybackEndReason,
+    MusicPlaybackPolicy,
     MusicPlaybackResult,
     MusicTrack,
     PlayableTrack,
-    PlaybackMode,
+    PlaybackOrder,
     PlaybackState,
+    RepeatPolicy,
     VoiceChannelKey,
 )
 from cywl_oopz.features.music.service import MusicRequestService
@@ -438,11 +442,11 @@ async def test_music_service_repeats_one_track_until_skipped() -> None:
     voice = FakeVoice()
     service = MusicRequestService(settings(), FakeCatalog(), voice)
 
-    selected = await service.set_mode(identity(), PlaybackMode.REPEAT_ONE)
-    unchanged = await service.set_mode(identity(), PlaybackMode.REPEAT_ONE)
+    selected = await service.set_policy(identity(), repeat=RepeatPolicy.ONE)
+    unchanged = await service.set_policy(identity(), repeat=RepeatPolicy.ONE)
     assert selected.changed is True
     assert unchanged.changed is False
-    assert (await service.queue(identity())).mode is PlaybackMode.REPEAT_ONE
+    assert (await service.queue(identity())).policy == MusicPlaybackPolicy(repeat=RepeatPolicy.ONE)
 
     await service.enqueue(identity(), "loop")
     await eventually(lambda: len(voice.played) == 1)
@@ -452,7 +456,9 @@ async def test_music_service_repeats_one_track_until_skipped() -> None:
     assert voice.played[0][1] == voice.played[1][1]
     assert await service.skip(identity()) is True
     await eventually(lambda: bool(voice.left))
-    assert (await service.queue(identity())).state.value == "idle"
+    snapshot = await service.queue(identity())
+    assert snapshot.state.value == "idle"
+    assert snapshot.policy == MusicPlaybackPolicy()
 
     await service.aclose()
 
@@ -461,7 +467,7 @@ async def test_music_service_repeats_one_track_until_skipped() -> None:
 async def test_music_service_repeats_the_whole_queue_in_order() -> None:
     voice = FakeVoice()
     service = MusicRequestService(settings(), FakeCatalog(), voice)
-    await service.set_mode(identity(), PlaybackMode.REPEAT_ALL)
+    await service.set_policy(identity(), repeat=RepeatPolicy.ALL)
 
     await service.enqueue(identity(), "first")
     await eventually(lambda: len(voice.played) == 1)
@@ -471,12 +477,128 @@ async def test_music_service_repeats_the_whole_queue_in_order() -> None:
     await eventually(lambda: len(voice.played) == 2)
     voice.current_finished.set()
     await eventually(lambda: len(voice.played) == 3)
+    voice.current_finished.set()
+    await eventually(lambda: len(voice.played) == 4)
+    voice.current_finished.set()
+    await eventually(lambda: len(voice.played) == 5)
 
-    assert [url.rsplit("/", 1)[-1] for _, url in voice.played[:3]] == [
+    assert [url.rsplit("/", 1)[-1] for _, url in voice.played[:5]] == [
+        "first.mp3",
+        "second.mp3",
         "first.mp3",
         "second.mp3",
         "first.mp3",
     ]
+
+    await service.aclose()
+
+
+@pytest.mark.asyncio
+async def test_music_service_combines_shuffle_and_repeat_all_without_replacement() -> None:
+    voice = FakeVoice()
+    service = MusicRequestService(
+        settings(),
+        FakeCatalog(),
+        voice,
+        rng=random.Random(7),
+    )
+    await service.set_policy(
+        identity(),
+        order=PlaybackOrder.SHUFFLE,
+        repeat=RepeatPolicy.ALL,
+    )
+    await service.replace_queue(
+        identity(),
+        tuple(
+            MusicTrack("netease", name, name, ("artist",)) for name in ("first", "second", "third")
+        ),
+    )
+
+    for expected_count in range(1, 7):
+        await eventually(lambda: len(voice.played) == expected_count)
+        voice.current_finished.set()
+    await eventually(lambda: len(voice.played) == 7)
+
+    played = [url.rsplit("/", 1)[-1] for _, url in voice.played]
+    expected_cycle = {"first.mp3", "second.mp3", "third.mp3"}
+    assert set(played[:3]) == expected_cycle
+    assert set(played[3:6]) == expected_cycle
+    assert len(set(played[:3])) == 3
+    assert len(set(played[3:6])) == 3
+    snapshot = await service.queue(identity())
+    assert snapshot.policy == MusicPlaybackPolicy(
+        PlaybackOrder.SHUFFLE,
+        RepeatPolicy.ALL,
+    )
+
+    await service.aclose()
+
+
+@pytest.mark.asyncio
+async def test_music_service_skip_in_repeat_all_returns_only_on_next_cycle() -> None:
+    voice = FakeVoice()
+    service = MusicRequestService(settings(), FakeCatalog(), voice)
+    await service.set_policy(identity(), repeat=RepeatPolicy.ALL)
+
+    await service.enqueue(identity(), "first")
+    await eventually(lambda: len(voice.played) == 1)
+    await service.enqueue(identity(), "second")
+    assert await service.skip(identity()) is True
+    await eventually(lambda: len(voice.played) == 2)
+    assert voice.played[1][1].endswith("/second.mp3")
+
+    voice.current_finished.set()
+    await eventually(lambda: len(voice.played) == 3)
+    assert voice.played[2][1].endswith("/first.mp3")
+
+    await service.aclose()
+
+
+@pytest.mark.asyncio
+async def test_music_service_does_not_repeat_failed_track_in_repeat_all() -> None:
+    class PartiallyBrokenCatalog(FakeCatalog):
+        async def resolve(self, track: MusicTrack) -> PlayableTrack:
+            if track.source_id == "broken":
+                self.resolved.append(track.source_id)
+                raise MusicCatalogError("fixture unavailable track")
+            return await super().resolve(track)
+
+    voice = FakeVoice()
+    catalog = PartiallyBrokenCatalog()
+    service = MusicRequestService(settings(), catalog, voice)
+    await service.set_policy(identity(), repeat=RepeatPolicy.ALL)
+    await service.replace_queue(
+        identity(),
+        (
+            MusicTrack("netease", "broken", "Broken", ("artist",)),
+            MusicTrack("netease", "working", "Working", ("artist",)),
+        ),
+    )
+
+    await eventually(lambda: len(voice.played) == 1)
+    voice.current_finished.set()
+    await eventually(lambda: len(voice.played) == 2)
+
+    assert catalog.resolved == ["broken", "working", "working"]
+    assert all(url.endswith("/working.mp3") for _, url in voice.played)
+    await service.aclose()
+
+
+@pytest.mark.asyncio
+async def test_music_service_updates_policy_dimensions_independently() -> None:
+    service = MusicRequestService(settings(), FakeCatalog(), FakeVoice())
+
+    repeat = await service.set_policy(identity(), repeat=RepeatPolicy.ALL)
+    shuffled = await service.set_policy(identity(), order=PlaybackOrder.SHUFFLE)
+    assert repeat.policy == MusicPlaybackPolicy(repeat=RepeatPolicy.ALL)
+    assert shuffled.policy == MusicPlaybackPolicy(
+        PlaybackOrder.SHUFFLE,
+        RepeatPolicy.ALL,
+    )
+
+    with pytest.raises(MusicQueryError):
+        await service.set_policy(identity(), repeat=RepeatPolicy.ONE)
+    assert (await service.queue(identity())).policy == shuffled.policy
 
     await service.aclose()
 
@@ -490,7 +612,7 @@ async def test_music_service_selects_random_upcoming_tracks_in_shuffle_mode() ->
         voice,
         rng=random.Random(0),
     )
-    await service.set_mode(identity(), PlaybackMode.SHUFFLE)
+    await service.set_policy(identity(), order=PlaybackOrder.SHUFFLE)
 
     await service.enqueue(identity(), "first")
     await eventually(lambda: len(voice.played) == 1)
