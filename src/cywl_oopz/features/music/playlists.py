@@ -24,6 +24,9 @@ from .models import (
     MusicPlaylist,
     MusicPlaylistEntry,
     MusicPlaylistSummary,
+    MusicSourceKind,
+    MusicTrack,
+    MusicTrackReference,
     NeteasePlaylistImport,
     NeteasePlaylistSnapshot,
     PlaylistClear,
@@ -94,14 +97,57 @@ class MusicPlaylistService:
         playlist_id: UUID,
         query: str,
     ) -> MusicPlaylistEntry:
-        area_id = self._area_id(identity)
-        matches = await self._music.search(query, limit=1)
+        """Compatibility wrapper for a default-source text query."""
+        return await self.add_query(identity, playlist_id, query)
+
+    async def add_query(
+        self,
+        identity: AgentIdentity,
+        playlist_id: UUID,
+        query: str,
+        *,
+        source: MusicSourceKind | None = None,
+    ) -> MusicPlaylistEntry:
+        """Search one source, validate the top result, and append its snapshot."""
+        matches = await self._music.search(query, source=source, limit=1)
         if not matches:
             raise MusicNotFoundError("No music matched the query")
+        track = await self._music.lookup(matches[0].reference)
+        return await self._append(identity, playlist_id, track)
+
+    async def add_input(
+        self,
+        identity: AgentIdentity,
+        playlist_id: UUID,
+        value: str,
+        *,
+        source: MusicSourceKind | None = None,
+    ) -> MusicPlaylistEntry:
+        """Append a supported URL/locator or top source-specific text match."""
+        track = await self._music.track_from_input(value, source=source)
+        return await self._append(identity, playlist_id, track)
+
+    async def add_reference(
+        self,
+        identity: AgentIdentity,
+        playlist_id: UUID,
+        reference: MusicTrackReference,
+    ) -> MusicPlaylistEntry:
+        """Append trusted metadata loaded from one exact provider reference."""
+        track = await self._music.lookup(reference)
+        return await self._append(identity, playlist_id, track)
+
+    async def _append(
+        self,
+        identity: AgentIdentity,
+        playlist_id: UUID,
+        track: MusicTrack,
+    ) -> MusicPlaylistEntry:
+        area_id = self._area_id(identity)
         entry = await self._repository.append(
             area_id,
             playlist_id,
-            matches[0],
+            track,
             identity.person_id,
             max_tracks=self._settings.max_playlist_tracks,
         )

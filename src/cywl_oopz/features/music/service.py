@@ -6,6 +6,7 @@ import asyncio
 import logging
 import random
 from collections import OrderedDict, deque
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
 from uuid import UUID
@@ -22,6 +23,7 @@ from .errors import (
     MusicPlaybackError,
     MusicQueryError,
     MusicQueueFullError,
+    MusicReferenceError,
     MusicVoiceBusyError,
     MusicVoiceChannelRequiredError,
 )
@@ -32,9 +34,12 @@ from .models import (
     MusicFailureScope,
     MusicPlaybackEndReason,
     MusicPlaybackPolicy,
+    MusicProviderHealth,
     MusicQueueClearResult,
     MusicQueueSnapshot,
+    MusicSourceKind,
     MusicTrack,
+    MusicTrackReference,
     PlaybackOrder,
     PlaybackPolicyChange,
     PlaybackState,
@@ -44,6 +49,7 @@ from .models import (
     VoiceChannelKey,
 )
 from .ports import MusicCatalog, MusicPlayback, MusicVoiceGateway
+from .references import MusicInputParser
 
 logger = logging.getLogger(__name__)
 
@@ -82,29 +88,69 @@ class MusicRequestService:
         self._settings = settings
         self._catalog = catalog
         self._voice = voice
+        self._input_parser = MusicInputParser()
         self._rng = rng or random.Random()
         self._sessions: dict[VoiceChannelKey, _MusicSession] = {}
         self._closing = False
 
-    async def search(self, query: str, *, limit: int | None = None) -> tuple[MusicTrack, ...]:
+    async def search(
+        self,
+        query: str,
+        *,
+        source: MusicSourceKind | None = None,
+        limit: int | None = None,
+    ) -> tuple[MusicTrack, ...]:
         """Search the configured catalog with deterministic input and result bounds."""
-        normalized = query.strip()
-        if not normalized:
-            raise MusicQueryError("Music search query must not be empty")
-        if len(normalized) > self._settings.max_query_characters:
-            raise MusicQueryError("Music search query is too long")
+        normalized = self._normalize_query(query)
+        normalized_source = MusicSourceKind(source) if source is not None else None
         requested_limit = min(limit or self._settings.search_limit, self._settings.search_limit)
         logger.info(
-            "Music search started: query_characters=%s limit=%s",
+            "Music search started: source=%s query_characters=%s limit=%s",
+            normalized_source.value if normalized_source is not None else "default",
             len(normalized),
             requested_limit,
         )
         matches = await self._catalog.search(
             normalized,
             limit=requested_limit,
+            source=normalized_source,
         )
-        logger.info("Music search completed: result_count=%s", len(matches))
+        logger.info(
+            "Music search completed: source=%s result_count=%s",
+            normalized_source.value if normalized_source is not None else "default",
+            len(matches),
+        )
         return matches
+
+    async def lookup(self, reference: MusicTrackReference) -> MusicTrack:
+        """Load one exact stable reference before it enters a queue or playlist."""
+        return await self._catalog.lookup(reference)
+
+    async def track_from_input(
+        self,
+        value: str,
+        *,
+        source: MusicSourceKind | None = None,
+    ) -> MusicTrack:
+        """Resolve a URL/locator or the top explicit-source text match into trusted metadata."""
+        normalized = value.strip()
+        if not normalized:
+            raise MusicQueryError("Music input must not be empty")
+        selected_source = MusicSourceKind(source) if source is not None else None
+        parsed = self._input_parser.parse(normalized)
+        if parsed is not None:
+            if selected_source is not None and selected_source is not parsed.source:
+                raise MusicReferenceError(
+                    "Music URL source does not match the explicitly selected source"
+                )
+            if isinstance(parsed, MusicTrackReference):
+                return await self._catalog.lookup(parsed)
+            return await self._catalog.inspect(parsed)
+        return await self._track_from_query(normalized, source=selected_source)
+
+    async def health(self) -> tuple[MusicProviderHealth, ...]:
+        """Return independently probed health for every enabled source."""
+        return await self._catalog.health()
 
     async def enqueue(
         self,
@@ -113,7 +159,64 @@ class MusicRequestService:
         *,
         idempotency_key: str = "",
     ) -> EnqueueResult:
-        """Add the top catalog match to the caller's current voice-channel queue."""
+        """Compatibility wrapper accepting either a query or a supported source URL."""
+        return await self.enqueue_input(
+            identity,
+            query,
+            idempotency_key=idempotency_key,
+        )
+
+    async def enqueue_query(
+        self,
+        identity: AgentIdentity,
+        query: str,
+        *,
+        source: MusicSourceKind | None = None,
+        idempotency_key: str = "",
+    ) -> EnqueueResult:
+        """Search one source, validate its top stable reference, and enqueue it."""
+        return await self._enqueue_from(
+            identity,
+            lambda: self._track_from_query(query, source=source),
+            idempotency_key=idempotency_key,
+        )
+
+    async def enqueue_reference(
+        self,
+        identity: AgentIdentity,
+        reference: MusicTrackReference,
+        *,
+        idempotency_key: str = "",
+    ) -> EnqueueResult:
+        """Validate and enqueue one exact provider reference."""
+        return await self._enqueue_from(
+            identity,
+            lambda: self._catalog.lookup(reference),
+            idempotency_key=idempotency_key,
+        )
+
+    async def enqueue_input(
+        self,
+        identity: AgentIdentity,
+        value: str,
+        *,
+        source: MusicSourceKind | None = None,
+        idempotency_key: str = "",
+    ) -> EnqueueResult:
+        """Classify one user value, remotely normalize it, then enqueue trusted metadata."""
+        return await self._enqueue_from(
+            identity,
+            lambda: self.track_from_input(value, source=source),
+            idempotency_key=idempotency_key,
+        )
+
+    async def _enqueue_from(
+        self,
+        identity: AgentIdentity,
+        load_track: Callable[[], Awaitable[MusicTrack]],
+        *,
+        idempotency_key: str,
+    ) -> EnqueueResult:
         channel = await self._channel_for(identity)
         session = self._session(channel)
         if idempotency_key:
@@ -126,10 +229,8 @@ class MusicRequestService:
                         previous.position,
                     )
                     return previous
-        matches = await self.search(query, limit=1)
-        if not matches:
-            raise MusicNotFoundError("No music matched the query")
-        item = QueuedTrack(matches[0], identity.person_id)
+        track = await load_track()
+        item = QueuedTrack(track, identity.person_id)
         async with session.lock:
             if idempotency_key:
                 previous = session.idempotent_enqueues.get(idempotency_key)
@@ -161,6 +262,25 @@ class MusicRequestService:
             started,
         )
         return result
+
+    async def _track_from_query(
+        self,
+        query: str,
+        *,
+        source: MusicSourceKind | None,
+    ) -> MusicTrack:
+        matches = await self.search(query, source=source, limit=1)
+        if not matches:
+            raise MusicNotFoundError("No music matched the query")
+        return await self._catalog.lookup(matches[0].reference)
+
+    def _normalize_query(self, query: str) -> str:
+        normalized = query.strip()
+        if not normalized:
+            raise MusicQueryError("Music search query must not be empty")
+        if len(normalized) > self._settings.max_query_characters:
+            raise MusicQueryError("Music search query is too long")
+        return normalized
 
     async def queue(self, identity: AgentIdentity) -> MusicQueueSnapshot:
         """Return an immutable bounded view for the caller's current voice channel."""

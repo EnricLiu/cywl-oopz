@@ -14,16 +14,20 @@ from cywl_oopz.features.music.errors import (
     MusicDecoderError,
     MusicQueryError,
     MusicQueueFullError,
+    MusicReferenceError,
     MusicVoiceBusyError,
     MusicVoiceChannelRequiredError,
 )
 from cywl_oopz.features.music.models import (
     MusicFailureCode,
     MusicFailureScope,
+    MusicPageLocator,
     MusicPlaybackEndReason,
     MusicPlaybackPolicy,
     MusicPlaybackResult,
+    MusicSourceKind,
     MusicTrack,
+    MusicTrackReference,
     PlayableTrack,
     PlaybackOrder,
     PlaybackState,
@@ -56,17 +60,42 @@ class FakeCatalog:
     def __init__(self) -> None:
         self.closed = False
         self.resolved: list[str] = []
+        self.searched: list[tuple[str, object, int]] = []
+        self.looked_up: list[MusicTrackReference] = []
+        self.inspected: list[MusicPageLocator] = []
 
-    async def search(self, query: str, *, limit: int) -> tuple[MusicTrack, ...]:
+    async def search(
+        self,
+        query: str,
+        *,
+        limit: int,
+        source=None,
+    ) -> tuple[MusicTrack, ...]:
+        source = source or "netease"
+        self.searched.append((query, source, limit))
         return (
             MusicTrack(
-                "netease",
+                source,
                 query,
                 query,
                 ("artist",),
                 1000,
             ),
         )[:limit]
+
+    async def lookup(self, reference: MusicTrackReference) -> MusicTrack:
+        self.looked_up.append(reference)
+        return MusicTrack(
+            reference.source,
+            reference.source_id,
+            reference.source_id,
+            ("artist",),
+            1000,
+        )
+
+    async def inspect(self, locator: MusicPageLocator) -> MusicTrack:
+        self.inspected.append(locator)
+        return MusicTrack(locator.source, "inspected", "inspected", ("artist",), 1000)
 
     async def resolve(self, track: MusicTrack) -> PlayableTrack:
         self.resolved.append(track.source_id)
@@ -292,6 +321,96 @@ async def eventually(predicate, *, attempts: int = 100) -> None:
             return
         await asyncio.sleep(0.001)
     raise AssertionError("condition did not become true")
+
+
+@pytest.mark.asyncio
+async def test_music_service_routes_explicit_source_search_and_validates_top_reference() -> None:
+    catalog = FakeCatalog()
+    service = MusicRequestService(settings(), catalog, FakeVoice())
+
+    result = await service.enqueue_query(
+        identity(),
+        "Tell Your World",
+        source=MusicSourceKind.YOUTUBE,
+    )
+
+    assert result.item.track.source is MusicSourceKind.YOUTUBE
+    assert catalog.searched == [("Tell Your World", MusicSourceKind.YOUTUBE, 1)]
+    assert catalog.looked_up == [MusicTrackReference(MusicSourceKind.YOUTUBE, "Tell Your World")]
+    await service.aclose()
+
+
+@pytest.mark.asyncio
+async def test_music_service_enqueues_stable_urls_without_text_search() -> None:
+    catalog = FakeCatalog()
+    service = MusicRequestService(settings(), catalog, FakeVoice())
+
+    result = await service.enqueue_input(
+        identity(),
+        "https://youtu.be/dQw4w9WgXcQ",
+    )
+
+    assert result.item.track.reference == MusicTrackReference(
+        MusicSourceKind.YOUTUBE,
+        "dQw4w9WgXcQ",
+    )
+    assert catalog.searched == []
+    assert catalog.looked_up == [result.item.track.reference]
+    await service.aclose()
+
+
+@pytest.mark.asyncio
+async def test_music_service_remotely_inspects_transient_bilibili_locator() -> None:
+    catalog = FakeCatalog()
+    service = MusicRequestService(settings(), catalog, FakeVoice())
+
+    result = await service.enqueue_input(identity(), "https://b23.tv/fixture")
+
+    assert result.item.track.source is MusicSourceKind.BILIBILI
+    assert result.item.track.source_id == "inspected"
+    assert len(catalog.inspected) == 1
+    assert catalog.searched == []
+    await service.aclose()
+
+
+@pytest.mark.asyncio
+async def test_music_service_rejects_source_option_that_disagrees_with_url() -> None:
+    voice = FakeVoice()
+    catalog = FakeCatalog()
+    service = MusicRequestService(settings(), catalog, voice)
+
+    with pytest.raises(MusicReferenceError, match="does not match"):
+        await service.enqueue_input(
+            identity(),
+            "https://youtu.be/dQw4w9WgXcQ",
+            source=MusicSourceKind.BILIBILI,
+        )
+
+    assert catalog.looked_up == []
+    assert voice.acquire_calls == []
+    await service.aclose()
+
+
+@pytest.mark.asyncio
+async def test_music_service_reuses_exact_idempotency_before_second_lookup() -> None:
+    catalog = FakeCatalog()
+    service = MusicRequestService(settings(), catalog, FakeVoice())
+    reference = MusicTrackReference(MusicSourceKind.YOUTUBE, "dQw4w9WgXcQ")
+
+    first = await service.enqueue_reference(
+        identity(),
+        reference,
+        idempotency_key="run:youtube:dQw4w9WgXcQ",
+    )
+    repeated = await service.enqueue_reference(
+        identity(),
+        reference,
+        idempotency_key="run:youtube:dQw4w9WgXcQ",
+    )
+
+    assert repeated.item.id == first.item.id
+    assert catalog.looked_up == [reference]
+    await service.aclose()
 
 
 @pytest.mark.asyncio
