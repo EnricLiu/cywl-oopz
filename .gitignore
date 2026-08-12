@@ -8,6 +8,7 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .ruff_cache/
+.cache/
 coverage.xml
 htmlcov/
 

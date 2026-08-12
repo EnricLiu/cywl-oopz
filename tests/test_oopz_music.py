@@ -18,8 +18,14 @@ from cywl_oopz.features.audio.models import (
     VoiceParticipantKind,
     VoiceParticipantRequest,
 )
-from cywl_oopz.features.music.errors import MusicBackendClosedError
-from cywl_oopz.features.music.models import MusicPlaybackEndReason, VoiceChannelKey
+from cywl_oopz.features.music.errors import MusicBackendClosedError, MusicPlaybackError
+from cywl_oopz.features.music.models import (
+    MusicPlaybackEndReason,
+    MusicTrack,
+    PlayableTrack,
+    ResolvedMediaInput,
+    VoiceChannelKey,
+)
 from cywl_oopz.integrations.audio.fake import FakeMasterPcmOutput
 from cywl_oopz.integrations.oopz.music import OopzMusicVoiceGateway
 from cywl_oopz.integrations.oopz.voice_channel_session import OopzVoiceChannelSessionManager
@@ -150,8 +156,8 @@ class FakeDecoderFactory:
     async def validate(self) -> None:
         self.validations += 1
 
-    async def open(self, stream_url: str) -> FakeDecoder:
-        self.urls.append(stream_url)
+    async def open(self, media: ResolvedMediaInput) -> FakeDecoder:
+        self.urls.append(media.url)
         decoder = FakeDecoder()
         self.decoders.append(decoder)
         return decoder
@@ -201,6 +207,14 @@ def pcm_settings() -> AudioMixerSettings:
     return AudioMixerSettings.from_mapping({"CYWL_AUDIO_MIXER_ENABLED": "true"})
 
 
+def playable(url: str) -> PlayableTrack:
+    source_id = url.rsplit("/", 1)[-1]
+    return PlayableTrack(
+        MusicTrack("netease", source_id, source_id, ("artist",)),
+        ResolvedMediaInput(url),
+    )
+
+
 @pytest.mark.asyncio
 async def test_oopz_music_gateway_reuses_one_lease_and_typed_playback() -> None:
     bot = FakeBot()
@@ -211,7 +225,7 @@ async def test_oopz_music_gateway_reuses_one_lease_and_typed_playback() -> None:
     assert await gateway.voice_channel_for_user("area", "person") == "voice"
     assert await gateway.acquire(channel) is True
     assert await gateway.acquire(channel) is True
-    first = await gateway.start_playback(channel, "https://music.example/one.mp3")
+    first = await gateway.start_playback(channel, playable("https://music.example/one.mp3"))
     assert await first.pause() is True
     assert await first.resume() is True
     bot.voice.playbacks[0].finish()
@@ -219,7 +233,7 @@ async def test_oopz_music_gateway_reuses_one_lease_and_typed_playback() -> None:
 
     assert result.end_reason is MusicPlaybackEndReason.FINISHED
     assert result.duration_seconds == 3.5
-    second = await gateway.start_playback(channel, "https://music.example/two.mp3")
+    second = await gateway.start_playback(channel, playable("https://music.example/two.mp3"))
     await second.stop()
 
     assert bot.voice.joins == [{"area": "area", "channel": "voice"}]
@@ -231,6 +245,31 @@ async def test_oopz_music_gateway_reuses_one_lease_and_typed_playback() -> None:
     assert await gateway.release(VoiceChannelKey("area", "other")) is False
     assert await gateway.release(channel) is True
     assert bot.voice.leaves == 1
+
+
+@pytest.mark.asyncio
+async def test_oopz_native_music_rejects_media_that_requires_http_headers() -> None:
+    bot = FakeBot()
+    leases = OopzVoiceChannelSessionManager(bot)
+    gateway = OopzMusicVoiceGateway(bot, leases)
+    channel = VoiceChannelKey("area", "voice")
+    track = MusicTrack("bilibili", "BV1fixture:p=1", "fixture", ("uploader",))
+    source = PlayableTrack(
+        track,
+        ResolvedMediaInput(
+            "https://media.example/audio",
+            (("Referer", "https://www.bilibili.com/video/BV1fixture"),),
+        ),
+    )
+    assert await gateway.acquire(channel) is True
+
+    with pytest.raises(MusicPlaybackError, match="shared audio mixer"):
+        await gateway.start_playback(channel, source)
+
+    assert bot.voice.urls == []
+    await gateway.release(channel)
+    await gateway.aclose()
+    await leases.aclose()
     assert await leases.current() is None
 
     await gateway.aclose()
@@ -254,9 +293,9 @@ async def test_oopz_music_gateway_reuses_one_pcm_master_across_tracks() -> None:
 
     await gateway.validate_capabilities()
     assert await gateway.acquire(channel) is True
-    first = await gateway.start_playback(channel, "https://music.example/one.mp3")
+    first = await gateway.start_playback(channel, playable("https://music.example/one.mp3"))
     first_result = await first.wait_finished()
-    second = await gateway.start_playback(channel, "https://music.example/two.mp3")
+    second = await gateway.start_playback(channel, playable("https://music.example/two.mp3"))
     second_result = await second.wait_finished()
 
     assert first_result.end_reason is MusicPlaybackEndReason.FINISHED
@@ -294,9 +333,9 @@ async def test_oopz_music_gateway_rebuilds_failed_shared_master_for_next_attempt
     channel = VoiceChannelKey("area", "voice")
     assert await gateway.acquire(channel) is True
 
-    failed = await gateway.start_playback(channel, "https://music.example/retry.mp3")
+    failed = await gateway.start_playback(channel, playable("https://music.example/retry.mp3"))
     failed_result = await failed.wait_finished()
-    recovered = await gateway.start_playback(channel, "https://music.example/retry.mp3")
+    recovered = await gateway.start_playback(channel, playable("https://music.example/retry.mp3"))
     recovered_result = await recovered.wait_finished()
 
     assert failed_result.end_reason is MusicPlaybackEndReason.BACKEND_CLOSED
@@ -329,8 +368,8 @@ async def test_oopz_music_gateway_maps_master_open_failure_and_tracks_retry() ->
     assert await gateway.acquire(channel) is True
 
     with pytest.raises(MusicBackendClosedError, match="backend closed"):
-        await gateway.start_playback(channel, "https://music.example/retry.mp3")
-    recovered = await gateway.start_playback(channel, "https://music.example/retry.mp3")
+        await gateway.start_playback(channel, playable("https://music.example/retry.mp3"))
+    recovered = await gateway.start_playback(channel, playable("https://music.example/retry.mp3"))
     assert (await recovered.wait_finished()).end_reason is MusicPlaybackEndReason.FINISHED
 
     assert gateway._bus is not None
@@ -399,7 +438,7 @@ async def test_oopz_music_gateway_close_retries_failed_lease_release() -> None:
     gateway = OopzMusicVoiceGateway(bot, leases)
     channel = VoiceChannelKey("area", "voice")
     assert await gateway.acquire(channel) is True
-    await gateway.start_playback(channel, "https://music.example/retry.mp3")
+    await gateway.start_playback(channel, playable("https://music.example/retry.mp3"))
     bot.voice.leave_error = RuntimeError("fixture leave failure")
 
     await gateway.aclose()
@@ -428,7 +467,7 @@ async def test_oopz_music_playback_finishes_when_voice_generation_is_invalidated
     assert await gateway.acquire(channel) is True
     playback = await gateway.start_playback(
         channel,
-        "https://music.example/stuck.mp3",
+        playable("https://music.example/stuck.mp3"),
     )
 
     waiting = asyncio.create_task(playback.wait_finished())

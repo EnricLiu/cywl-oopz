@@ -18,8 +18,8 @@ CYWL——虚拟歌手初音未来（Hatsune Miku）的形象与用户互动，�
 - **有状态的 Agent**：可按会话选择 Provider 和模型、压缩长对话、保存用户主动启用的
   记忆、加载持久化技能，并且只调用经策略授权的工具。可选地将 Agent 进度持续更新在
   一条 OOPZ 回复中。
-- **语音频道音乐播放**：搜索兼容 NeteaseCloudMusicApi 的曲库、为每个语音频道维护
-  串行队列、控制播放，并管理或导入歌单。
+- **语音频道音乐播放**：搜索网易云、YouTube 或 Bilibili，通过隔离的 `yt-dlp`
+  worker 解析受支持的单曲链接，为每个语音频道维护串行队列，并管理混合来源歌单。
 - **联网研究**：无需 API Key 即可使用 DuckDuckGo 搜索；可选用隔离的
   `agent-browser` MCP 会话阅读网页。浏览器交互还需要单独启用并受频道策略控制。
 - **语音频道对话（实验性）**：借助 Qwen Omni/Audio 提供实时 STT/LLM/TTS 对话，拥有
@@ -34,7 +34,7 @@ CYWL——虚拟歌手初音未来（Hatsune Miku）的形象与用户互动，�
 - PostgreSQL 14+ 或兼容的服务端
 - 通过 SDK 支持的登录流程获得的 OOPZ 账号凭据
 - 可选：用于网页工具的 Node.js 与 `agent-browser` 0.33.x
-- 可选：用于 PCM 音频混合路径的 FFmpeg
+- 可选：用于 YouTube/Bilibili 音频的 FFmpeg 与 Deno 2.3+（或 Node.js 22+）
 
 ## 安装
 
@@ -117,7 +117,7 @@ agent-browser install
 | --- | --- | --- |
 | `CYWL_CHAT_ENABLED` | `false` | 启用 Legacy 直接 LLM 对话；需要 `CYWL_LLM_*`。 |
 | `CYWL_AGENT_MODE` | `legacy` | 设置为 `agent` 以使用数据库中的 Provider/模型目录。 |
-| `CYWL_MUSIC_ENABLED` | `false` | 需要兼容 NeteaseCloudMusicApi 的服务端。 |
+| `CYWL_MUSIC_ENABLED` | `false` | 启用 `CYWL_MUSIC_SOURCES` 中配置的来源；网易云需要 API 服务，YouTube/Bilibili 需要 PCM 混音器、FFmpeg 和受支持的 JavaScript runtime。 |
 | `CYWL_AUDIO_MIXER_ENABLED` | `false` | 启用 PCM 混音路径；需要兼容的 FFmpeg 二进制文件。 |
 | `CYWL_WEB_SEARCH_ENABLED` | `true` | 启用 DuckDuckGo 搜索工具；不需要 API Key。 |
 | `CYWL_WEB_BROWSER_ENABLED` | `false` | 需要 `PATH` 中存在 `agent-browser`，并已安装其浏览器。 |
@@ -148,9 +148,15 @@ Agent 工具权限取决于应用级白名单（`CYWL_AGENT_ENABLED_TOOLS`）、
 | `/tool <名称> [JSON]` | Agent 模式 | 查看工具 Schema，或直接调用获授权的工具。 |
 | `/memory …` | Agent 模式 | 查看、保存、停用或删除调用者的长期记忆。 |
 | `/skills` | Agent 模式且已启用技能 | 列出调用者可用的技能。 |
+| `/music …` | 已启用音乐 | 按关键词或 URL 搜索/点歌，查看来源和队列，设置模式并管理 area 歌单。文字查询可在内容前用 `--source youtube\|bilibili\|netease` 覆盖默认来源。 |
 | `/voice start\|stop\|status\|models\|model\|voice` | 已启用语音 | 控制实验性实时语音对话。 |
 
 `/voice` 同时需要 `CYWL_VOICE_ENABLED=true`，以及 PostgreSQL 中有效的语音配置和频道策略。
+
+多来源音乐通过 `CYWL_MUSIC_SOURCES` 和 `CYWL_MUSIC_DEFAULT_SOURCE` 配置。普通文字查询
+使用默认来源；受支持的网易云、YouTube、Bilibili 与 `b23.tv` 单曲 URL 会自动识别。
+YouTube/Bilibili 提取在有界子进程中运行，并要求 `CYWL_AUDIO_MIXER_ENABLED=true`。
+需要登录态的内容可选用浏览器 Cookie 导出文件，但不要将这些文件提交到 Git。
 
 ## 项目结构
 
@@ -190,6 +196,16 @@ uv run ruff check . --exclude sdk
 uv run pytest --ignore sdk
 uv run alembic upgrade head
 ```
+
+YouTube 与 Bilibili PCM 验收默认跳过，且不会加入 OOPZ 语音频道；需要联网验收时运行：
+
+```bash
+CYWL_RUN_LIVE_YOUTUBE_PCM_TESTS=1 uv run pytest tests/test_youtube_music_live.py
+CYWL_RUN_LIVE_BILIBILI_PCM_TESTS=1 uv run pytest tests/test_bilibili_music_live.py
+```
+
+升级 `yt-dlp` 时应更新 `uv.lock`，先运行 provider/worker 单元测试，再用部署环境配置的
+JavaScript runtime 与 FFmpeg 跑完这两项公网 PCM gate，最后再发布新的 lock。
 
 真实 OOPZ 与 Qwen 测试是可选的、依赖凭据的测试，由 `.env.example` 中说明的
 `CYWL_RUN_LIVE_*` 变量控制；默认会跳过。

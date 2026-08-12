@@ -15,6 +15,7 @@ from cywl_oopz.settings import (
     VoiceSettings,
     WebSearchSafeSearch,
     WebToolsSettings,
+    YtDlpMusicSettings,
 )
 
 
@@ -279,6 +280,72 @@ def test_enabled_music_requires_http_catalog_and_loads_bounds() -> None:
     assert settings.search_limit == 7
     assert settings.max_queue_length == 12
     assert settings.max_playlist_tracks == 1000
+    assert settings.enabled_sources == ("netease",)
+    assert settings.default_source == "netease"
+    assert settings.max_track_duration_seconds == 10_800
+
+
+def test_music_sources_validate_default_and_require_pcm_for_ytdlp() -> None:
+    youtube = MusicSettings.from_mapping(
+        {
+            "CYWL_MUSIC_ENABLED": "true",
+            "CYWL_MUSIC_SOURCES": "youtube",
+            "CYWL_MUSIC_DEFAULT_SOURCE": "youtube",
+            "CYWL_AUDIO_MIXER_ENABLED": "true",
+        }
+    )
+    assert youtube.catalog_base_url == ""
+    assert youtube.enabled_sources == ("youtube",)
+
+    with pytest.raises(ConfigurationError, match="AUDIO_MIXER_ENABLED"):
+        MusicSettings.from_mapping(
+            {
+                "CYWL_MUSIC_ENABLED": "true",
+                "CYWL_MUSIC_SOURCES": "bilibili",
+                "CYWL_MUSIC_DEFAULT_SOURCE": "bilibili",
+            }
+        )
+    with pytest.raises(ConfigurationError, match="must be enabled"):
+        MusicSettings.from_mapping(
+            {
+                "CYWL_MUSIC_SOURCES": "youtube",
+                "CYWL_MUSIC_DEFAULT_SOURCE": "netease",
+            }
+        )
+    with pytest.raises(ConfigurationError, match="duplicates"):
+        MusicSettings.from_mapping({"CYWL_MUSIC_SOURCES": "netease,netease"})
+
+
+def test_ytdlp_music_settings_load_and_bound_worker_resources() -> None:
+    settings = YtDlpMusicSettings.from_mapping(
+        {
+            "CYWL_MUSIC_YTDLP_SEARCH_TIMEOUT_SECONDS": "12",
+            "CYWL_MUSIC_YTDLP_PROCESS_TIMEOUT_SECONDS": "18",
+            "CYWL_MUSIC_YTDLP_SOCKET_TIMEOUT_SECONDS": "7",
+            "CYWL_MUSIC_YTDLP_STOP_TIMEOUT_SECONDS": "0.5",
+            "CYWL_MUSIC_YTDLP_MAX_CONCURRENCY": "3",
+            "CYWL_MUSIC_YTDLP_MAX_AUDIO_BITRATE_KBPS": "160",
+            "CYWL_MUSIC_YTDLP_CACHE_DIR": "/tmp/cywl-ytdlp-test-cache",
+            "CYWL_MUSIC_YTDLP_JS_RUNTIME": "node",
+            "CYWL_MUSIC_YTDLP_JS_RUNTIME_PATH": "/opt/node",
+            "CYWL_MUSIC_YOUTUBE_PLAYER_CLIENTS": "mweb,web_safari",
+        }
+    )
+
+    assert settings.search_timeout_seconds == 12
+    assert settings.process_timeout_seconds == 18
+    assert settings.socket_timeout_seconds == 7
+    assert settings.stop_timeout_seconds == 0.5
+    assert settings.max_concurrency == 3
+    assert settings.max_audio_bitrate_kbps == 160
+    assert settings.js_runtime == "node"
+    assert settings.js_runtime_path == "/opt/node"
+    assert settings.youtube_player_clients == ("mweb", "web_safari")
+
+    with pytest.raises(ConfigurationError, match="MAX_CONCURRENCY"):
+        YtDlpMusicSettings.from_mapping({"CYWL_MUSIC_YTDLP_MAX_CONCURRENCY": "9"})
+    with pytest.raises(ConfigurationError, match="YOUTUBE_PLAYER_CLIENTS"):
+        YtDlpMusicSettings.from_mapping({"CYWL_MUSIC_YOUTUBE_PLAYER_CLIENTS": "mweb,mweb"})
 
 
 def test_audio_mixer_settings_load_and_validate_pcm_bounds() -> None:

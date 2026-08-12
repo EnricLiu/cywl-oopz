@@ -125,11 +125,16 @@ from .features.chat.provider import ChatProvider, DisabledChatProvider
 from .features.chat.repository import SqlAlchemyConversationRepository
 from .features.chat.service import ChatService
 from .features.chat.tasks import ChatTaskSupervisor
+from .features.music.bilibili import BilibiliMusicProvider
+from .features.music.catalog import CompositeMusicCatalog, MusicProviderRegistry
 from .features.music.commands import MusicCommand
-from .features.music.netease import NeteaseMusicCatalog
+from .features.music.errors import MusicSourceUnavailableError
+from .features.music.models import MusicSourceKind
+from .features.music.netease import NeteaseMusicProvider
 from .features.music.playlist_repository import SqlAlchemyMusicPlaylistRepository
 from .features.music.playlists import MusicPlaylistService
 from .features.music.service import MusicRequestService
+from .features.music.youtube import YouTubeMusicProvider
 from .features.voice.commands import VoiceCommand
 from .features.voice.repository import (
     SqlAlchemyVoiceConfigurationRepository,
@@ -141,6 +146,7 @@ from .features.voice.task_tools import VoiceTaskControlTools
 from .features.web.browser import BrowserSessionManager
 from .features.web.errors import BrowserError
 from .features.web.service import WebSearchService
+from .integrations.media.ytdlp_runner import YtDlpCapabilityProbe, YtDlpProcessRunner
 from .integrations.oopz.agent_presenter import OopzAgentPresenterFactory
 from .integrations.oopz.chat_invocation import OopzChatInvocationFactory
 from .integrations.oopz.editable_messages import OopzEditableMessageGateway
@@ -250,7 +256,10 @@ class BotApplication:
             ),
         ]
         self.music: MusicRequestService | None = None
-        self.music_catalog: NeteaseMusicCatalog | None = None
+        self.music_catalog: CompositeMusicCatalog | None = None
+        self.netease_music_provider: NeteaseMusicProvider | None = None
+        self.bilibili_music_provider: BilibiliMusicProvider | None = None
+        self.youtube_music_provider: YouTubeMusicProvider | None = None
         self.music_playlists: MusicPlaylistService | None = None
         enabled_agent_tools = settings.agent.enabled_tools
         if settings.agent.skills_enabled:
@@ -265,8 +274,38 @@ class BotApplication:
                 name for name in enabled_agent_tools if name not in SKILL_AGENT_TOOLS
             )
         self.music_voice: OopzMusicVoiceGateway | None = None
+        self.music_ytdlp_runner: YtDlpProcessRunner | None = None
         if settings.music.enabled:
-            self.music_catalog = NeteaseMusicCatalog(settings.music)
+            if any(
+                source in {MusicSourceKind.YOUTUBE, MusicSourceKind.BILIBILI}
+                for source in settings.music.enabled_sources
+            ):
+                self.music_ytdlp_runner = YtDlpProcessRunner(settings.music_ytdlp)
+            music_providers = []
+            for source in settings.music.enabled_sources:
+                if source is MusicSourceKind.NETEASE:
+                    self.netease_music_provider = NeteaseMusicProvider(settings.music)
+                    music_providers.append(self.netease_music_provider)
+                elif source is MusicSourceKind.BILIBILI:
+                    assert self.music_ytdlp_runner is not None
+                    self.bilibili_music_provider = BilibiliMusicProvider(
+                        settings.music,
+                        settings.music_ytdlp,
+                        self.music_ytdlp_runner,
+                    )
+                    music_providers.append(self.bilibili_music_provider)
+                elif source is MusicSourceKind.YOUTUBE:
+                    assert self.music_ytdlp_runner is not None
+                    self.youtube_music_provider = YouTubeMusicProvider(
+                        settings.music,
+                        settings.music_ytdlp,
+                        self.music_ytdlp_runner,
+                    )
+                    music_providers.append(self.youtube_music_provider)
+            self.music_catalog = CompositeMusicCatalog(
+                MusicProviderRegistry(music_providers),
+                settings.music.default_source,
+            )
             self.music_voice = OopzMusicVoiceGateway(
                 self.bot,
                 self.voice_channel_sessions,
@@ -281,7 +320,7 @@ class BotApplication:
                 settings.music,
                 SqlAlchemyMusicPlaylistRepository(self.database.session_factory),
                 self.music,
-                self.music_catalog,
+                self.netease_music_provider,
             )
             music_tool_options = {
                 "timeout_seconds": settings.agent.tool_timeout_seconds,
@@ -688,6 +727,29 @@ class BotApplication:
                 )
             if self.music_voice is not None:
                 await self.music_voice.validate_capabilities()
+            if self.music_ytdlp_runner is not None:
+                probe = YtDlpCapabilityProbe(self.music_ytdlp_runner)
+                try:
+                    capabilities = await probe.validate(require_javascript=False)
+                    logger.info(
+                        "yt-dlp worker capability validated: version=%s",
+                        capabilities.get("yt_dlp", "unknown"),
+                    )
+                except MusicSourceUnavailableError as exc:
+                    self.health.mark("music:ytdlp", HealthState.DEGRADED, str(exc))
+                    logger.warning(
+                        "yt-dlp worker capability unavailable: error=%s",
+                        exception_kind(exc),
+                    )
+                if MusicSourceKind.YOUTUBE in self.settings.music.enabled_sources:
+                    try:
+                        await probe.validate(require_javascript=True)
+                    except MusicSourceUnavailableError as exc:
+                        self.health.mark("music:youtube", HealthState.DEGRADED, str(exc))
+                        logger.warning(
+                            "YouTube JavaScript capability unavailable: error=%s",
+                            exception_kind(exc),
+                        )
             try:
                 await self.database.start()
             except DatabaseError:
@@ -769,6 +831,8 @@ class BotApplication:
             await self.delegated_task_text_fallback.aclose()
             if self.music is not None:
                 await self.music.aclose()
+            if self.music_ytdlp_runner is not None:
+                await self.music_ytdlp_runner.aclose()
             await self.voice_channel_sessions.aclose()
             if self.browser is not None:
                 await self.browser.aclose()

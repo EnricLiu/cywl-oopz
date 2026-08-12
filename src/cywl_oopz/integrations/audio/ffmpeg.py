@@ -24,6 +24,7 @@ from cywl_oopz.features.music.errors import (
     MusicDecoderError,
     MusicDecoderUnavailableError,
 )
+from cywl_oopz.features.music.models import ResolvedMediaInput
 from cywl_oopz.settings import AudioMixerSettings
 
 logger = logging.getLogger(__name__)
@@ -132,14 +133,12 @@ class FfmpegMusicDecoderFactory:
             if self._resolved_executable is None:
                 self._resolved_executable = await self._probe.validate()
 
-    async def open(self, stream_url: str) -> FfmpegMusicDecoder:
-        if not stream_url.strip():
-            raise ValueError("FFmpeg music stream URL must not be empty")
+    async def open(self, media: ResolvedMediaInput) -> FfmpegMusicDecoder:
         await self.validate()
         assert self._resolved_executable is not None
         return await FfmpegMusicDecoder.open(
             self._resolved_executable,
-            stream_url,
+            media,
             self._settings,
             process_factory=self._process_factory,
         )
@@ -178,12 +177,12 @@ class FfmpegMusicDecoder:
     async def open(
         cls,
         executable: str,
-        stream_url: str,
+        media: ResolvedMediaInput,
         settings: AudioMixerSettings,
         *,
         process_factory: _ProcessFactory = asyncio.create_subprocess_exec,
     ) -> FfmpegMusicDecoder:
-        command = cls.command(executable, stream_url, settings)
+        command = cls.command(executable, media, settings)
         try:
             process = await process_factory(
                 *command,
@@ -197,7 +196,7 @@ class FfmpegMusicDecoder:
             raise MusicDecoderError(
                 f"Could not start FFmpeg decoder: {exception_kind(exc)}"
             ) from exc
-        decoder = cls(process, stream_url, settings)
+        decoder = cls(process, media.url, settings)
         try:
             async with asyncio.timeout(settings.decoder_start_timeout_seconds):
                 decoder._prefetched = await decoder._read_block()
@@ -215,7 +214,7 @@ class FfmpegMusicDecoder:
     @staticmethod
     def command(
         executable: str,
-        stream_url: str,
+        media: ResolvedMediaInput,
         settings: AudioMixerSettings,
     ) -> tuple[str, ...]:
         rw_timeout_us = max(1, round(settings.decoder_read_timeout_seconds * 1_000_000))
@@ -227,7 +226,7 @@ class FfmpegMusicDecoder:
             "warning",
             "-stats",
         ]
-        if urlparse(stream_url).scheme.casefold() in {"http", "https"}:
+        if urlparse(media.url).scheme.casefold() in {"http", "https"}:
             command.extend(
                 (
                     "-rw_timeout",
@@ -242,12 +241,26 @@ class FfmpegMusicDecoder:
                     "1",
                     "-reconnect_delay_max",
                     "2",
+                    "-reconnect_max_retries",
+                    "3",
+                    "-reconnect_delay_total_max",
+                    "10",
                 )
             )
+            headers = dict(media.http_headers)
+            if user_agent := headers.pop("User-Agent", None):
+                command.extend(("-user_agent", user_agent))
+            if referer := headers.pop("Referer", None):
+                command.extend(("-referer", referer))
+            if headers:
+                serialized_headers = "".join(
+                    f"{name}: {value}\r\n" for name, value in headers.items()
+                )
+                command.extend(("-headers", serialized_headers))
         command.extend(
             (
                 "-i",
-                stream_url,
+                media.url,
                 "-map",
                 "0:a:0",
                 "-vn",

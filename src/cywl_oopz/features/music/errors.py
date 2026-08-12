@@ -13,6 +13,58 @@ class MusicCatalogError(MusicError):
     """Raised when the configured catalog cannot return a valid result."""
 
 
+class MusicSourceDisabledError(MusicCatalogError):
+    """Raised when a valid request targets a provider not enabled by this deployment."""
+
+
+class MusicSourceUnavailableError(MusicCatalogError):
+    """Raised when an enabled provider cannot currently serve requests."""
+
+
+class MusicExtractionTimeoutError(MusicSourceUnavailableError):
+    """Raised when a bounded yt-dlp operation does not settle in time."""
+
+
+class MusicExtractorProcessError(MusicSourceUnavailableError):
+    """Raised when the isolated extractor worker exits without a valid response."""
+
+
+class MusicExtractorProtocolError(MusicSourceUnavailableError):
+    """Raised when the isolated worker violates the project JSON protocol."""
+
+
+class MusicAuthenticationRequiredError(MusicCatalogError):
+    """Raised when a source requires credentials that are not configured or valid."""
+
+
+class MusicGeoRestrictedError(MusicCatalogError):
+    """Raised when media is unavailable from the bot's current region."""
+
+
+class MusicSourceRateLimitedError(MusicSourceUnavailableError):
+    """Raised when a source asks the caller to retry later."""
+
+
+class MusicLiveUnsupportedError(MusicCatalogError):
+    """Raised when a live or upcoming stream is outside the playback policy."""
+
+
+class MusicUnsupportedContentError(MusicCatalogError):
+    """Raised for DRM, collections, interactive video, or another excluded shape."""
+
+
+class MusicNoAudioFormatError(MusicCatalogError):
+    """Raised when extraction cannot produce one supported audio input."""
+
+
+class MusicTrackTooLongError(MusicCatalogError):
+    """Raised when trusted metadata exceeds the configured duration bound."""
+
+
+class MusicReferenceError(MusicError):
+    """Raised when a music URL or stable provider identifier is invalid."""
+
+
 class MusicQueryError(MusicError):
     """Raised when a music query is empty or exceeds project bounds."""
 

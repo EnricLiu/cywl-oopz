@@ -60,7 +60,7 @@ async def test_live_netease_stream_decodes_to_bounded_canonical_pcm() -> None:
 
         factory = FfmpegMusicDecoderFactory(audio_settings)
         started_at = time.monotonic()
-        decoder = await factory.open(playable.stream_url)
+        decoder = await factory.open(playable.media)
         startup_ms = (time.monotonic() - started_at) * 1_000
         decoded_frames = 0
         block_count = 0

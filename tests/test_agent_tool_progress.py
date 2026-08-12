@@ -265,6 +265,67 @@ def test_browser_and_music_results_have_compact_human_summaries() -> None:
     assert "source_id" not in repr(music)
 
 
+def test_music_progress_carries_source_through_requests_results_and_errors() -> None:
+    catalog = ToolProgressCatalog()
+
+    search_request = catalog.request(
+        "search_music_catalog",
+        {"query": "初音未来 新闻", "source": "youtube", "limit": 3},
+    )
+    url_request = catalog.request(
+        "enqueue_music",
+        {"query": "https://www.bilibili.com/video/BV1xx411c7mD", "source": "auto"},
+    )
+    exact_request = catalog.request(
+        "add_music_playlist_track",
+        {"playlist_id": "private", "track": {"source": "netease", "source_id": "39"}},
+    )
+    search_result = catalog.result(
+        "search_music_catalog",
+        {
+            "ok": True,
+            "data": {
+                "tracks": [
+                    {
+                        "source": "youtube",
+                        "source_id": "private",
+                        "title": "39",
+                    }
+                ]
+            },
+        },
+        succeeded=True,
+    )
+    enqueue_result = catalog.result(
+        "enqueue_music",
+        {
+            "ok": True,
+            "data": {
+                "position": 1,
+                "track": {
+                    "source": "bilibili",
+                    "source_id": "private",
+                    "title": "39",
+                },
+            },
+        },
+        succeeded=True,
+    )
+    failed = catalog.result(
+        "enqueue_music",
+        {"ok": False, "error": "music_rate_limited"},
+        succeeded=False,
+    )
+
+    assert search_request.subject == "YouTube · 「初音未来 新闻」"
+    assert url_request.subject.startswith("Bilibili · https://www.bilibili.com/")
+    assert exact_request.subject == "网易云 · 39"
+    assert search_result.summary == "YouTube · 找到 1 首歌曲"
+    assert enqueue_result.summary == "Bilibili · 歌曲「39」 · 队列第 1 位"
+    assert failed.summary == "音乐来源请求过于频繁"
+    assert "private" not in repr((search_result, enqueue_result))
+
+
 def test_web_page_request_uses_host_and_result_exposes_bounded_preview() -> None:
     catalog = ToolProgressCatalog()
 

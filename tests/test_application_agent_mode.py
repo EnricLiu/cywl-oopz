@@ -18,6 +18,7 @@ from cywl_oopz.features.agent.models import (
     ProviderProtocol,
 )
 from cywl_oopz.features.chat.commands import ModelCommand
+from cywl_oopz.features.music.models import MusicSourceKind
 from cywl_oopz.features.web.errors import BrowserUnavailableError
 from cywl_oopz.settings import AppSettings
 
@@ -175,6 +176,68 @@ async def test_composition_root_registers_music_tools_only_when_music_is_enabled
         await application.agent_engine.aclose()
         await application._provider.aclose()
         await application.database.close()
+
+
+@pytest.mark.asyncio
+async def test_composition_root_builds_only_enabled_bilibili_provider(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(application_module, "OopzBot", FakeOopzBot)
+    application = BotApplication(
+        settings(
+            "agent",
+            CYWL_MUSIC_ENABLED="true",
+            CYWL_MUSIC_SOURCES="bilibili",
+            CYWL_MUSIC_DEFAULT_SOURCE="bilibili",
+            CYWL_AUDIO_MIXER_ENABLED="true",
+        )
+    )
+
+    assert application.netease_music_provider is None
+    assert application.bilibili_music_provider is not None
+    assert application.music_catalog is not None
+    assert application.music_catalog.sources == (MusicSourceKind.BILIBILI,)
+    assert application.music_catalog.default_source is MusicSourceKind.BILIBILI
+    assert application.music_ytdlp_runner is not None
+
+    assert application.music is not None
+    await application.music.aclose()
+    await application.music_ytdlp_runner.aclose()
+    await application.agent_engine.aclose()
+    await application._provider.aclose()
+    await application.database.close()
+
+
+@pytest.mark.asyncio
+async def test_composition_root_builds_only_enabled_youtube_provider(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(application_module, "OopzBot", FakeOopzBot)
+    application = BotApplication(
+        settings(
+            "agent",
+            CYWL_MUSIC_ENABLED="true",
+            CYWL_MUSIC_SOURCES="youtube",
+            CYWL_MUSIC_DEFAULT_SOURCE="youtube",
+            CYWL_MUSIC_YTDLP_JS_RUNTIME="node",
+            CYWL_AUDIO_MIXER_ENABLED="true",
+        )
+    )
+
+    assert application.netease_music_provider is None
+    assert application.bilibili_music_provider is None
+    assert application.youtube_music_provider is not None
+    assert application.music_catalog is not None
+    assert application.music_catalog.sources == (MusicSourceKind.YOUTUBE,)
+    assert application.music_catalog.default_source is MusicSourceKind.YOUTUBE
+    assert application.music_ytdlp_runner is not None
+
+    assert application.music is not None
+    await application.music.aclose()
+    await application.music_ytdlp_runner.aclose()
+    await application.agent_engine.aclose()
+    await application._provider.aclose()
+    await application.database.close()
 
 
 @pytest.mark.asyncio

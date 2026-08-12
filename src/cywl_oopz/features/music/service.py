@@ -6,6 +6,7 @@ import asyncio
 import logging
 import random
 from collections import OrderedDict, deque
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
 from uuid import UUID
@@ -17,10 +18,12 @@ from cywl_oopz.settings import MusicSettings
 from .errors import (
     MusicBackendClosedError,
     MusicCatalogError,
+    MusicDecoderError,
     MusicNotFoundError,
     MusicPlaybackError,
     MusicQueryError,
     MusicQueueFullError,
+    MusicReferenceError,
     MusicVoiceBusyError,
     MusicVoiceChannelRequiredError,
 )
@@ -31,9 +34,13 @@ from .models import (
     MusicFailureScope,
     MusicPlaybackEndReason,
     MusicPlaybackPolicy,
+    MusicProviderHealth,
     MusicQueueClearResult,
     MusicQueueSnapshot,
+    MusicSourceKind,
     MusicTrack,
+    MusicTrackReference,
+    PlayableTrack,
     PlaybackOrder,
     PlaybackPolicyChange,
     PlaybackState,
@@ -43,6 +50,7 @@ from .models import (
     VoiceChannelKey,
 )
 from .ports import MusicCatalog, MusicPlayback, MusicVoiceGateway
+from .references import MusicInputParser
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +66,7 @@ class _MusicSession:
     policy: MusicPlaybackPolicy = field(default_factory=MusicPlaybackPolicy)
     revision: int = 0
     playback: MusicPlayback | None = None
+    resolve_task: asyncio.Task[PlayableTrack] | None = None
     voice_reserved: bool = False
     worker: asyncio.Task[None] | None = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -81,29 +90,77 @@ class MusicRequestService:
         self._settings = settings
         self._catalog = catalog
         self._voice = voice
+        self._input_parser = MusicInputParser()
         self._rng = rng or random.Random()
         self._sessions: dict[VoiceChannelKey, _MusicSession] = {}
         self._closing = False
 
-    async def search(self, query: str, *, limit: int | None = None) -> tuple[MusicTrack, ...]:
+    @property
+    def default_source(self) -> MusicSourceKind:
+        return self._settings.default_source
+
+    @property
+    def enabled_sources(self) -> tuple[MusicSourceKind, ...]:
+        return self._settings.enabled_sources
+
+    async def search(
+        self,
+        query: str,
+        *,
+        source: MusicSourceKind | None = None,
+        limit: int | None = None,
+    ) -> tuple[MusicTrack, ...]:
         """Search the configured catalog with deterministic input and result bounds."""
-        normalized = query.strip()
-        if not normalized:
-            raise MusicQueryError("Music search query must not be empty")
-        if len(normalized) > self._settings.max_query_characters:
-            raise MusicQueryError("Music search query is too long")
+        normalized = self._normalize_query(query)
+        normalized_source = MusicSourceKind(source) if source is not None else None
         requested_limit = min(limit or self._settings.search_limit, self._settings.search_limit)
         logger.info(
-            "Music search started: query_characters=%s limit=%s",
+            "Music search started: source=%s query_characters=%s limit=%s",
+            normalized_source.value if normalized_source is not None else "default",
             len(normalized),
             requested_limit,
         )
         matches = await self._catalog.search(
             normalized,
             limit=requested_limit,
+            source=normalized_source,
         )
-        logger.info("Music search completed: result_count=%s", len(matches))
+        logger.info(
+            "Music search completed: source=%s result_count=%s",
+            normalized_source.value if normalized_source is not None else "default",
+            len(matches),
+        )
         return matches
+
+    async def lookup(self, reference: MusicTrackReference) -> MusicTrack:
+        """Load one exact stable reference before it enters a queue or playlist."""
+        return await self._catalog.lookup(reference)
+
+    async def track_from_input(
+        self,
+        value: str,
+        *,
+        source: MusicSourceKind | None = None,
+    ) -> MusicTrack:
+        """Resolve a URL/locator or the top explicit-source text match into trusted metadata."""
+        normalized = value.strip()
+        if not normalized:
+            raise MusicQueryError("Music input must not be empty")
+        selected_source = MusicSourceKind(source) if source is not None else None
+        parsed = self._input_parser.parse(normalized)
+        if parsed is not None:
+            if selected_source is not None and selected_source is not parsed.source:
+                raise MusicReferenceError(
+                    "Music URL source does not match the explicitly selected source"
+                )
+            if isinstance(parsed, MusicTrackReference):
+                return await self._catalog.lookup(parsed)
+            return await self._catalog.inspect(parsed)
+        return await self._track_from_query(normalized, source=selected_source)
+
+    async def health(self) -> tuple[MusicProviderHealth, ...]:
+        """Return independently probed health for every enabled source."""
+        return await self._catalog.health()
 
     async def enqueue(
         self,
@@ -112,7 +169,64 @@ class MusicRequestService:
         *,
         idempotency_key: str = "",
     ) -> EnqueueResult:
-        """Add the top catalog match to the caller's current voice-channel queue."""
+        """Compatibility wrapper accepting either a query or a supported source URL."""
+        return await self.enqueue_input(
+            identity,
+            query,
+            idempotency_key=idempotency_key,
+        )
+
+    async def enqueue_query(
+        self,
+        identity: AgentIdentity,
+        query: str,
+        *,
+        source: MusicSourceKind | None = None,
+        idempotency_key: str = "",
+    ) -> EnqueueResult:
+        """Search one source, validate its top stable reference, and enqueue it."""
+        return await self._enqueue_from(
+            identity,
+            lambda: self._track_from_query(query, source=source),
+            idempotency_key=idempotency_key,
+        )
+
+    async def enqueue_reference(
+        self,
+        identity: AgentIdentity,
+        reference: MusicTrackReference,
+        *,
+        idempotency_key: str = "",
+    ) -> EnqueueResult:
+        """Validate and enqueue one exact provider reference."""
+        return await self._enqueue_from(
+            identity,
+            lambda: self._catalog.lookup(reference),
+            idempotency_key=idempotency_key,
+        )
+
+    async def enqueue_input(
+        self,
+        identity: AgentIdentity,
+        value: str,
+        *,
+        source: MusicSourceKind | None = None,
+        idempotency_key: str = "",
+    ) -> EnqueueResult:
+        """Classify one user value, remotely normalize it, then enqueue trusted metadata."""
+        return await self._enqueue_from(
+            identity,
+            lambda: self.track_from_input(value, source=source),
+            idempotency_key=idempotency_key,
+        )
+
+    async def _enqueue_from(
+        self,
+        identity: AgentIdentity,
+        load_track: Callable[[], Awaitable[MusicTrack]],
+        *,
+        idempotency_key: str,
+    ) -> EnqueueResult:
         channel = await self._channel_for(identity)
         session = self._session(channel)
         if idempotency_key:
@@ -125,10 +239,8 @@ class MusicRequestService:
                         previous.position,
                     )
                     return previous
-        matches = await self.search(query, limit=1)
-        if not matches:
-            raise MusicNotFoundError("No music matched the query")
-        item = QueuedTrack(matches[0], identity.person_id)
+        track = await load_track()
+        item = QueuedTrack(track, identity.person_id)
         async with session.lock:
             if idempotency_key:
                 previous = session.idempotent_enqueues.get(idempotency_key)
@@ -154,12 +266,32 @@ class MusicRequestService:
                 while len(session.idempotent_enqueues) > 256:
                     session.idempotent_enqueues.popitem(last=False)
         logger.info(
-            "Music enqueued: channel=%s position=%s playback_worker_started=%s",
+            "Music enqueued: channel=%s source=%s position=%s playback_worker_started=%s",
             self._channel_ref(channel),
+            track.source.value,
             position,
             started,
         )
         return result
+
+    async def _track_from_query(
+        self,
+        query: str,
+        *,
+        source: MusicSourceKind | None,
+    ) -> MusicTrack:
+        matches = await self.search(query, source=source, limit=1)
+        if not matches:
+            raise MusicNotFoundError("No music matched the query")
+        return await self._catalog.lookup(matches[0].reference)
+
+    def _normalize_query(self, query: str) -> str:
+        normalized = query.strip()
+        if not normalized:
+            raise MusicQueryError("Music search query must not be empty")
+        if len(normalized) > self._settings.max_query_characters:
+            raise MusicQueryError("Music search query is too long")
+        return normalized
 
     async def queue(self, identity: AgentIdentity) -> MusicQueueSnapshot:
         """Return an immutable bounded view for the caller's current voice channel."""
@@ -239,6 +371,7 @@ class MusicRequestService:
             if replaced_current:
                 session.retain_skipped_for_cycle = False
                 session.skip_requested.set()
+                self._cancel_resolve_locked(session)
             else:
                 session.state = PlaybackState.WAITING
             session.revision += 1
@@ -281,6 +414,7 @@ class MusicRequestService:
             if stopped_current:
                 session.retain_skipped_for_cycle = False
                 session.skip_requested.set()
+                self._cancel_resolve_locked(session)
             elif session.voice_reserved:
                 session.state = PlaybackState.WAITING
                 self._start_worker_locked(channel, session)
@@ -317,6 +451,7 @@ class MusicRequestService:
                 return False
             session.skip_requested.set()
             session.retain_skipped_for_cycle = session.policy.repeat is RepeatPolicy.ALL
+            self._cancel_resolve_locked(session)
             session.revision += 1
             playback = session.playback
         if playback is not None:
@@ -443,6 +578,7 @@ class MusicRequestService:
     ) -> None:
         drained_normally = False
         backend_retries: dict[UUID, int] = {}
+        media_retries: dict[UUID, int] = {}
         try:
             while True:
                 async with session.lock:
@@ -506,17 +642,44 @@ class MusicRequestService:
                 halt_after_failure = False
                 try:
                     logger.info(
-                        "Music track resolving: channel=%s",
+                        "Music track resolving: channel=%s source=%s",
                         self._channel_ref(channel),
+                        item.track.source.value,
                     )
-                    playable = await self._catalog.resolve(item.track)
+                    async with session.lock:
+                        if session.skip_requested.is_set():
+                            continue
+                        resolve_task = asyncio.create_task(
+                            self._catalog.resolve(item.track),
+                            name=f"music-resolve:{self._channel_ref(channel)}",
+                        )
+                        session.resolve_task = resolve_task
+                    try:
+                        playable = await resolve_task
+                    except asyncio.CancelledError:
+                        current = asyncio.current_task()
+                        if (
+                            session.skip_requested.is_set()
+                            and current is not None
+                            and current.cancelling() == 0
+                        ):
+                            logger.info(
+                                "Music track resolve cancelled by queue control: channel=%s",
+                                self._channel_ref(channel),
+                            )
+                            continue
+                        raise
+                    finally:
+                        async with session.lock:
+                            if session.resolve_task is resolve_task:
+                                session.resolve_task = None
                     if session.skip_requested.is_set():
                         logger.info(
                             "Music track skipped before playback: channel=%s",
                             self._channel_ref(channel),
                         )
                         continue
-                    playback = await self._voice.start_playback(channel, playable.stream_url)
+                    playback = await self._voice.start_playback(channel, playable)
                     if session.skip_requested.is_set():
                         await playback.stop()
                         continue
@@ -525,8 +688,9 @@ class MusicRequestService:
                         session.state = PlaybackState.PLAYING
                         session.revision += 1
                     logger.info(
-                        "Music track playback started: channel=%s",
+                        "Music track playback started: channel=%s source=%s",
                         self._channel_ref(channel),
+                        item.track.source.value,
                     )
                     result = await playback.wait_finished()
                     completed = result.end_reason is MusicPlaybackEndReason.FINISHED
@@ -562,6 +726,32 @@ class MusicRequestService:
                             backend_retries[item.id],
                             result.end_reason is MusicPlaybackEndReason.VOICE_LEFT,
                         )
+                    elif (
+                        result.end_reason is MusicPlaybackEndReason.TRACK_ERROR
+                        and result.duration_seconds is not None
+                        and result.duration_seconds <= 3.0
+                        and media_retries.get(item.id, 0) < 1
+                        and not session.skip_requested.is_set()
+                    ):
+                        media_retries[item.id] = media_retries.get(item.id, 0) + 1
+                        retry_current = True
+                        async with session.lock:
+                            self._record_failure_locked(
+                                session,
+                                item,
+                                MusicFailureCode.TRACK_ERROR,
+                                MusicFailureScope.TRACK,
+                                recoverable=True,
+                                retry_count=media_retries[item.id],
+                            )
+                        logger.warning(
+                            "Re-resolving music after early media failure: "
+                            "channel=%s source=%s attempt=%s elapsed_seconds=%.3f",
+                            self._channel_ref(channel),
+                            item.track.source.value,
+                            media_retries[item.id],
+                            result.duration_seconds,
+                        )
                     elif not completed and result.end_reason not in {
                         MusicPlaybackEndReason.STOPPED,
                         MusicPlaybackEndReason.REPLACED,
@@ -580,6 +770,30 @@ class MusicRequestService:
                                     MusicFailureScope.VOICE_SESSION,
                                     recoverable=False,
                                     retry_count=backend_retries.get(item.id, 0),
+                                )
+                                session.revision += 1
+                        elif result.end_reason is MusicPlaybackEndReason.TRACK_ERROR:
+                            logger.error(
+                                "Music media playback failed: "
+                                "channel=%s source=%s retries=%s error=%s",
+                                self._channel_ref(channel),
+                                item.track.source.value,
+                                media_retries.get(item.id, 0),
+                                (
+                                    type(result.terminal_error).__name__
+                                    if result.terminal_error is not None
+                                    else "none"
+                                ),
+                            )
+                            async with session.lock:
+                                session.state = PlaybackState.FAILED
+                                self._record_failure_locked(
+                                    session,
+                                    item,
+                                    MusicFailureCode.TRACK_ERROR,
+                                    MusicFailureScope.TRACK,
+                                    recoverable=False,
+                                    retry_count=media_retries.get(item.id, 0),
                                 )
                                 session.revision += 1
                         else:
@@ -620,6 +834,45 @@ class MusicRequestService:
                             )
                             session.revision += 1
                         halt_after_failure = True
+                except MusicDecoderError as exc:
+                    if media_retries.get(item.id, 0) < 1 and not session.skip_requested.is_set():
+                        media_retries[item.id] = media_retries.get(item.id, 0) + 1
+                        retry_current = True
+                        async with session.lock:
+                            self._record_failure_locked(
+                                session,
+                                item,
+                                MusicFailureCode.TRACK_ERROR,
+                                MusicFailureScope.TRACK,
+                                recoverable=True,
+                                retry_count=media_retries[item.id],
+                            )
+                        logger.warning(
+                            "Re-resolving music after decoder startup failure: "
+                            "channel=%s source=%s attempt=%s error=%s",
+                            self._channel_ref(channel),
+                            item.track.source.value,
+                            media_retries[item.id],
+                            type(exc).__name__,
+                        )
+                    else:
+                        logger.error(
+                            "Music media recovery exhausted: channel=%s source=%s error=%s",
+                            self._channel_ref(channel),
+                            item.track.source.value,
+                            type(exc).__name__,
+                        )
+                        async with session.lock:
+                            session.state = PlaybackState.FAILED
+                            self._record_failure_locked(
+                                session,
+                                item,
+                                MusicFailureCode.TRACK_ERROR,
+                                MusicFailureScope.TRACK,
+                                recoverable=False,
+                                retry_count=media_retries.get(item.id, 0),
+                            )
+                            session.revision += 1
                 except Exception as exc:
                     logger.error(
                         "Music playback failed: channel=%s error=%s",
@@ -654,10 +907,12 @@ class MusicRequestService:
                         if halt_after_failure and not session.skip_requested.is_set():
                             session.queue.appendleft(item)
                             backend_retries.pop(item.id, None)
+                            media_retries.pop(item.id, None)
                         elif not session.skip_requested.is_set() and completed:
                             self._retain_completed(session, item)
                             session.last_failure = None
                             backend_retries.pop(item.id, None)
+                            media_retries.pop(item.id, None)
                         elif not session.skip_requested.is_set() and retry_current:
                             session.queue.appendleft(item)
                             session.state = PlaybackState.WAITING
@@ -665,8 +920,10 @@ class MusicRequestService:
                         elif session.retain_skipped_for_cycle:
                             session.cycle_history.append(item)
                             backend_retries.pop(item.id, None)
+                            media_retries.pop(item.id, None)
                         else:
                             backend_retries.pop(item.id, None)
+                            media_retries.pop(item.id, None)
                         if session.playback is playback:
                             session.playback = None
                         session.current = None
@@ -684,6 +941,8 @@ class MusicRequestService:
                 async with session.lock:
                     reserved = session.voice_reserved
                     session.playback = None
+                    self._cancel_resolve_locked(session)
+                    session.resolve_task = None
                     session.current = None
                     session.skip_requested.clear()
                     session.retain_skipped_for_cycle = False
@@ -810,6 +1069,13 @@ class MusicRequestService:
         session.worker = worker
         worker.add_done_callback(lambda completed: self._on_worker_done(channel, completed))
         return True
+
+    @staticmethod
+    def _cancel_resolve_locked(session: _MusicSession) -> None:
+        """Cancel the current source lookup while the caller holds ``session.lock``."""
+        task = session.resolve_task
+        if task is not None and not task.done():
+            task.cancel()
 
     def _on_worker_done(
         self,

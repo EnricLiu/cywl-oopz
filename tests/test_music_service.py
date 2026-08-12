@@ -11,22 +11,28 @@ from cywl_oopz.features.chat.models import ConversationKey
 from cywl_oopz.features.music.errors import (
     MusicBackendClosedError,
     MusicCatalogError,
+    MusicDecoderError,
     MusicQueryError,
     MusicQueueFullError,
+    MusicReferenceError,
     MusicVoiceBusyError,
     MusicVoiceChannelRequiredError,
 )
 from cywl_oopz.features.music.models import (
     MusicFailureCode,
     MusicFailureScope,
+    MusicPageLocator,
     MusicPlaybackEndReason,
     MusicPlaybackPolicy,
     MusicPlaybackResult,
+    MusicSourceKind,
     MusicTrack,
+    MusicTrackReference,
     PlayableTrack,
     PlaybackOrder,
     PlaybackState,
     RepeatPolicy,
+    ResolvedMediaInput,
     VoiceChannelKey,
 )
 from cywl_oopz.features.music.service import MusicRequestService
@@ -54,11 +60,22 @@ class FakeCatalog:
     def __init__(self) -> None:
         self.closed = False
         self.resolved: list[str] = []
+        self.searched: list[tuple[str, object, int]] = []
+        self.looked_up: list[MusicTrackReference] = []
+        self.inspected: list[MusicPageLocator] = []
 
-    async def search(self, query: str, *, limit: int) -> tuple[MusicTrack, ...]:
+    async def search(
+        self,
+        query: str,
+        *,
+        limit: int,
+        source=None,
+    ) -> tuple[MusicTrack, ...]:
+        source = source or "netease"
+        self.searched.append((query, source, limit))
         return (
             MusicTrack(
-                "netease",
+                source,
                 query,
                 query,
                 ("artist",),
@@ -66,9 +83,26 @@ class FakeCatalog:
             ),
         )[:limit]
 
+    async def lookup(self, reference: MusicTrackReference) -> MusicTrack:
+        self.looked_up.append(reference)
+        return MusicTrack(
+            reference.source,
+            reference.source_id,
+            reference.source_id,
+            ("artist",),
+            1000,
+        )
+
+    async def inspect(self, locator: MusicPageLocator) -> MusicTrack:
+        self.inspected.append(locator)
+        return MusicTrack(locator.source, "inspected", "inspected", ("artist",), 1000)
+
     async def resolve(self, track: MusicTrack) -> PlayableTrack:
         self.resolved.append(track.source_id)
-        return PlayableTrack(track, f"https://music.example/{track.source_id}.mp3")
+        return PlayableTrack(
+            track,
+            ResolvedMediaInput(f"https://music.example/{track.source_id}.mp3"),
+        )
 
     async def aclose(self) -> None:
         self.closed = True
@@ -110,12 +144,12 @@ class FakeVoice:
     async def start_playback(
         self,
         channel: VoiceChannelKey,
-        stream_url: str,
+        playable: PlayableTrack,
     ) -> FakePlayback:
         assert self.acquired == channel
         self.current_finished = asyncio.Event()
         self.current_playback = FakePlayback(self, self.current_finished)
-        self.played.append((channel, stream_url))
+        self.played.append((channel, playable.media.url))
         self.play_started.set()
         return self.current_playback
 
@@ -190,14 +224,14 @@ class RecoveringVoice(FakeVoice):
     async def start_playback(
         self,
         channel: VoiceChannelKey,
-        stream_url: str,
+        playable: PlayableTrack,
     ):
         if self._failures_remaining:
             self._failures_remaining -= 1
-            self.played.append((channel, stream_url))
+            self.played.append((channel, playable.media.url))
             self.play_started.set()
             return TerminalPlayback(MusicPlaybackResult(MusicPlaybackEndReason.BACKEND_CLOSED))
-        return await super().start_playback(channel, stream_url)
+        return await super().start_playback(channel, playable)
 
 
 class StartupRecoveringVoice(FakeVoice):
@@ -208,13 +242,13 @@ class StartupRecoveringVoice(FakeVoice):
     async def start_playback(
         self,
         channel: VoiceChannelKey,
-        stream_url: str,
+        playable: PlayableTrack,
     ):
         if self._failures_remaining:
             self._failures_remaining -= 1
-            self.played.append((channel, stream_url))
+            self.played.append((channel, playable.media.url))
             raise MusicBackendClosedError("fixture startup backend failure")
-        return await super().start_playback(channel, stream_url)
+        return await super().start_playback(channel, playable)
 
 
 class VoiceLeftRecoveringVoice(FakeVoice):
@@ -226,17 +260,59 @@ class VoiceLeftRecoveringVoice(FakeVoice):
     async def start_playback(
         self,
         channel: VoiceChannelKey,
-        stream_url: str,
+        playable: PlayableTrack,
     ):
         if not self._failed:
             self._failed = True
-            self.played.append((channel, stream_url))
+            self.played.append((channel, playable.media.url))
             return TerminalPlayback(MusicPlaybackResult(MusicPlaybackEndReason.VOICE_LEFT))
-        return await super().start_playback(channel, stream_url)
+        return await super().start_playback(channel, playable)
 
     async def reset(self, channel: VoiceChannelKey) -> None:
         self.reset_calls += 1
         await super().reset(channel)
+
+
+class EarlyMediaFailureVoice(FakeVoice):
+    def __init__(self, *, duration_seconds: float = 0.5, failures: int = 1) -> None:
+        super().__init__()
+        self._failures_remaining = failures
+        self._duration_seconds = duration_seconds
+
+    async def start_playback(
+        self,
+        channel: VoiceChannelKey,
+        playable: PlayableTrack,
+    ):
+        if self._failures_remaining:
+            self._failures_remaining -= 1
+            self.played.append((channel, playable.media.url))
+            self.play_started.set()
+            return TerminalPlayback(
+                MusicPlaybackResult(
+                    MusicPlaybackEndReason.TRACK_ERROR,
+                    self._duration_seconds,
+                    RuntimeError("fixture media input failure"),
+                )
+            )
+        return await super().start_playback(channel, playable)
+
+
+class DecoderStartupRecoveringVoice(FakeVoice):
+    def __init__(self) -> None:
+        super().__init__()
+        self._failed = False
+
+    async def start_playback(
+        self,
+        channel: VoiceChannelKey,
+        playable: PlayableTrack,
+    ):
+        if not self._failed:
+            self._failed = True
+            self.played.append((channel, playable.media.url))
+            raise MusicDecoderError("fixture decoder startup failure")
+        return await super().start_playback(channel, playable)
 
 
 async def eventually(predicate, *, attempts: int = 100) -> None:
@@ -245,6 +321,117 @@ async def eventually(predicate, *, attempts: int = 100) -> None:
             return
         await asyncio.sleep(0.001)
     raise AssertionError("condition did not become true")
+
+
+class BlockingResolveCatalog(FakeCatalog):
+    def __init__(self) -> None:
+        super().__init__()
+        self.resolve_started = asyncio.Event()
+        self.resolve_cancelled = asyncio.Event()
+
+    async def resolve(self, track: MusicTrack) -> PlayableTrack:
+        self.resolved.append(track.source_id)
+        if track.source_id != "blocked":
+            return PlayableTrack(
+                track,
+                ResolvedMediaInput(f"https://music.example/{track.source_id}.mp3"),
+            )
+        self.resolve_started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            self.resolve_cancelled.set()
+            raise
+
+
+@pytest.mark.asyncio
+async def test_music_service_routes_explicit_source_search_and_validates_top_reference() -> None:
+    catalog = FakeCatalog()
+    service = MusicRequestService(settings(), catalog, FakeVoice())
+
+    result = await service.enqueue_query(
+        identity(),
+        "Tell Your World",
+        source=MusicSourceKind.YOUTUBE,
+    )
+
+    assert result.item.track.source is MusicSourceKind.YOUTUBE
+    assert catalog.searched == [("Tell Your World", MusicSourceKind.YOUTUBE, 1)]
+    assert catalog.looked_up == [MusicTrackReference(MusicSourceKind.YOUTUBE, "Tell Your World")]
+    await service.aclose()
+
+
+@pytest.mark.asyncio
+async def test_music_service_enqueues_stable_urls_without_text_search() -> None:
+    catalog = FakeCatalog()
+    service = MusicRequestService(settings(), catalog, FakeVoice())
+
+    result = await service.enqueue_input(
+        identity(),
+        "https://youtu.be/dQw4w9WgXcQ",
+    )
+
+    assert result.item.track.reference == MusicTrackReference(
+        MusicSourceKind.YOUTUBE,
+        "dQw4w9WgXcQ",
+    )
+    assert catalog.searched == []
+    assert catalog.looked_up == [result.item.track.reference]
+    await service.aclose()
+
+
+@pytest.mark.asyncio
+async def test_music_service_remotely_inspects_transient_bilibili_locator() -> None:
+    catalog = FakeCatalog()
+    service = MusicRequestService(settings(), catalog, FakeVoice())
+
+    result = await service.enqueue_input(identity(), "https://b23.tv/fixture")
+
+    assert result.item.track.source is MusicSourceKind.BILIBILI
+    assert result.item.track.source_id == "inspected"
+    assert len(catalog.inspected) == 1
+    assert catalog.searched == []
+    await service.aclose()
+
+
+@pytest.mark.asyncio
+async def test_music_service_rejects_source_option_that_disagrees_with_url() -> None:
+    voice = FakeVoice()
+    catalog = FakeCatalog()
+    service = MusicRequestService(settings(), catalog, voice)
+
+    with pytest.raises(MusicReferenceError, match="does not match"):
+        await service.enqueue_input(
+            identity(),
+            "https://youtu.be/dQw4w9WgXcQ",
+            source=MusicSourceKind.BILIBILI,
+        )
+
+    assert catalog.looked_up == []
+    assert voice.acquire_calls == []
+    await service.aclose()
+
+
+@pytest.mark.asyncio
+async def test_music_service_reuses_exact_idempotency_before_second_lookup() -> None:
+    catalog = FakeCatalog()
+    service = MusicRequestService(settings(), catalog, FakeVoice())
+    reference = MusicTrackReference(MusicSourceKind.YOUTUBE, "dQw4w9WgXcQ")
+
+    first = await service.enqueue_reference(
+        identity(),
+        reference,
+        idempotency_key="run:youtube:dQw4w9WgXcQ",
+    )
+    repeated = await service.enqueue_reference(
+        identity(),
+        reference,
+        idempotency_key="run:youtube:dQw4w9WgXcQ",
+    )
+
+    assert repeated.item.id == first.item.id
+    assert catalog.looked_up == [reference]
+    await service.aclose()
 
 
 @pytest.mark.asyncio
@@ -409,6 +596,81 @@ async def test_music_service_reresolves_once_when_backend_fails_during_startup()
 
 
 @pytest.mark.asyncio
+async def test_music_service_reresolves_once_after_early_media_failure() -> None:
+    catalog = FakeCatalog()
+    voice = EarlyMediaFailureVoice(duration_seconds=0.5)
+    service = MusicRequestService(settings(), catalog, voice)
+
+    await service.enqueue(identity(), "expired-media")
+    await eventually(lambda: len(voice.played) == 2)
+
+    assert catalog.resolved == ["expired-media", "expired-media"]
+    snapshot = await service.queue(identity())
+    assert snapshot.state is PlaybackState.PLAYING
+    assert snapshot.last_failure is not None
+    assert snapshot.last_failure.scope is MusicFailureScope.TRACK
+    assert snapshot.last_failure.recoverable is True
+    assert snapshot.last_failure.retry_count == 1
+    voice.current_finished.set()
+    await eventually(lambda: voice.acquired is None)
+    assert (await service.queue(identity())).last_failure is None
+    await service.aclose()
+
+
+@pytest.mark.asyncio
+async def test_music_service_does_not_restart_track_after_late_media_failure() -> None:
+    catalog = FakeCatalog()
+    voice = EarlyMediaFailureVoice(duration_seconds=3.1)
+    service = MusicRequestService(settings(), catalog, voice)
+
+    await service.enqueue(identity(), "late-failure")
+    await eventually(lambda: voice.acquired is None)
+
+    assert catalog.resolved == ["late-failure"]
+    assert len(voice.played) == 1
+    snapshot = await service.queue(identity())
+    assert snapshot.last_failure is not None
+    assert snapshot.last_failure.scope is MusicFailureScope.TRACK
+    assert snapshot.last_failure.recoverable is False
+    assert snapshot.last_failure.retry_count == 0
+    await service.aclose()
+
+
+@pytest.mark.asyncio
+async def test_music_service_bounds_early_media_recovery_to_one_retry() -> None:
+    catalog = FakeCatalog()
+    voice = EarlyMediaFailureVoice(failures=2)
+    service = MusicRequestService(settings(), catalog, voice)
+
+    await service.enqueue(identity(), "still-expired")
+    await eventually(lambda: voice.acquired is None)
+
+    assert catalog.resolved == ["still-expired", "still-expired"]
+    assert len(voice.played) == 2
+    snapshot = await service.queue(identity())
+    assert snapshot.last_failure is not None
+    assert snapshot.last_failure.recoverable is False
+    assert snapshot.last_failure.retry_count == 1
+    await service.aclose()
+
+
+@pytest.mark.asyncio
+async def test_music_service_reresolves_once_after_decoder_startup_failure() -> None:
+    catalog = FakeCatalog()
+    voice = DecoderStartupRecoveringVoice()
+    service = MusicRequestService(settings(), catalog, voice)
+
+    await service.enqueue(identity(), "decoder-recover")
+    await eventually(lambda: len(voice.played) == 2)
+
+    assert catalog.resolved == ["decoder-recover", "decoder-recover"]
+    assert (await service.queue(identity())).state is PlaybackState.PLAYING
+    voice.current_finished.set()
+    await eventually(lambda: voice.acquired is None)
+    await service.aclose()
+
+
+@pytest.mark.asyncio
 async def test_music_service_bounds_capacity_and_rejects_a_second_voice_channel() -> None:
     voice = FakeVoice()
     service = MusicRequestService(
@@ -551,6 +813,44 @@ async def test_music_service_skip_in_repeat_all_returns_only_on_next_cycle() -> 
     await eventually(lambda: len(voice.played) == 3)
     assert voice.played[2][1].endswith("/first.mp3")
 
+    await service.aclose()
+
+
+@pytest.mark.asyncio
+async def test_music_service_skip_cancels_active_resolve_and_advances_queue() -> None:
+    voice = FakeVoice()
+    catalog = BlockingResolveCatalog()
+    service = MusicRequestService(settings(), catalog, voice)
+
+    await service.enqueue(identity(), "blocked")
+    await catalog.resolve_started.wait()
+    await service.enqueue(identity(), "next")
+
+    assert await service.skip(identity()) is True
+    await catalog.resolve_cancelled.wait()
+    await eventually(lambda: len(voice.played) == 1)
+
+    assert catalog.resolved == ["blocked", "next"]
+    assert voice.played[0][1].endswith("/next.mp3")
+    await service.aclose()
+
+
+@pytest.mark.asyncio
+async def test_music_service_clear_cancels_active_resolve_and_releases_voice() -> None:
+    voice = FakeVoice()
+    catalog = BlockingResolveCatalog()
+    service = MusicRequestService(settings(), catalog, voice)
+
+    await service.enqueue(identity(), "blocked")
+    await catalog.resolve_started.wait()
+
+    result = await service.clear(identity())
+    await catalog.resolve_cancelled.wait()
+    await eventually(lambda: len(voice.left) == 1)
+
+    assert result.stopped_current is True
+    assert result.removed_count == 1
+    assert (await service.queue(identity())).state is PlaybackState.IDLE
     await service.aclose()
 
 

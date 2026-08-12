@@ -44,7 +44,9 @@ from cywl_oopz.features.music.models import (
     MusicPlaylist,
     MusicPlaylistEntry,
     MusicPlaylistSummary,
+    MusicSourceKind,
     MusicTrack,
+    MusicTrackReference,
     NeteasePlaylistSnapshot,
     PlaylistClear,
     PlaylistDeletion,
@@ -287,9 +289,21 @@ class InMemoryPlaylistRepository:
 class FakeMusic:
     replaced: tuple[MusicTrack, ...] = ()
 
-    async def search(self, query: str, *, limit: int | None = None):
+    async def search(self, query: str, *, source=None, limit: int | None = None):
         assert limit == 1
-        return (MusicTrack("netease", query, query, ("artist",), 1000),)
+        return (MusicTrack(source or "netease", query, query, ("artist",), 1000),)
+
+    async def lookup(self, reference):
+        return MusicTrack(
+            reference.source,
+            reference.source_id,
+            reference.source_id,
+            ("artist",),
+            1000,
+        )
+
+    async def track_from_input(self, value: str, *, source=None):
+        return MusicTrack(source or "netease", value, value, ("artist",), 1000)
 
     async def replace_queue(
         self,
@@ -362,6 +376,38 @@ async def test_playlists_are_shared_per_area_and_rebuild_the_queue() -> None:
 
     with pytest.raises(MusicPlaylistNotFoundError):
         await playlists.get(identity(area_id="other-area"), created.id)
+
+
+@pytest.mark.asyncio
+async def test_playlist_service_persists_and_rebuilds_mixed_source_references() -> None:
+    playlists, _, music = service()
+    created = await playlists.create(identity(), "跨平台歌单")
+
+    youtube = await playlists.add_reference(
+        identity(),
+        created.id,
+        MusicTrackReference(MusicSourceKind.YOUTUBE, "dQw4w9WgXcQ"),
+    )
+    bilibili = await playlists.add_reference(
+        identity(),
+        created.id,
+        MusicTrackReference(MusicSourceKind.BILIBILI, "BV13x41117TL:p=1"),
+    )
+    loaded = await playlists.load(identity(), created.id)
+
+    assert youtube.track.reference == MusicTrackReference(
+        MusicSourceKind.YOUTUBE,
+        "dQw4w9WgXcQ",
+    )
+    assert bilibili.track.reference == MusicTrackReference(
+        MusicSourceKind.BILIBILI,
+        "BV13x41117TL:p=1",
+    )
+    assert loaded.queue.loaded_count == 2
+    assert [track.source for track in music.replaced] == [
+        MusicSourceKind.YOUTUBE,
+        MusicSourceKind.BILIBILI,
+    ]
 
 
 @pytest.mark.asyncio

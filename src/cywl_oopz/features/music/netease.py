@@ -14,10 +14,21 @@ from cywl_oopz.settings import MusicSettings
 from .errors import (
     MusicCatalogError,
     MusicNotFoundError,
+    MusicReferenceError,
     NeteasePlaylistNotFoundError,
     NeteasePlaylistReferenceError,
 )
-from .models import MusicTrack, NeteasePlaylistSnapshot, PlayableTrack
+from .models import (
+    MusicPageLocator,
+    MusicProviderHealth,
+    MusicProviderHealthState,
+    MusicSourceKind,
+    MusicTrack,
+    MusicTrackReference,
+    NeteasePlaylistSnapshot,
+    PlayableTrack,
+    ResolvedMediaInput,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,7 +60,7 @@ class NeteasePlaylistReference:
         raise NeteasePlaylistReferenceError("Netease playlist URL has no numeric playlist ID")
 
 
-class NeteaseMusicCatalog:
+class NeteaseMusicProvider:
     """Translate Netease-compatible JSON into project-owned music values."""
 
     def __init__(
@@ -67,6 +78,10 @@ class NeteaseMusicCatalog:
             headers=headers,
             trust_env=catalog_host not in {"127.0.0.1", "::1", "localhost"},
         )
+
+    @property
+    def source(self) -> MusicSourceKind:
+        return MusicSourceKind.NETEASE
 
     async def search(self, query: str, *, limit: int) -> tuple[MusicTrack, ...]:
         normalized = query.strip()
@@ -91,7 +106,7 @@ class NeteaseMusicCatalog:
         return tracks
 
     async def resolve(self, track: MusicTrack) -> PlayableTrack:
-        if track.source != "netease":
+        if track.source is not self.source:
             raise MusicCatalogError("Unsupported music source")
         payload = await self._get_json(
             "/song/url",
@@ -107,8 +122,38 @@ class NeteaseMusicCatalog:
                 continue
             url = item.get("url")
             if isinstance(url, str) and url.strip():
-                return PlayableTrack(track, url.strip())
+                return PlayableTrack(track, ResolvedMediaInput(url.strip()))
         raise MusicNotFoundError("The selected music is not currently playable")
+
+    async def lookup(self, reference: MusicTrackReference) -> MusicTrack:
+        """Load one exact Netease song snapshot without a fuzzy re-search."""
+        if reference.source is not self.source or not reference.source_id.isdigit():
+            raise MusicReferenceError("Netease song reference is invalid")
+        payload = await self._get_json(
+            "/song/detail",
+            params={"ids": reference.source_id},
+        )
+        songs = payload.get("songs")
+        if not isinstance(songs, list):
+            raise MusicCatalogError("Netease song detail response has no songs")
+        for item in songs:
+            track = self._parse_track(item)
+            if track is not None and track.source_id == reference.source_id:
+                return track
+        raise MusicNotFoundError("The selected Netease song was not found")
+
+    async def inspect(self, locator: MusicPageLocator) -> MusicTrack:
+        """Netease song URLs normalize locally and never require page inspection."""
+        del locator
+        raise MusicReferenceError("Netease page does not require remote inspection")
+
+    async def health(self) -> MusicProviderHealth:
+        """Report configured readiness; request failures remain operation-scoped."""
+        return MusicProviderHealth(
+            self.source,
+            MusicProviderHealthState.READY,
+            "configured",
+        )
 
     async def playlist(
         self,
@@ -190,7 +235,7 @@ class NeteaseMusicCatalog:
         raw_duration = value.get("duration", value.get("dt"))
         duration_ms = raw_duration if isinstance(raw_duration, int) and raw_duration >= 0 else None
         return MusicTrack(
-            source="netease",
+            source=MusicSourceKind.NETEASE,
             source_id=source_id,
             title=title.strip(),
             artists=tuple(artists),
@@ -204,3 +249,7 @@ class NeteaseMusicCatalog:
             return raw_count
         track_ids = playlist.get("trackIds")
         return len(track_ids) if isinstance(track_ids, list) else 0
+
+
+# Compatibility import retained while callers migrate to provider terminology.
+NeteaseMusicCatalog = NeteaseMusicProvider
