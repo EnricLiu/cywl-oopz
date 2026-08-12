@@ -328,6 +328,7 @@ def test_ytdlp_music_settings_load_and_bound_worker_resources() -> None:
             "CYWL_MUSIC_YTDLP_CACHE_DIR": "/tmp/cywl-ytdlp-test-cache",
             "CYWL_MUSIC_YTDLP_JS_RUNTIME": "node",
             "CYWL_MUSIC_YTDLP_JS_RUNTIME_PATH": "/opt/node",
+            "CYWL_MUSIC_YOUTUBE_PLAYER_CLIENTS": "mweb,web_safari",
         }
     )
 
@@ -339,9 +340,12 @@ def test_ytdlp_music_settings_load_and_bound_worker_resources() -> None:
     assert settings.max_audio_bitrate_kbps == 160
     assert settings.js_runtime == "node"
     assert settings.js_runtime_path == "/opt/node"
+    assert settings.youtube_player_clients == ("mweb", "web_safari")
 
     with pytest.raises(ConfigurationError, match="MAX_CONCURRENCY"):
         YtDlpMusicSettings.from_mapping({"CYWL_MUSIC_YTDLP_MAX_CONCURRENCY": "9"})
+    with pytest.raises(ConfigurationError, match="YOUTUBE_PLAYER_CLIENTS"):
+        YtDlpMusicSettings.from_mapping({"CYWL_MUSIC_YOUTUBE_PLAYER_CLIENTS": "mweb,mweb"})
 
 
 def test_audio_mixer_settings_load_and_validate_pcm_bounds() -> None:

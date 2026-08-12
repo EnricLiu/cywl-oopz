@@ -34,6 +34,7 @@ class YtDlpWorkerConfiguration:
     js_runtime_path: str = ""
     cookie_file: str = field(default="", repr=False)
     require_javascript: bool = False
+    youtube_player_clients: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.socket_timeout_seconds <= 0:
@@ -44,6 +45,10 @@ class YtDlpWorkerConfiguration:
             raise ValueError("yt-dlp cache directory must not be empty")
         if self.js_runtime not in {"deno", "node"}:
             raise ValueError("yt-dlp JavaScript runtime must be deno or node")
+        if len(self.youtube_player_clients) > 8 or len(set(self.youtube_player_clients)) != len(
+            self.youtube_player_clients
+        ):
+            raise ValueError("yt-dlp YouTube player clients are invalid")
 
     def to_payload(self) -> dict[str, object]:
         return {
@@ -54,6 +59,7 @@ class YtDlpWorkerConfiguration:
             "js_runtime_path": self.js_runtime_path,
             "cookie_file": self.cookie_file,
             "require_javascript": self.require_javascript,
+            "youtube_player_clients": list(self.youtube_player_clients),
         }
 
     @classmethod
@@ -68,6 +74,7 @@ class YtDlpWorkerConfiguration:
             js_runtime_path=_optional_text(value, "js_runtime_path"),
             cookie_file=_optional_text(value, "cookie_file"),
             require_javascript=_boolean(value, "require_javascript"),
+            youtube_player_clients=_text_tuple(value, "youtube_player_clients"),
         )
 
 
@@ -390,3 +397,10 @@ def _nullable_boolean(values: dict[str, Any], name: str) -> bool | None:
     if value is not None and not isinstance(value, bool):
         raise ValueError(f"{name} must be a boolean or null")
     return value
+
+
+def _text_tuple(values: dict[str, Any], name: str) -> tuple[str, ...]:
+    value = values.get(name, [])
+    if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
+        raise ValueError(f"{name} must be a text list")
+    return tuple(value)

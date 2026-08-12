@@ -48,11 +48,13 @@ class YtDlpMusicProviderBase(ABC):
         *,
         cookie_file: str,
         require_javascript: bool,
+        youtube_player_clients: tuple[str, ...] = (),
     ) -> None:
         self._settings = settings
         self._runner = runner
         self._cookie_file = cookie_file
         self._require_javascript = require_javascript
+        self._youtube_player_clients = youtube_player_clients
 
     async def _extract(
         self,
@@ -73,6 +75,7 @@ class YtDlpMusicProviderBase(ABC):
                 configuration=self._runner.configuration(
                     cookie_file=self._cookie_file,
                     require_javascript=self._require_javascript,
+                    youtube_player_clients=self._youtube_player_clients,
                 ),
             )
         )

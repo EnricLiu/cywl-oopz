@@ -53,7 +53,9 @@ class FakeRunner:
         *,
         cookie_file: str = "",
         require_javascript: bool = False,
+        youtube_player_clients: tuple[str, ...] = (),
     ) -> YtDlpWorkerConfiguration:
+        assert youtube_player_clients == ()
         return YtDlpWorkerConfiguration(
             cookie_file=cookie_file,
             require_javascript=require_javascript,

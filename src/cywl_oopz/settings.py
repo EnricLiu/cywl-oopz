@@ -737,6 +737,7 @@ class YtDlpMusicSettings:
     js_runtime_path: str
     youtube_cookie_file: str
     bilibili_cookie_file: str
+    youtube_player_clients: tuple[str, ...]
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, str]) -> YtDlpMusicSettings:
@@ -746,6 +747,22 @@ class YtDlpMusicSettings:
         cache_dir = values.get("CYWL_MUSIC_YTDLP_CACHE_DIR", ".cache/yt-dlp").strip()
         if not cache_dir:
             raise ConfigurationError("CYWL_MUSIC_YTDLP_CACHE_DIR must not be empty")
+        youtube_player_clients = tuple(
+            value.casefold() for value in _csv(values, "CYWL_MUSIC_YOUTUBE_PLAYER_CLIENTS")
+        )
+        if len(youtube_player_clients) > 8 or len(set(youtube_player_clients)) != len(
+            youtube_player_clients
+        ):
+            raise ConfigurationError(
+                "CYWL_MUSIC_YOUTUBE_PLAYER_CLIENTS must contain up to 8 unique values"
+            )
+        if any(
+            not value.replace("_", "").replace("-", "").isalnum()
+            for value in youtube_player_clients
+        ):
+            raise ConfigurationError(
+                "CYWL_MUSIC_YOUTUBE_PLAYER_CLIENTS contains an invalid client name"
+            )
         settings = cls(
             search_timeout_seconds=_positive_float(
                 values,
@@ -782,6 +799,7 @@ class YtDlpMusicSettings:
             js_runtime_path=values.get("CYWL_MUSIC_YTDLP_JS_RUNTIME_PATH", "").strip(),
             youtube_cookie_file=values.get("CYWL_MUSIC_YOUTUBE_COOKIE_FILE", "").strip(),
             bilibili_cookie_file=values.get("CYWL_MUSIC_BILIBILI_COOKIE_FILE", "").strip(),
+            youtube_player_clients=youtube_player_clients,
         )
         if settings.max_concurrency > 8:
             raise ConfigurationError("CYWL_MUSIC_YTDLP_MAX_CONCURRENCY must not exceed 8")

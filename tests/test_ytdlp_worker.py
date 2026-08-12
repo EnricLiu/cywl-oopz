@@ -65,6 +65,7 @@ def request(
             cache_dir="/tmp/cywl-ytdlp-worker-test",
             js_runtime="node",
             js_runtime_path="/fixture/node",
+            youtube_player_clients=("mweb",),
         ),
     )
 
@@ -99,6 +100,7 @@ def test_ytdlp_worker_maps_flat_search_without_leaking_media() -> None:
     assert factory.options[0]["playlistend"] == 2
     assert factory.options[0]["socket_timeout"] == 7
     assert factory.options[0]["js_runtimes"] == {"node": {"path": "/fixture/node"}}
+    assert factory.options[0]["extractor_args"] == {"youtube": {"player_client": ["mweb"]}}
 
 
 def test_ytdlp_worker_retains_flat_page_url_when_webpage_url_is_absent() -> None:

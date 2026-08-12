@@ -134,6 +134,7 @@ from .features.music.netease import NeteaseMusicProvider
 from .features.music.playlist_repository import SqlAlchemyMusicPlaylistRepository
 from .features.music.playlists import MusicPlaylistService
 from .features.music.service import MusicRequestService
+from .features.music.youtube import YouTubeMusicProvider
 from .features.voice.commands import VoiceCommand
 from .features.voice.repository import (
     SqlAlchemyVoiceConfigurationRepository,
@@ -258,6 +259,7 @@ class BotApplication:
         self.music_catalog: CompositeMusicCatalog | None = None
         self.netease_music_provider: NeteaseMusicProvider | None = None
         self.bilibili_music_provider: BilibiliMusicProvider | None = None
+        self.youtube_music_provider: YouTubeMusicProvider | None = None
         self.music_playlists: MusicPlaylistService | None = None
         enabled_agent_tools = settings.agent.enabled_tools
         if settings.agent.skills_enabled:
@@ -280,17 +282,26 @@ class BotApplication:
             ):
                 self.music_ytdlp_runner = YtDlpProcessRunner(settings.music_ytdlp)
             music_providers = []
-            if MusicSourceKind.NETEASE in settings.music.enabled_sources:
-                self.netease_music_provider = NeteaseMusicProvider(settings.music)
-                music_providers.append(self.netease_music_provider)
-            if MusicSourceKind.BILIBILI in settings.music.enabled_sources:
-                assert self.music_ytdlp_runner is not None
-                self.bilibili_music_provider = BilibiliMusicProvider(
-                    settings.music,
-                    settings.music_ytdlp,
-                    self.music_ytdlp_runner,
-                )
-                music_providers.append(self.bilibili_music_provider)
+            for source in settings.music.enabled_sources:
+                if source is MusicSourceKind.NETEASE:
+                    self.netease_music_provider = NeteaseMusicProvider(settings.music)
+                    music_providers.append(self.netease_music_provider)
+                elif source is MusicSourceKind.BILIBILI:
+                    assert self.music_ytdlp_runner is not None
+                    self.bilibili_music_provider = BilibiliMusicProvider(
+                        settings.music,
+                        settings.music_ytdlp,
+                        self.music_ytdlp_runner,
+                    )
+                    music_providers.append(self.bilibili_music_provider)
+                elif source is MusicSourceKind.YOUTUBE:
+                    assert self.music_ytdlp_runner is not None
+                    self.youtube_music_provider = YouTubeMusicProvider(
+                        settings.music,
+                        settings.music_ytdlp,
+                        self.music_ytdlp_runner,
+                    )
+                    music_providers.append(self.youtube_music_provider)
             self.music_catalog = CompositeMusicCatalog(
                 MusicProviderRegistry(music_providers),
                 settings.music.default_source,

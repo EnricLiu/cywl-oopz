@@ -93,6 +93,7 @@ class YtDlpProcessRunner:
         *,
         cookie_file: str = "",
         require_javascript: bool = False,
+        youtube_player_clients: tuple[str, ...] = (),
     ) -> YtDlpWorkerConfiguration:
         return YtDlpWorkerConfiguration(
             socket_timeout_seconds=self._settings.socket_timeout_seconds,
@@ -102,6 +103,7 @@ class YtDlpProcessRunner:
             js_runtime_path=self._settings.js_runtime_path,
             cookie_file=cookie_file,
             require_javascript=require_javascript,
+            youtube_player_clients=youtube_player_clients,
         )
 
     async def run(self, request: YtDlpWorkerRequest) -> YtDlpWorkerResponse:

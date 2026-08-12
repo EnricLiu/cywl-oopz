@@ -143,6 +143,12 @@ class YtDlpWorker:
             if configuration.js_runtime_path:
                 runtime_options["path"] = configuration.js_runtime_path
             options["js_runtimes"] = {configuration.js_runtime: runtime_options}
+        if request.profile == "youtube_public" and configuration.youtube_player_clients:
+            options["extractor_args"] = {
+                "youtube": {
+                    "player_client": list(configuration.youtube_player_clients),
+                }
+            }
         if configuration.cookie_file:
             options["cookiefile"] = configuration.cookie_file
         return options
