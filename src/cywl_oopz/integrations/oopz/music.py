@@ -23,6 +23,8 @@ from cywl_oopz.features.music.errors import MusicBackendClosedError
 from cywl_oopz.features.music.models import (
     MusicPlaybackEndReason,
     MusicPlaybackResult,
+    PlayableTrack,
+    ResolvedMediaInput,
     VoiceChannelKey,
 )
 from cywl_oopz.integrations.audio.ffmpeg import FfmpegMusicDecoderFactory
@@ -43,7 +45,7 @@ logger = logging.getLogger(__name__)
 class _MusicDecoderFactory(Protocol):
     async def validate(self) -> None: ...
 
-    async def open(self, stream_url: str) -> AudioDecoder: ...
+    async def open(self, media: ResolvedMediaInput) -> AudioDecoder: ...
 
 
 class OopzMusicPlayback:
@@ -209,7 +211,7 @@ class OopzMusicVoiceGateway:
     async def start_playback(
         self,
         channel: VoiceChannelKey,
-        stream_url: str,
+        playable: PlayableTrack,
     ) -> ObservedMusicPlayback:
         async with self._lock:
             if self._lease is None or self._lease.released or self._channel != channel:
@@ -217,8 +219,9 @@ class OopzMusicVoiceGateway:
             if self._playback is not None and not self._playback.finished:
                 raise RuntimeError("Music playback already has an active owner handle")
             logger.debug(
-                "Starting typed OOPZ music playback: channel=%s",
+                "Starting typed OOPZ music playback: channel=%s source=%s",
                 self._channel_ref(channel),
+                playable.track.source.value,
             )
             if self._audio_settings.enabled:
                 restarting = self._backend_recovery_pending or (
@@ -228,7 +231,7 @@ class OopzMusicVoiceGateway:
                 try:
                     bus = await self._ensure_bus_locked()
                     started_at = time.monotonic()
-                    decoder = await self._decoder_factory.open(stream_url)
+                    decoder = await self._decoder_factory.open(playable.media)
                     elapsed_ms = (time.monotonic() - started_at) * 1_000
                     await bus.record_decoder_start(elapsed_ms, restarted=restarting)
                     self._backend_recovery_pending = False
@@ -248,7 +251,7 @@ class OopzMusicVoiceGateway:
                 return playback
             await self._bot.voice.set_volume(DEFAULT_VOLUME)
             source_playback = OopzMusicPlayback(
-                await self._bot.voice.start_url_playback(stream_url)
+                await self._bot.voice.start_url_playback(playable.media.url)
             )
             playback = ObservedMusicPlayback(source_playback, self._lease)
             self._playback = playback

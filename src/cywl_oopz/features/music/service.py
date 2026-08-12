@@ -516,7 +516,7 @@ class MusicRequestService:
                             self._channel_ref(channel),
                         )
                         continue
-                    playback = await self._voice.start_playback(channel, playable.stream_url)
+                    playback = await self._voice.start_playback(channel, playable)
                     if session.skip_requested.is_set():
                         await playback.stop()
                         continue

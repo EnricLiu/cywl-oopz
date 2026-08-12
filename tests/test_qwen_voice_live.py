@@ -265,7 +265,7 @@ class _OopzQwenLiveRuntimeHarness:
         area_id: str,
         channel_id: str,
         target_person_id: str,
-        music_stream_url: str | None = None,
+        music_playable: PlayableTrack | None = None,
         music_first: bool = False,
     ) -> _OopzQwenLiveRuntimeHarness:
         bot = OopzBot(await OopzConfig.from_env_async())
@@ -290,13 +290,13 @@ class _OopzQwenLiveRuntimeHarness:
             await bot.rest.start()
             await bot.voice.start()
             music_channel = MusicVoiceChannelKey(area_id, channel_id)
-            if music_stream_url is not None and music_first:
+            if music_playable is not None and music_first:
                 music, playback = await cls._start_music(
                     bot,
                     channel_sessions,
                     audio_settings,
                     music_channel,
-                    music_stream_url,
+                    music_playable,
                 )
             lease = await channel_sessions.try_acquire(
                 VoiceParticipantRequest(
@@ -354,13 +354,13 @@ class _OopzQwenLiveRuntimeHarness:
                 build_provider,
             )
             await runtime.start()
-            if music_stream_url is not None and not music_first:
+            if music_playable is not None and not music_first:
                 music, playback = await cls._start_music(
                     bot,
                     channel_sessions,
                     audio_settings,
                     music_channel,
-                    music_stream_url,
+                    music_playable,
                 )
             return cls(
                 bot,
@@ -394,14 +394,14 @@ class _OopzQwenLiveRuntimeHarness:
         channel_sessions: OopzVoiceChannelSessionManager,
         audio_settings: AudioMixerSettings,
         channel: MusicVoiceChannelKey,
-        stream_url: str,
+        playable: PlayableTrack,
     ) -> tuple[OopzMusicVoiceGateway, MusicPlayback]:
         gateway = OopzMusicVoiceGateway(bot, channel_sessions, audio_settings)
         try:
             await gateway.validate_capabilities()
             if not await gateway.acquire(channel):
                 pytest.fail("shared OOPZ voice channel rejected the music participant")
-            playback = await gateway.start_playback(channel, stream_url)
+            playback = await gateway.start_playback(channel, playable)
         except BaseException:
             await gateway.aclose()
             raise
@@ -440,7 +440,7 @@ class _OopzQwenLiveRuntimeHarness:
         await self.music.aclose()
         self.music = None
 
-    async def restart_music(self, stream_url: str) -> MusicPlayback:
+    async def restart_music(self, playable: PlayableTrack) -> MusicPlayback:
         if self.music is None:
             raise RuntimeError("music gateway is not active")
         self.playback = await self.music.start_playback(
@@ -448,7 +448,7 @@ class _OopzQwenLiveRuntimeHarness:
                 self.voice_channel.area_id,
                 self.voice_channel.channel_id,
             ),
-            stream_url,
+            playable,
         )
         return self.playback
 
@@ -862,7 +862,7 @@ async def test_live_oopz_qwen_and_netease_share_one_master_bus(
         area_id=_required_live_value("OOPZ_AREA_ID"),
         channel_id=_required_live_value("OOPZ_CHANNEL_ID"),
         target_person_id=_required_live_value("OOPZ_TARGET_PERSON_UID"),
-        music_stream_url=playable.stream_url,
+        music_playable=playable,
         music_first=music_first,
     )
     assert harness.playback is not None
@@ -960,7 +960,7 @@ async def test_live_oopz_qwen_netease_wall_clock_soak() -> None:
             area_id=_required_live_value("OOPZ_AREA_ID"),
             channel_id=_required_live_value("OOPZ_CHANNEL_ID"),
             target_person_id=_required_live_value("OOPZ_TARGET_PERSON_UID"),
-            music_stream_url=playable.stream_url,
+            music_playable=playable,
             music_first=True,
         )
     except BaseException:
@@ -994,7 +994,7 @@ async def test_live_oopz_qwen_netease_wall_clock_soak() -> None:
                     playable = await catalog.resolve(playable.track)
                 except MusicNotFoundError:
                     playable = await _resolve_live_music_from(catalog, music_settings)
-                playback = await harness.restart_music(playable.stream_url)
+                playback = await harness.restart_music(playable)
                 playback_finished = asyncio.create_task(playback.wait_finished())
                 track_restarts += 1
             stats = await bus.stats()

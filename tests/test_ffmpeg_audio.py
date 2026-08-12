@@ -16,6 +16,7 @@ from cywl_oopz.features.music.errors import (
     MusicDecoderError,
     MusicDecoderUnavailableError,
 )
+from cywl_oopz.features.music.models import ResolvedMediaInput
 from cywl_oopz.integrations.audio.ffmpeg import (
     FfmpegCapabilityProbe,
     FfmpegMusicDecoder,
@@ -34,6 +35,10 @@ def settings(**changes: str) -> AudioMixerSettings:
             **changes,
         }
     )
+
+
+def media(url: str) -> ResolvedMediaInput:
+    return ResolvedMediaInput(url)
 
 
 class FakeProcess:
@@ -203,7 +208,7 @@ async def test_ffmpeg_capability_probe_rejects_missing_and_accepts_real_signatur
 
 def test_ffmpeg_command_is_argument_list_with_canonical_output() -> None:
     stream_url = "https://music.example/song?id=1&token=sensitive"
-    command = FfmpegMusicDecoder.command("/usr/bin/ffmpeg", stream_url, settings())
+    command = FfmpegMusicDecoder.command("/usr/bin/ffmpeg", media(stream_url), settings())
 
     assert command[0] == "/usr/bin/ffmpeg"
     assert command[command.index("-i") + 1] == stream_url
@@ -224,7 +229,7 @@ def test_ffmpeg_command_is_argument_list_with_canonical_output() -> None:
 
     local_command = FfmpegMusicDecoder.command(
         "/usr/bin/ffmpeg",
-        "/tmp/music.wav",
+        media("/tmp/music.wav"),
         settings(),
     )
     assert "-rw_timeout" not in local_command
@@ -243,7 +248,7 @@ async def test_ffmpeg_decoder_emits_full_and_zero_padded_tail() -> None:
 
     decoder = await FfmpegMusicDecoder.open(
         "/fixture/ffmpeg",
-        "https://music.example/audio",
+        media("https://music.example/audio"),
         settings(),
         process_factory=process_factory,
     )
@@ -268,7 +273,7 @@ async def test_ffmpeg_decoder_pulls_one_block_without_user_space_read_ahead() ->
 
     decoder = await FfmpegMusicDecoder.open(
         "/fixture/ffmpeg",
-        "https://music.example/audio",
+        media("https://music.example/audio"),
         settings(),
         process_factory=process_factory,
     )
@@ -294,7 +299,7 @@ async def test_ffmpeg_decoder_rejects_misaligned_tail_and_hides_stderr() -> None
     with pytest.raises(MusicDecoderError) as failure:
         await FfmpegMusicDecoder.open(
             "/fixture/ffmpeg",
-            secret,
+            media(secret),
             settings(),
             process_factory=process_factory,
         )
@@ -315,7 +320,7 @@ async def test_real_ffmpeg_decodes_local_wav_when_available(tmp_path: Path) -> N
         output.writeframes((1000).to_bytes(2, "little", signed=True) * frames)
 
     factory = FfmpegMusicDecoderFactory(settings())
-    decoder = await factory.open(str(wav_path))
+    decoder = await factory.open(media(str(wav_path)))
     decoded = [block async for block in decoder]
 
     assert sum(block.valid_frames for block in decoded) == frames
@@ -334,7 +339,7 @@ async def test_real_ffmpeg_closes_early_with_buffered_stdout(tmp_path: Path) -> 
         output.writeframes((1000).to_bytes(2, "little", signed=True) * frames)
 
     factory = FfmpegMusicDecoderFactory(settings(CYWL_AUDIO_DECODER_STOP_TIMEOUT_SECONDS="0.2"))
-    decoder = await factory.open(str(wav_path))
+    decoder = await factory.open(media(str(wav_path)))
     await asyncio.sleep(0.05)
 
     async with asyncio.timeout(1):
@@ -355,7 +360,7 @@ async def test_real_ffmpeg_slow_http_startup_times_out_without_logging_url(
             with pytest.raises(MusicDecoderError, match="startup timed out"):
                 await FfmpegMusicDecoder.open(
                     shutil.which("ffmpeg") or "ffmpeg",
-                    server.url(secret),
+                    media(server.url(secret)),
                     settings(
                         CYWL_AUDIO_DECODER_START_TIMEOUT_SECONDS="2",
                         CYWL_AUDIO_DECODER_READ_TIMEOUT_SECONDS="5",
@@ -380,7 +385,7 @@ async def test_real_ffmpeg_reconnects_after_temporary_http_503() -> None:
     try:
         decoder = await FfmpegMusicDecoder.open(
             shutil.which("ffmpeg") or "ffmpeg",
-            server.url(),
+            media(server.url()),
             settings(
                 CYWL_AUDIO_DECODER_START_TIMEOUT_SECONDS="5",
                 CYWL_AUDIO_DECODER_READ_TIMEOUT_SECONDS="2",

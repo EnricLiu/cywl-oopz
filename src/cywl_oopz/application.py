@@ -125,8 +125,10 @@ from .features.chat.provider import ChatProvider, DisabledChatProvider
 from .features.chat.repository import SqlAlchemyConversationRepository
 from .features.chat.service import ChatService
 from .features.chat.tasks import ChatTaskSupervisor
+from .features.music.catalog import CompositeMusicCatalog, MusicProviderRegistry
 from .features.music.commands import MusicCommand
-from .features.music.netease import NeteaseMusicCatalog
+from .features.music.models import MusicSourceKind
+from .features.music.netease import NeteaseMusicProvider
 from .features.music.playlist_repository import SqlAlchemyMusicPlaylistRepository
 from .features.music.playlists import MusicPlaylistService
 from .features.music.service import MusicRequestService
@@ -250,7 +252,8 @@ class BotApplication:
             ),
         ]
         self.music: MusicRequestService | None = None
-        self.music_catalog: NeteaseMusicCatalog | None = None
+        self.music_catalog: CompositeMusicCatalog | None = None
+        self.netease_music_provider: NeteaseMusicProvider | None = None
         self.music_playlists: MusicPlaylistService | None = None
         enabled_agent_tools = settings.agent.enabled_tools
         if settings.agent.skills_enabled:
@@ -266,7 +269,11 @@ class BotApplication:
             )
         self.music_voice: OopzMusicVoiceGateway | None = None
         if settings.music.enabled:
-            self.music_catalog = NeteaseMusicCatalog(settings.music)
+            self.netease_music_provider = NeteaseMusicProvider(settings.music)
+            self.music_catalog = CompositeMusicCatalog(
+                MusicProviderRegistry((self.netease_music_provider,)),
+                MusicSourceKind.NETEASE,
+            )
             self.music_voice = OopzMusicVoiceGateway(
                 self.bot,
                 self.voice_channel_sessions,
@@ -281,7 +288,7 @@ class BotApplication:
                 settings.music,
                 SqlAlchemyMusicPlaylistRepository(self.database.session_factory),
                 self.music,
-                self.music_catalog,
+                self.netease_music_provider,
             )
             music_tool_options = {
                 "timeout_seconds": settings.agent.tool_timeout_seconds,

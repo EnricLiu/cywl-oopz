@@ -8,6 +8,44 @@ from enum import StrEnum
 from uuid import UUID, uuid4
 
 
+class MusicSourceKind(StrEnum):
+    """Stable provider identifiers persisted with queue and playlist metadata."""
+
+    NETEASE = "netease"
+    YOUTUBE = "youtube"
+    BILIBILI = "bilibili"
+
+
+@dataclass(frozen=True, slots=True)
+class MusicTrackReference:
+    """A provider-owned stable identifier safe to queue and persist."""
+
+    source: MusicSourceKind
+    source_id: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "source", MusicSourceKind(self.source))
+        normalized = self.source_id.strip()
+        if not normalized:
+            raise ValueError("Music source ID must not be empty")
+        object.__setattr__(self, "source_id", normalized)
+
+
+@dataclass(frozen=True, slots=True)
+class MusicPageLocator:
+    """An allowed page URL that must be normalized before it can be persisted."""
+
+    source: MusicSourceKind
+    url: str = field(repr=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "source", MusicSourceKind(self.source))
+        normalized = self.url.strip()
+        if not normalized:
+            raise ValueError("Music page URL must not be empty")
+        object.__setattr__(self, "url", normalized)
+
+
 @dataclass(frozen=True, slots=True)
 class VoiceChannelKey:
     """Stable state boundary for one OOPZ voice channel."""
@@ -24,29 +62,72 @@ class VoiceChannelKey:
 class MusicTrack:
     """Catalog metadata safe to persist in an in-memory queue or expose to a model."""
 
-    source: str
+    source: MusicSourceKind
     source_id: str
     title: str
     artists: tuple[str, ...]
     duration_ms: int | None = None
 
     def __post_init__(self) -> None:
-        if not self.source.strip() or not self.source_id.strip() or not self.title.strip():
+        object.__setattr__(self, "source", MusicSourceKind(self.source))
+        if not self.source_id.strip() or not self.title.strip():
             raise ValueError("Music source, source ID, and title must not be empty")
         if self.duration_ms is not None and self.duration_ms < 0:
             raise ValueError("Music duration must not be negative")
 
+    @property
+    def reference(self) -> MusicTrackReference:
+        """Return the stable provider reference represented by this snapshot."""
+        return MusicTrackReference(self.source, self.source_id)
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedMediaInput:
+    """Short-lived media input resolved immediately before playback."""
+
+    url: str = field(repr=False)
+    http_headers: tuple[tuple[str, str], ...] = field(default=(), repr=False)
+    protocol: str | None = None
+    format_id: str | None = None
+    container: str | None = None
+    audio_codec: str | None = None
+
+    def __post_init__(self) -> None:
+        normalized = self.url.strip()
+        if not normalized:
+            raise ValueError("Music media URL must not be empty")
+        object.__setattr__(self, "url", normalized)
+
 
 @dataclass(frozen=True, slots=True)
 class PlayableTrack:
-    """A catalog track with a short-lived stream URL resolved at playback time."""
+    """A catalog track paired with short-lived playback transport details."""
 
     track: MusicTrack
-    stream_url: str
+    media: ResolvedMediaInput
 
-    def __post_init__(self) -> None:
-        if not self.stream_url.strip():
-            raise ValueError("Music stream URL must not be empty")
+    @property
+    def stream_url(self) -> str:
+        """Compatibility view for callers migrating to ``media``."""
+        return self.media.url
+
+
+class MusicProviderHealthState(StrEnum):
+    """Runtime readiness of one independently replaceable provider."""
+
+    READY = "ready"
+    DEGRADED = "degraded"
+    UNAVAILABLE = "unavailable"
+    AUTHENTICATION_REQUIRED = "authentication_required"
+
+
+@dataclass(frozen=True, slots=True)
+class MusicProviderHealth:
+    """Small provider health value safe to show in commands and logs."""
+
+    source: MusicSourceKind
+    state: MusicProviderHealthState
+    detail: str = ""
 
 
 @dataclass(frozen=True, slots=True)

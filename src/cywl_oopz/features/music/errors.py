@@ -13,6 +13,18 @@ class MusicCatalogError(MusicError):
     """Raised when the configured catalog cannot return a valid result."""
 
 
+class MusicSourceDisabledError(MusicCatalogError):
+    """Raised when a valid request targets a provider not enabled by this deployment."""
+
+
+class MusicSourceUnavailableError(MusicCatalogError):
+    """Raised when an enabled provider cannot currently serve requests."""
+
+
+class MusicReferenceError(MusicError):
+    """Raised when a music URL or stable provider identifier is invalid."""
+
+
 class MusicQueryError(MusicError):
     """Raised when a music query is empty or exceeds project bounds."""
 

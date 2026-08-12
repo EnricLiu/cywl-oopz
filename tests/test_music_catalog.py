@@ -10,7 +10,12 @@ from cywl_oopz.features.music.errors import (
     MusicNotFoundError,
     NeteasePlaylistReferenceError,
 )
-from cywl_oopz.features.music.models import MusicTrack, NeteasePlaylistSnapshot
+from cywl_oopz.features.music.models import (
+    MusicSourceKind,
+    MusicTrack,
+    MusicTrackReference,
+    NeteasePlaylistSnapshot,
+)
 from cywl_oopz.features.music.netease import (
     NeteaseMusicCatalog,
     NeteasePlaylistReference,
@@ -198,4 +203,44 @@ async def test_netease_catalog_rejects_empty_or_invalid_results() -> None:
     with pytest.raises(MusicCatalogError):
         await catalog.search("invalid", limit=1)
 
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_netease_catalog_looks_up_one_stable_song_reference() -> None:
+    requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "songs": [
+                    {
+                        "id": 831,
+                        "name": "Tell Your World",
+                        "ar": [{"name": "初音未来"}],
+                        "dt": 245000,
+                    }
+                ]
+            },
+        )
+
+    client = httpx.AsyncClient(
+        base_url="https://music.example",
+        transport=httpx.MockTransport(respond),
+    )
+    catalog = NeteaseMusicCatalog(settings(), client)
+
+    track = await catalog.lookup(MusicTrackReference(MusicSourceKind.NETEASE, "831"))
+
+    assert track == MusicTrack(
+        MusicSourceKind.NETEASE,
+        "831",
+        "Tell Your World",
+        ("初音未来",),
+        245000,
+    )
+    assert requests[0].url.path == "/song/detail"
+    assert requests[0].url.params["ids"] == "831"
     await client.aclose()

@@ -27,6 +27,7 @@ from cywl_oopz.features.music.models import (
     PlaybackOrder,
     PlaybackState,
     RepeatPolicy,
+    ResolvedMediaInput,
     VoiceChannelKey,
 )
 from cywl_oopz.features.music.service import MusicRequestService
@@ -68,7 +69,10 @@ class FakeCatalog:
 
     async def resolve(self, track: MusicTrack) -> PlayableTrack:
         self.resolved.append(track.source_id)
-        return PlayableTrack(track, f"https://music.example/{track.source_id}.mp3")
+        return PlayableTrack(
+            track,
+            ResolvedMediaInput(f"https://music.example/{track.source_id}.mp3"),
+        )
 
     async def aclose(self) -> None:
         self.closed = True
@@ -110,12 +114,12 @@ class FakeVoice:
     async def start_playback(
         self,
         channel: VoiceChannelKey,
-        stream_url: str,
+        playable: PlayableTrack,
     ) -> FakePlayback:
         assert self.acquired == channel
         self.current_finished = asyncio.Event()
         self.current_playback = FakePlayback(self, self.current_finished)
-        self.played.append((channel, stream_url))
+        self.played.append((channel, playable.media.url))
         self.play_started.set()
         return self.current_playback
 
@@ -190,14 +194,14 @@ class RecoveringVoice(FakeVoice):
     async def start_playback(
         self,
         channel: VoiceChannelKey,
-        stream_url: str,
+        playable: PlayableTrack,
     ):
         if self._failures_remaining:
             self._failures_remaining -= 1
-            self.played.append((channel, stream_url))
+            self.played.append((channel, playable.media.url))
             self.play_started.set()
             return TerminalPlayback(MusicPlaybackResult(MusicPlaybackEndReason.BACKEND_CLOSED))
-        return await super().start_playback(channel, stream_url)
+        return await super().start_playback(channel, playable)
 
 
 class StartupRecoveringVoice(FakeVoice):
@@ -208,13 +212,13 @@ class StartupRecoveringVoice(FakeVoice):
     async def start_playback(
         self,
         channel: VoiceChannelKey,
-        stream_url: str,
+        playable: PlayableTrack,
     ):
         if self._failures_remaining:
             self._failures_remaining -= 1
-            self.played.append((channel, stream_url))
+            self.played.append((channel, playable.media.url))
             raise MusicBackendClosedError("fixture startup backend failure")
-        return await super().start_playback(channel, stream_url)
+        return await super().start_playback(channel, playable)
 
 
 class VoiceLeftRecoveringVoice(FakeVoice):
@@ -226,13 +230,13 @@ class VoiceLeftRecoveringVoice(FakeVoice):
     async def start_playback(
         self,
         channel: VoiceChannelKey,
-        stream_url: str,
+        playable: PlayableTrack,
     ):
         if not self._failed:
             self._failed = True
-            self.played.append((channel, stream_url))
+            self.played.append((channel, playable.media.url))
             return TerminalPlayback(MusicPlaybackResult(MusicPlaybackEndReason.VOICE_LEFT))
-        return await super().start_playback(channel, stream_url)
+        return await super().start_playback(channel, playable)
 
     async def reset(self, channel: VoiceChannelKey) -> None:
         self.reset_calls += 1

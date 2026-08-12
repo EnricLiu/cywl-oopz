@@ -6,11 +6,15 @@ from typing import Protocol
 from uuid import UUID
 
 from .models import (
+    MusicPageLocator,
     MusicPlaybackResult,
     MusicPlaylist,
     MusicPlaylistEntry,
     MusicPlaylistSummary,
+    MusicProviderHealth,
+    MusicSourceKind,
     MusicTrack,
+    MusicTrackReference,
     NeteasePlaylistSnapshot,
     PlayableTrack,
     PlaylistClear,
@@ -21,17 +25,58 @@ from .models import (
 )
 
 
-class MusicCatalog(Protocol):
-    """Search metadata and resolve expiring stream URLs."""
+class MusicProvider(Protocol):
+    """One source-specific metadata and playback adapter."""
+
+    @property
+    def source(self) -> MusicSourceKind:
+        """Return the provider identifier persisted with every track."""
 
     async def search(self, query: str, *, limit: int) -> tuple[MusicTrack, ...]:
         """Return a bounded ordered result set."""
 
+    async def lookup(self, reference: MusicTrackReference) -> MusicTrack:
+        """Load trusted metadata for one normalized stable reference."""
+
+    async def inspect(self, locator: MusicPageLocator) -> MusicTrack:
+        """Normalize one allowed page locator into a trusted track snapshot."""
+
     async def resolve(self, track: MusicTrack) -> PlayableTrack:
         """Resolve a playable URL immediately before playback."""
 
+    async def health(self) -> MusicProviderHealth:
+        """Return current provider readiness without exposing credentials."""
+
     async def aclose(self) -> None:
         """Release owned HTTP resources."""
+
+
+class MusicCatalog(Protocol):
+    """Route provider-neutral music use cases to configured sources."""
+
+    async def search(
+        self,
+        query: str,
+        *,
+        limit: int,
+        source: MusicSourceKind | None = None,
+    ) -> tuple[MusicTrack, ...]:
+        """Search one explicit source or the configured default."""
+
+    async def lookup(self, reference: MusicTrackReference) -> MusicTrack:
+        """Load one stable reference through its owning provider."""
+
+    async def inspect(self, locator: MusicPageLocator) -> MusicTrack:
+        """Normalize one allowed page locator through its owning provider."""
+
+    async def resolve(self, track: MusicTrack) -> PlayableTrack:
+        """Resolve one track through its owning provider."""
+
+    async def health(self) -> tuple[MusicProviderHealth, ...]:
+        """Return health for all enabled providers in declaration order."""
+
+    async def aclose(self) -> None:
+        """Close all providers exactly once."""
 
 
 class MusicPlaylistSource(Protocol):
@@ -74,9 +119,9 @@ class MusicVoiceGateway(Protocol):
     async def start_playback(
         self,
         channel: VoiceChannelKey,
-        stream_url: str,
+        playable: PlayableTrack,
     ) -> MusicPlayback:
-        """Begin one typed URL playback under an existing music lease."""
+        """Begin one typed playback under an existing music lease."""
 
     async def release(self, channel: VoiceChannelKey) -> bool:
         """Release only the matching music lease after its queue drains."""
