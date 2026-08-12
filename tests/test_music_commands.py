@@ -20,8 +20,11 @@ from cywl_oopz.features.music.models import (
     MusicPlaylist,
     MusicPlaylistEntry,
     MusicPlaylistSummary,
+    MusicProviderHealth,
+    MusicProviderHealthState,
     MusicQueueClearResult,
     MusicQueueSnapshot,
+    MusicSourceKind,
     MusicTrack,
     NeteasePlaylistImport,
     NeteasePlaylistSnapshot,
@@ -75,21 +78,44 @@ class StubMusic:
         self.upcoming = (QueuedTrack(track("melt", "Melt"), "person"),)
         self.policy = MusicPlaybackPolicy()
         self.calls: list[tuple[object, ...]] = []
+        self.default_source = MusicSourceKind.NETEASE
 
-    async def search(self, query: str, *, limit: int | None = None):
-        self.calls.append(("search", query, limit))
-        return (track("39", "39"), track("melt", "Melt"))[:limit]
+    async def search(self, query: str, *, source=None, limit: int | None = None):
+        self.calls.append(("search", query, source, limit))
+        target_source = source or MusicSourceKind.NETEASE
+        return (
+            MusicTrack(target_source, "39", "39", ("初音未来",), 180_000),
+            MusicTrack(target_source, "melt", "Melt", ("初音未来",), 180_000),
+        )[:limit]
 
-    async def enqueue(
+    async def enqueue_input(
         self,
         identity: AgentIdentity,
-        query: str,
+        value: str,
         *,
+        source=None,
         idempotency_key: str = "",
     ) -> EnqueueResult:
-        self.calls.append(("enqueue", identity, query, idempotency_key))
-        item = QueuedTrack(track(query, query), identity.person_id)
+        self.calls.append(("enqueue_input", identity, value, source, idempotency_key))
+        item = QueuedTrack(
+            MusicTrack(source or "netease", value, value, ("初音未来",), 180_000),
+            identity.person_id,
+        )
         return EnqueueResult(self.channel, item, 2, False)
+
+    async def health(self) -> tuple[MusicProviderHealth, ...]:
+        self.calls.append(("health",))
+        return (
+            MusicProviderHealth(
+                MusicSourceKind.NETEASE,
+                MusicProviderHealthState.READY,
+            ),
+            MusicProviderHealth(
+                MusicSourceKind.BILIBILI,
+                MusicProviderHealthState.DEGRADED,
+                "anonymous search limited",
+            ),
+        )
 
     async def queue(self, identity: AgentIdentity) -> MusicQueueSnapshot:
         self.calls.append(("queue", identity))
@@ -208,14 +234,26 @@ class StubPlaylists:
         self.calls.append(("clear", identity, playlist_id))
         return PlaylistClear(playlist_id, self.first.name, 1)
 
-    async def add(
+    async def add_input(
         self,
         identity: AgentIdentity,
         playlist_id: UUID,
-        query: str,
+        value: str,
+        *,
+        source=None,
     ) -> MusicPlaylistEntry:
-        self.calls.append(("add", identity, playlist_id, query))
-        return self.first.entries[0]
+        self.calls.append(("add_input", identity, playlist_id, value, source))
+        entry = self.first.entries[0]
+        if source is None:
+            return entry
+        return MusicPlaylistEntry(
+            entry.id,
+            entry.playlist_id,
+            entry.position,
+            MusicTrack(source, "39", "39", ("初音未来",), 180_000),
+            entry.added_by_person_id,
+            entry.created_at,
+        )
 
     async def remove(
         self,
@@ -290,8 +328,45 @@ async def test_music_command_playback_search_queue_policy_and_controls() -> None
     assert "已暂停" in paused.replies[0]
     assert "继续播放" in resumed.replies[0]
     assert "移除 3 首" in cleared.replies[0]
-    enqueue = next(call for call in music.calls if call[0] == "enqueue")
-    assert enqueue[2:] == ("Tell Your World", "music-command:message")
+    enqueue = next(call for call in music.calls if call[0] == "enqueue_input")
+    assert enqueue[2:] == ("Tell Your World", None, "music-command:message")
+
+
+@pytest.mark.asyncio
+async def test_music_command_routes_sources_urls_and_health_explicitly() -> None:
+    router, music, playlists = fixture()
+
+    played = await dispatch(
+        router,
+        "!music play --source youtube https://youtu.be/dQw4w9WgXcQ",
+    )
+    searched = await dispatch(router, "!music search --source bilibili 初音未来")
+    added = await dispatch(
+        router,
+        "!music playlist add #1 --source youtube Tell Your World",
+    )
+    sources = await dispatch(router, "!music sources")
+    misplaced = await dispatch(router, "!music search 初音未来 --source youtube")
+
+    enqueue = next(call for call in music.calls if call[0] == "enqueue_input")
+    search = next(call for call in music.calls if call[0] == "search")
+    playlist_add = next(call for call in playlists.calls if call[0] == "add_input")
+    assert enqueue[2:4] == (
+        "https://youtu.be/dQw4w9WgXcQ",
+        MusicSourceKind.YOUTUBE,
+    )
+    assert search[1:] == ("初音未来", MusicSourceKind.BILIBILI, 5)
+    assert playlist_add[2:] == (
+        playlists.first_id,
+        "Tell Your World",
+        MusicSourceKind.YOUTUBE,
+    )
+    assert "▶️" in played.replies[0]
+    assert "Bilibili · 找到 2 首" in searched.replies[0]
+    assert "▶️" in added.replies[0]
+    assert "✅ 网易云 · 默认" in sources.replies[0]
+    assert "⚠️ Bilibili · anonymous search limited" in sources.replies[0]
+    assert "Music 命令" in misplaced.replies[0]
 
 
 @pytest.mark.asyncio
@@ -312,7 +387,7 @@ async def test_music_command_manages_playlists_with_human_friendly_indexes() -> 
     assert "**未来歌单** · 1 首" in shown.replies[0]
     assert "夜间电台" in created.replies[0]
     assert "初音收藏" in renamed.replies[0]
-    assert "已把 **39** 加入" in added.replies[0]
+    assert "已把 ☁️ **39**" in added.replies[0]
     assert "移除歌曲" in removed.replies[0]
     assert "重建播放队列" in loaded.replies[0]
     assert "移除 1 首" in cleared.replies[0]
@@ -343,8 +418,15 @@ async def test_music_command_previews_and_explicitly_imports_partial_netease_pla
 @pytest.mark.asyncio
 async def test_music_command_maps_expected_errors_and_invalid_syntax() -> None:
     class MissingVoiceMusic(StubMusic):
-        async def enqueue(self, identity, query, *, idempotency_key=""):
-            del identity, query, idempotency_key
+        async def enqueue_input(
+            self,
+            identity,
+            value,
+            *,
+            source=None,
+            idempotency_key="",
+        ):
+            del identity, value, source, idempotency_key
             raise MusicVoiceChannelRequiredError
 
     class ConflictingPlaylists(StubPlaylists):
@@ -420,5 +502,7 @@ def test_music_command_renderer_bounds_large_queue_and_playlist_outputs() -> Non
 
     assert "还有 32 首" in queue_text
     assert "还有 37 首" in playlist_text
+    assert "☁️" in queue_text
+    assert "☁️" in playlist_text
     assert len(queue_text) < 2000
     assert len(playlist_text) < 2000

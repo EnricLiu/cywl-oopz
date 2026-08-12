@@ -16,8 +16,13 @@ from cywl_oopz.features.chat.models import ConversationKey
 
 from .errors import (
     MusicAreaRequiredError,
+    MusicAuthenticationRequiredError,
     MusicCatalogError,
     MusicError,
+    MusicExtractionTimeoutError,
+    MusicGeoRestrictedError,
+    MusicLiveUnsupportedError,
+    MusicNoAudioFormatError,
     MusicNotFoundError,
     MusicPlaybackError,
     MusicPlaylistConflictError,
@@ -27,6 +32,12 @@ from .errors import (
     MusicPlaylistNotFoundError,
     MusicQueryError,
     MusicQueueFullError,
+    MusicReferenceError,
+    MusicSourceDisabledError,
+    MusicSourceRateLimitedError,
+    MusicSourceUnavailableError,
+    MusicTrackTooLongError,
+    MusicUnsupportedContentError,
     MusicVoiceBusyError,
     MusicVoiceChannelRequiredError,
     NeteasePlaylistIncompleteError,
@@ -37,7 +48,10 @@ from .errors import (
 from .models import (
     MusicPlaylist,
     MusicPlaylistSummary,
+    MusicProviderHealth,
+    MusicProviderHealthState,
     MusicQueueSnapshot,
+    MusicSourceKind,
     MusicTrack,
     NeteasePlaylistSnapshot,
     PlaybackOrder,
@@ -64,13 +78,20 @@ class MusicCommandRenderer:
     track_title_limit: int = 72
     track_artists_limit: int = 48
 
+    _SOURCE_NAMES = {
+        MusicSourceKind.NETEASE: ("☁️", "网易云"),
+        MusicSourceKind.YOUTUBE: ("▶️", "YouTube"),
+        MusicSourceKind.BILIBILI: ("📺", "Bilibili"),
+    }
+
     def usage(self) -> str:
         root = f"{self.prefix}music"
         return "\n".join(
             (
                 "🎵 **Music 命令**",
-                f"{root} play <歌曲/歌手> · 点歌",
-                f"{root} search <关键词> · 搜索歌曲",
+                f"{root} play [--source 来源] <关键词或单曲URL>",
+                f"{root} search [--source 来源] <关键词>",
+                f"{root} sources · 查看来源状态",
                 f"{root} queue · 查看队列",
                 f"{root} skip | pause | resume | clear",
                 f"{root} mode [sequential|shuffle] [off|one|all]",
@@ -78,10 +99,11 @@ class MusicCommandRenderer:
                 f"{root} playlist show|load|delete|clear <#编号或UUID>",
                 f"{root} playlist create <名称>",
                 f"{root} playlist rename <歌单> <新名称>",
-                f"{root} playlist add <歌单> <歌曲/歌手>",
+                f"{root} playlist add <歌单> [--source 来源] <关键词或URL>",
                 f"{root} playlist remove <歌单> <曲目序号或条目UUID>",
                 f"{root} playlist preview <网易云歌单ID或链接>",
                 f"{root} playlist import <ID或链接> [--partial] [新名称]",
+                "来源：auto、netease、youtube、bilibili；--source 必须放在内容前。",
                 "歌单列表中的 #编号会在每次操作时重新解析。",
             )
         )
@@ -89,10 +111,29 @@ class MusicCommandRenderer:
     def tracks(self, tracks: tuple[MusicTrack, ...]) -> str:
         if not tracks:
             return "没有找到匹配的歌曲。"
-        lines = [f"🔎 **找到 {len(tracks)} 首歌曲**"]
-        lines.extend(
-            f"{index}. {self._track(track)}" for index, track in enumerate(tracks, start=1)
-        )
+        sources = {track.source for track in tracks}
+        scope = self.source_name(next(iter(sources))) if len(sources) == 1 else "多来源"
+        lines = [f"🔎 **{scope} · 找到 {len(tracks)} 首**"]
+        lines.extend(f"{index}. {self.track(track)}" for index, track in enumerate(tracks, start=1))
+        return "\n".join(lines)
+
+    def sources(
+        self,
+        health: tuple[MusicProviderHealth, ...],
+        *,
+        default_source: MusicSourceKind,
+    ) -> str:
+        lines = ["🎵 **音乐来源**"]
+        for item in health:
+            status = {
+                MusicProviderHealthState.READY: "✅",
+                MusicProviderHealthState.DEGRADED: "⚠️",
+                MusicProviderHealthState.UNAVAILABLE: "❌",
+                MusicProviderHealthState.AUTHENTICATION_REQUIRED: "🔐",
+            }[item.state]
+            default = " · 默认" if item.source is default_source else ""
+            detail = f" · {self._bounded(item.detail, 80)}" if item.detail else ""
+            lines.append(f"{status} {self.source_name(item.source)}{default}{detail}")
         return "\n".join(lines)
 
     def queue(self, snapshot: MusicQueueSnapshot) -> str:
@@ -117,11 +158,11 @@ class MusicCommandRenderer:
             f"状态：{state_names[snapshot.state.value]} · {order} · {repeat}",
         ]
         if snapshot.current is not None:
-            lines.append(f"▶ {self._track(snapshot.current.track)}")
+            lines.append(f"▶ {self.track(snapshot.current.track)}")
         if snapshot.upcoming:
             lines.append("**接下来**")
             lines.extend(
-                f"{index}. {self._track(item.track)}"
+                f"{index}. {self.track(item.track)}"
                 for index, item in enumerate(
                     snapshot.upcoming[: self.queue_limit],
                     start=1,
@@ -171,7 +212,7 @@ class MusicCommandRenderer:
     def playlist(self, playlist: MusicPlaylist) -> str:
         lines = [f"📀 **{playlist.name}** · {playlist.track_count} 首"]
         visible = playlist.entries[: self.playlist_track_limit]
-        lines.extend(f"{entry.position}. {self._track(entry.track)}" for entry in visible)
+        lines.extend(f"{entry.position}. {self.track(entry.track)}" for entry in visible)
         if len(playlist.entries) > len(visible):
             lines.append(f"… 还有 {len(playlist.entries) - len(visible)} 首")
         if not playlist.entries:
@@ -185,7 +226,7 @@ class MusicCommandRenderer:
             f"完整性：{'完整' if playlist.complete else '不完整，需要 --partial 确认'}",
         ]
         lines.extend(
-            f"{index}. {self._track(track)}"
+            f"{index}. {self.track(track)}"
             for index, track in enumerate(
                 playlist.tracks[: self.playlist_track_limit],
                 start=1,
@@ -197,10 +238,19 @@ class MusicCommandRenderer:
             )
         return "\n".join(lines)
 
-    def _track(self, track: MusicTrack) -> str:
+    def track(self, track: MusicTrack) -> str:
         title = self._bounded(track.title, self.track_title_limit)
         artists = self._bounded(" / ".join(track.artists), self.track_artists_limit)
-        return f"**{title}** · {artists}" if artists else f"**{title}**"
+        marker = self.source_marker(track.source)
+        return f"{marker} **{title}** · {artists}" if artists else f"{marker} **{title}**"
+
+    @classmethod
+    def source_marker(cls, source: MusicSourceKind) -> str:
+        return cls._SOURCE_NAMES[MusicSourceKind(source)][0]
+
+    @classmethod
+    def source_name(cls, source: MusicSourceKind) -> str:
+        return cls._SOURCE_NAMES[MusicSourceKind(source)][1]
 
     @staticmethod
     def _bounded(value: str, limit: int) -> str:
@@ -232,6 +282,18 @@ class MusicCommand:
         "list": RepeatPolicy.ALL,
         "列表": RepeatPolicy.ALL,
     }
+    _SOURCE_ALIASES = {
+        "auto": None,
+        "自动": None,
+        "netease": MusicSourceKind.NETEASE,
+        "163": MusicSourceKind.NETEASE,
+        "网易云": MusicSourceKind.NETEASE,
+        "youtube": MusicSourceKind.YOUTUBE,
+        "yt": MusicSourceKind.YOUTUBE,
+        "bilibili": MusicSourceKind.BILIBILI,
+        "bili": MusicSourceKind.BILIBILI,
+        "b站": MusicSourceKind.BILIBILI,
+    }
 
     def __init__(
         self,
@@ -256,6 +318,14 @@ class MusicCommand:
                 await self._play(identity, arguments, context)
             elif action in {"search", "find", "搜索"}:
                 await self._search(arguments, context)
+            elif action in {"sources", "source", "来源"}:
+                self._require_count(arguments, 0)
+                await context.reply(
+                    self._renderer.sources(
+                        await self._music.health(),
+                        default_source=self._music.default_source,
+                    )
+                )
             elif action in {"queue", "status", "队列"}:
                 self._require_count(arguments, 0)
                 await context.reply(self._renderer.queue(await self._music.queue(identity)))
@@ -309,20 +379,22 @@ class MusicCommand:
         arguments: tuple[str, ...],
         context: EventContext,
     ) -> None:
-        query = self._joined(arguments)
-        result = await self._music.enqueue(
+        source, value = self._source_and_value(arguments)
+        result = await self._music.enqueue_input(
             identity,
-            query,
+            value,
+            source=source,
             idempotency_key=(
                 f"music-command:{identity.source_message_id}" if identity.source_message_id else ""
             ),
         )
         await context.reply(
-            f"🎵 已加入 **{result.item.track.title}** · 队列第 {result.position} 位"
+            f"🎵 已加入 {self._renderer.track(result.item.track)} · 队列第 {result.position} 位"
         )
 
     async def _search(self, arguments: tuple[str, ...], context: EventContext) -> None:
-        tracks = await self._music.search(self._joined(arguments), limit=5)
+        source, query = self._source_and_value(arguments)
+        tracks = await self._music.search(query, source=source, limit=5)
         await context.reply(self._renderer.tracks(tracks))
 
     async def _mode(
@@ -415,9 +487,16 @@ class MusicCommand:
         elif action in {"add", "添加"}:
             self._require_minimum(values, 2)
             playlist = await self._resolve_playlist(identity, values[0])
-            entry = await self._playlists.add(identity, playlist.id, self._joined(values[1:]))
+            source, value = self._source_and_value(values[1:])
+            entry = await self._playlists.add_input(
+                identity,
+                playlist.id,
+                value,
+                source=source,
+            )
             await context.reply(
-                f"✅ 已把 **{entry.track.title}** 加入 **{playlist.name}** · 第 {entry.position} 首"
+                f"✅ 已把 {self._renderer.track(entry.track)} 加入 **{playlist.name}** · "
+                f"第 {entry.position} 首"
             )
         elif action in {"remove", "移除"}:
             self._require_count(values, 2)
@@ -519,6 +598,37 @@ class MusicCommand:
             raise MusicCommandUsageError
         return value
 
+    @classmethod
+    def _source_and_value(
+        cls,
+        arguments: tuple[str, ...],
+    ) -> tuple[MusicSourceKind | None, str]:
+        if not arguments:
+            raise MusicCommandUsageError
+        values = arguments
+        source: MusicSourceKind | None = None
+        first = values[0].casefold()
+        if first == "--source":
+            if len(values) < 3:
+                raise MusicCommandUsageError
+            try:
+                source = cls._SOURCE_ALIASES[values[1].casefold()]
+            except KeyError as exc:
+                raise MusicCommandUsageError from exc
+            values = values[2:]
+        elif first.startswith("--source="):
+            try:
+                source = cls._SOURCE_ALIASES[first.partition("=")[2]]
+            except KeyError as exc:
+                raise MusicCommandUsageError from exc
+            values = values[1:]
+        if any(
+            value.casefold() == "--source" or value.casefold().startswith("--source=")
+            for value in values
+        ):
+            raise MusicCommandUsageError
+        return source, cls._joined(values)
+
     @staticmethod
     def _require_count(arguments: tuple[str, ...], count: int) -> None:
         if len(arguments) != count:
@@ -546,6 +656,28 @@ class MusicCommand:
             return "播放队列已满，请先播放、跳过或清空一些歌曲。"
         if isinstance(error, MusicNotFoundError):
             return "没有找到可用的歌曲。"
+        if isinstance(error, MusicSourceDisabledError):
+            return "这个音乐来源当前没有启用，可用来源请查看 music sources。"
+        if isinstance(error, MusicAuthenticationRequiredError):
+            return "这首内容需要来源账号权限；当前没有可用登录配置。"
+        if isinstance(error, MusicGeoRestrictedError):
+            return "这首内容在 Bot 当前地区不可用。"
+        if isinstance(error, MusicSourceRateLimitedError):
+            return "音乐来源暂时限制了请求，请稍后重试或直接粘贴单曲链接。"
+        if isinstance(error, MusicLiveUnsupportedError):
+            return "暂不支持直播、预约直播或首映中的内容。"
+        if isinstance(error, MusicTrackTooLongError):
+            return "这段内容超过了允许的最长播放时间。"
+        if isinstance(error, MusicNoAudioFormatError):
+            return "没有找到可播放的音频格式。"
+        if isinstance(error, MusicUnsupportedContentError):
+            return "暂不支持这种内容形态（例如合集、互动视频或 DRM 内容）。"
+        if isinstance(error, MusicReferenceError):
+            return "无法识别这个音乐链接或来源 ID。"
+        if isinstance(error, MusicExtractionTimeoutError):
+            return "读取音乐页面超时，请稍后重试。"
+        if isinstance(error, MusicSourceUnavailableError):
+            return "这个音乐来源暂时不可用，请稍后重试。"
         if isinstance(error, MusicCatalogError):
             return "音乐目录暂时不可用，请稍后重试。"
         if isinstance(error, MusicPlaylistConflictError):

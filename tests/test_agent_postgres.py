@@ -367,7 +367,7 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
         assert import_bundle is not None
         assert authoring_bundle is not None
         assert web_bundle is not None
-        assert music_skill.version == "1.1.0"
+        assert music_skill.version == "1.2.0"
         assert music_skill.required_tools == frozenset(
             {
                 "search_music_catalog",
@@ -384,6 +384,9 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
             }
         )
         assert [resource.key for resource in music_bundle.resources] == ["batch-curation-guide"]
+        assert "`source=auto`" in music_bundle.instructions
+        assert "真实的 `source` 与 `source_id`" in music_bundle.instructions
+        assert "共享歌单允许混合来源" in music_bundle.instructions
         assert import_skill.version == "1.0.0"
         assert import_skill.required_tools == frozenset(
             {
@@ -766,11 +769,11 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
             "网易云导入",
             "网易云导入".casefold(),
             (
-                MusicTrack("netease", "39", "39", ("初音未来",), 222000),
+                MusicTrack("youtube", "dQw4w9WgXcQ", "39 Live", ("初音未来",), 222000),
                 MusicTrack(
-                    "netease",
-                    "831",
-                    "Tell Your World",
+                    "bilibili",
+                    "BV1xx411c7mD:p=2",
+                    "Tell Your World MV",
                     ("初音未来",),
                     245000,
                 ),
@@ -785,8 +788,12 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
         assert imported_readback is not None
         assert [entry.position for entry in imported_readback.entries] == [1, 2]
         assert [entry.track.source_id for entry in imported_readback.entries] == [
-            "39",
-            "831",
+            "dQw4w9WgXcQ",
+            "BV1xx411c7mD:p=2",
+        ]
+        assert [entry.track.source.value for entry in imported_readback.entries] == [
+            "youtube",
+            "bilibili",
         ]
         with pytest.raises(MusicPlaylistFullError):
             await playlist_repository.create_with_tracks(

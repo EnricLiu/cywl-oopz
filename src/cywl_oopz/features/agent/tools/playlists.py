@@ -5,13 +5,18 @@ from __future__ import annotations
 from typing import Never
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from cywl_oopz.core.errors import DatabaseError
 from cywl_oopz.features.music.errors import (
     MusicAreaRequiredError,
+    MusicAuthenticationRequiredError,
     MusicCatalogError,
     MusicError,
+    MusicExtractionTimeoutError,
+    MusicGeoRestrictedError,
+    MusicLiveUnsupportedError,
+    MusicNoAudioFormatError,
     MusicNotFoundError,
     MusicPlaybackError,
     MusicPlaylistConflictError,
@@ -21,6 +26,12 @@ from cywl_oopz.features.music.errors import (
     MusicPlaylistNotFoundError,
     MusicQueryError,
     MusicQueueFullError,
+    MusicReferenceError,
+    MusicSourceDisabledError,
+    MusicSourceRateLimitedError,
+    MusicSourceUnavailableError,
+    MusicTrackTooLongError,
+    MusicUnsupportedContentError,
     MusicVoiceBusyError,
     MusicVoiceChannelRequiredError,
     NeteasePlaylistIncompleteError,
@@ -42,7 +53,11 @@ from .models import (
     ToolExecutionContext,
     ToolExecutionError,
 )
-from .music import MusicTrackOutput
+from .music import (
+    MusicSourceSelection,
+    MusicTrackOutput,
+    MusicTrackReferenceInput,
+)
 
 
 class _PlaylistTool:
@@ -59,9 +74,20 @@ class _PlaylistTool:
         MusicQueryError: "invalid_music_query",
         MusicQueueFullError: "music_queue_full",
         MusicNotFoundError: "music_not_found",
-        MusicCatalogError: "music_catalog_unavailable",
+        MusicReferenceError: "invalid_music_reference",
+        MusicSourceDisabledError: "music_source_disabled",
+        MusicExtractionTimeoutError: "music_extraction_timeout",
+        MusicSourceRateLimitedError: "music_rate_limited",
+        MusicSourceUnavailableError: "music_source_unavailable",
+        MusicAuthenticationRequiredError: "music_authentication_required",
+        MusicGeoRestrictedError: "music_geo_restricted",
+        MusicLiveUnsupportedError: "music_live_unsupported",
+        MusicTrackTooLongError: "music_track_too_long",
+        MusicNoAudioFormatError: "music_no_audio_format",
+        MusicUnsupportedContentError: "music_content_unsupported",
         MusicVoiceBusyError: "music_voice_busy",
         MusicPlaybackError: "music_playback_failed",
+        MusicCatalogError: "music_catalog_unavailable",
         NeteasePlaylistReferenceError: "invalid_netease_playlist_reference",
         NeteasePlaylistNotFoundError: "netease_playlist_not_found",
         NeteasePlaylistIncompleteError: "netease_playlist_incomplete",
@@ -288,9 +314,30 @@ class GetMusicPlaylistTool(_PlaylistTool):
 
 
 class AddMusicPlaylistTrackInput(PlaylistIdInput):
-    """Playlist target and catalog query for the appended song."""
+    """Playlist target and exactly one query/URL or exact reference."""
 
-    query: str = Field(min_length=1, max_length=200, description="要加入歌单的歌曲名和歌手")
+    query: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=2_048,
+        description="要加入歌单的关键词或受支持单曲 URL",
+    )
+    source: MusicSourceSelection = Field(
+        default=MusicSourceSelection.AUTO,
+        description="query 为普通文字时使用的来源",
+    )
+    track: MusicTrackReferenceInput | None = Field(
+        default=None,
+        description="先前搜索返回的精确 source/source_id",
+    )
+
+    @model_validator(mode="after")
+    def require_one_target(self) -> AddMusicPlaylistTrackInput:
+        if (self.query is None) == (self.track is None):
+            raise ValueError("query 和 track 必须且只能提供一个")
+        if self.track is not None and self.source is not MusicSourceSelection.AUTO:
+            raise ValueError("精确 track 不再接受 source 选择")
+        return self
 
 
 class AddMusicPlaylistTrackOutput(BaseModel):
@@ -314,7 +361,9 @@ class AddMusicPlaylistTrackTool(_PlaylistTool):
         self._descriptor = ToolDescriptor(
             name="add_music_playlist_track",
             display_name="添加歌曲到歌单",
-            description="搜索歌曲并把最佳匹配追加到当前 area 的指定共享歌单。",
+            description=(
+                "把一个关键词/单曲 URL 或先前搜索得到的精确歌曲追加到当前 area 共享歌单。"
+            ),
             input_model=AddMusicPlaylistTrackInput,
             output_model=AddMusicPlaylistTrackOutput,
             effect=ToolEffect.WRITE,
@@ -335,11 +384,20 @@ class AddMusicPlaylistTrackTool(_PlaylistTool):
     ) -> BaseModel:
         values = AddMusicPlaylistTrackInput.model_validate(arguments)
         try:
-            entry = await self._playlists.add(
-                context.identity,
-                values.playlist_id,
-                values.query,
-            )
+            if values.track is not None:
+                entry = await self._playlists.add_reference(
+                    context.identity,
+                    values.playlist_id,
+                    values.track.reference,
+                )
+            else:
+                assert values.query is not None
+                entry = await self._playlists.add_input(
+                    context.identity,
+                    values.playlist_id,
+                    values.query,
+                    source=values.source.source_kind,
+                )
         except (MusicError, DatabaseError) as exc:
             self._raise_tool_error(exc)
         return AddMusicPlaylistTrackOutput(

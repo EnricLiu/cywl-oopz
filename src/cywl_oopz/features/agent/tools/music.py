@@ -3,24 +3,38 @@
 from __future__ import annotations
 
 from datetime import datetime
+from enum import StrEnum
 from typing import Never
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from cywl_oopz.features.music.errors import (
+    MusicAuthenticationRequiredError,
     MusicCatalogError,
     MusicError,
+    MusicExtractionTimeoutError,
+    MusicGeoRestrictedError,
+    MusicLiveUnsupportedError,
+    MusicNoAudioFormatError,
     MusicNotFoundError,
     MusicPlaybackError,
     MusicQueryError,
     MusicQueueFullError,
+    MusicReferenceError,
+    MusicSourceDisabledError,
+    MusicSourceRateLimitedError,
+    MusicSourceUnavailableError,
+    MusicTrackTooLongError,
+    MusicUnsupportedContentError,
     MusicVoiceBusyError,
     MusicVoiceChannelRequiredError,
 )
 from cywl_oopz.features.music.models import (
     MusicFailure,
     MusicQueueSnapshot,
+    MusicSourceKind,
     MusicTrack,
+    MusicTrackReference,
     PlaybackOrder,
     QueuedTrack,
     RepeatPolicy,
@@ -44,9 +58,20 @@ class _MusicTool:
         MusicQueryError: "invalid_music_query",
         MusicQueueFullError: "music_queue_full",
         MusicNotFoundError: "music_not_found",
-        MusicCatalogError: "music_catalog_unavailable",
+        MusicReferenceError: "invalid_music_reference",
+        MusicSourceDisabledError: "music_source_disabled",
+        MusicExtractionTimeoutError: "music_extraction_timeout",
+        MusicSourceRateLimitedError: "music_rate_limited",
+        MusicSourceUnavailableError: "music_source_unavailable",
+        MusicAuthenticationRequiredError: "music_authentication_required",
+        MusicGeoRestrictedError: "music_geo_restricted",
+        MusicLiveUnsupportedError: "music_live_unsupported",
+        MusicTrackTooLongError: "music_track_too_long",
+        MusicNoAudioFormatError: "music_no_audio_format",
+        MusicUnsupportedContentError: "music_content_unsupported",
         MusicVoiceBusyError: "music_voice_busy",
         MusicPlaybackError: "music_playback_failed",
+        MusicCatalogError: "music_catalog_unavailable",
     }
 
     @classmethod
@@ -57,12 +82,29 @@ class _MusicTool:
         raise ToolExecutionError("music_failed") from error
 
 
+class MusicSourceSelection(StrEnum):
+    """Tool-facing source selector with an explicit default-routing value."""
+
+    AUTO = "auto"
+    NETEASE = "netease"
+    YOUTUBE = "youtube"
+    BILIBILI = "bilibili"
+
+    @property
+    def source_kind(self) -> MusicSourceKind | None:
+        return None if self is MusicSourceSelection.AUTO else MusicSourceKind(self.value)
+
+
 class MusicSearchInput(BaseModel):
     """A bounded natural-language catalog query."""
 
     model_config = ConfigDict(extra="forbid")
 
     query: str = Field(min_length=1, max_length=200, description="歌曲名、歌手或两者组合")
+    source: MusicSourceSelection = Field(
+        default=MusicSourceSelection.AUTO,
+        description="搜索来源；auto 使用 Bot 配置的默认来源",
+    )
     limit: int = Field(default=5, ge=1, le=10, description="返回候选数量")
 
 
@@ -106,7 +148,10 @@ class SearchMusicCatalogTool(_MusicTool):
         self._descriptor = ToolDescriptor(
             name="search_music_catalog",
             display_name="搜索歌曲",
-            description="按歌曲名或歌手搜索音乐目录，返回候选但不点歌。",
+            description=(
+                "在 auto、网易云、YouTube 或 Bilibili 中选择一个来源搜索，"
+                "返回可用于精确点歌的 source/source_id，但不修改队列。"
+            ),
             input_model=MusicSearchInput,
             output_model=MusicSearchOutput,
             effect=ToolEffect.READ,
@@ -128,7 +173,11 @@ class SearchMusicCatalogTool(_MusicTool):
         del context
         values = MusicSearchInput.model_validate(arguments)
         try:
-            tracks = await self._music.search(values.query, limit=values.limit)
+            tracks = await self._music.search(
+                values.query,
+                source=values.source.source_kind,
+                limit=values.limit,
+            )
         except MusicError as exc:
             self._raise_tool_error(exc)
         return MusicSearchOutput(
@@ -136,12 +185,50 @@ class SearchMusicCatalogTool(_MusicTool):
         )
 
 
-class EnqueueMusicInput(BaseModel):
-    """A query whose top match will be queued."""
+class MusicTrackReferenceInput(BaseModel):
+    """One exact candidate returned by a previous music search."""
 
     model_config = ConfigDict(extra="forbid")
 
-    query: str = Field(min_length=1, max_length=200, description="要点播的歌曲名和可选歌手")
+    source: MusicSourceKind = Field(description="候选歌曲的来源")
+    source_id: str = Field(
+        min_length=1,
+        max_length=256,
+        description="候选歌曲的稳定 source_id；不要自行猜测",
+    )
+
+    @property
+    def reference(self) -> MusicTrackReference:
+        return MusicTrackReference(self.source, self.source_id)
+
+
+class EnqueueMusicInput(BaseModel):
+    """Exactly one query/URL or exact search result to queue."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    query: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=2_048,
+        description="歌曲关键词或受支持的网易云/YouTube/Bilibili 单曲 URL",
+    )
+    source: MusicSourceSelection = Field(
+        default=MusicSourceSelection.AUTO,
+        description="query 为普通文字时使用的来源；URL 会自行识别来源",
+    )
+    track: MusicTrackReferenceInput | None = Field(
+        default=None,
+        description="先前搜索返回的精确 source/source_id",
+    )
+
+    @model_validator(mode="after")
+    def require_one_target(self) -> EnqueueMusicInput:
+        if (self.query is None) == (self.track is None):
+            raise ValueError("query 和 track 必须且只能提供一个")
+        if self.track is not None and self.source is not MusicSourceSelection.AUTO:
+            raise ValueError("精确 track 不再接受 source 选择")
+        return self
 
 
 class EnqueueMusicOutput(BaseModel):
@@ -166,7 +253,10 @@ class EnqueueMusicTool(_MusicTool):
         self._descriptor = ToolDescriptor(
             name="enqueue_music",
             display_name="添加歌曲到队列",
-            description=("为用户当前所在的 OOPZ 语音频道点歌；用户不在语音频道时会失败。"),
+            description=(
+                "为用户当前 OOPZ 语音频道点歌。可直接提交关键词/单曲 URL；"
+                "版本敏感时先搜索，再提交精确 track。"
+            ),
             input_model=EnqueueMusicInput,
             output_model=EnqueueMusicOutput,
             effect=ToolEffect.WRITE,
@@ -187,11 +277,25 @@ class EnqueueMusicTool(_MusicTool):
     ) -> BaseModel:
         values = EnqueueMusicInput.model_validate(arguments)
         try:
-            result = await self._music.enqueue(
-                context.identity,
-                values.query,
-                idempotency_key=(f"{context.run_id}:{values.query.strip().casefold()}"),
-            )
+            if values.track is not None:
+                reference = values.track.reference
+                result = await self._music.enqueue_reference(
+                    context.identity,
+                    reference,
+                    idempotency_key=(
+                        f"{context.run_id}:{reference.source.value}:{reference.source_id}"
+                    ),
+                )
+            else:
+                assert values.query is not None
+                result = await self._music.enqueue_input(
+                    context.identity,
+                    values.query,
+                    source=values.source.source_kind,
+                    idempotency_key=(
+                        f"{context.run_id}:{values.source.value}:{values.query.strip().casefold()}"
+                    ),
+                )
         except MusicError as exc:
             self._raise_tool_error(exc)
         return EnqueueMusicOutput(

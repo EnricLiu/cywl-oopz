@@ -205,15 +205,33 @@ class BrowserProgressProjector(_ProjectionSupport):
 class MusicProgressProjector(_ProjectionSupport):
     """Present music queries and compact queue outcomes."""
 
+    _source_names = {
+        "netease": "网易云",
+        "youtube": "YouTube",
+        "bilibili": "Bilibili",
+    }
+
     def request(
         self,
         tool_name: str,
         arguments: Mapping[str, Any],
     ) -> ToolProgressPresentation:
-        del tool_name
-        subject = self.scalar(
-            arguments.get("query") or arguments.get("name") or arguments.get("reference")
+        track = arguments.get("track")
+        track_values = track if isinstance(track, Mapping) else {}
+        target = (
+            arguments.get("query")
+            or arguments.get("name")
+            or arguments.get("reference")
+            or track_values.get("source_id")
         )
+        source = self._source_name(
+            track_values.get("source") or arguments.get("source"),
+            target=target,
+        )
+        value = self.scalar(target)
+        if tool_name == "search_music_catalog" and value:
+            value = f"「{value}」"
+        subject = self._join(source, value)
         return ToolProgressPresentation(subject=subject)
 
     def result(
@@ -226,7 +244,8 @@ class MusicProgressProjector(_ProjectionSupport):
             count = (
                 len(tracks) if isinstance(tracks, Sequence) and not isinstance(tracks, str) else 0
             )
-            return ToolProgressPresentation(summary=f"找到 {count} 首歌曲")
+            source = self._tracks_source_name(tracks)
+            return ToolProgressPresentation(summary=self._join(source, f"找到 {count} 首歌曲"))
         if tool_name == "get_music_queue":
             upcoming = values.get("upcoming")
             count = (
@@ -291,7 +310,10 @@ class MusicProgressProjector(_ProjectionSupport):
             entry = values.get("entry")
             track = entry.get("track") if isinstance(entry, Mapping) else None
             title = self.scalar(track.get("title")) if isinstance(track, Mapping) else ""
-            return ToolProgressPresentation(summary=f"歌曲「{title}」已加入歌单")
+            source = self._track_source_name(track)
+            return ToolProgressPresentation(
+                summary=self._join(source, f"歌曲「{title}」已加入歌单")
+            )
         if tool_name == "remove_music_playlist_track":
             return ToolProgressPresentation(
                 summary=("歌曲已移出歌单" if values.get("removed") else "歌单中没有该条目")
@@ -355,11 +377,45 @@ class MusicProgressProjector(_ProjectionSupport):
         if isinstance(track, Mapping):
             title = self.scalar(track.get("title"))
             position = values.get("position")
-            summary = f"歌曲「{title or '未知'}」"
+            summary = self._join(
+                self._track_source_name(track),
+                f"歌曲「{title or '未知'}」",
+            )
             if isinstance(position, int):
                 summary += f" · 队列第 {position} 位"
             return ToolProgressPresentation(summary=summary)
         return ToolProgressPresentation(summary="调用完成")
+
+    @classmethod
+    def _track_source_name(cls, track: object) -> str:
+        return cls._source_name(track.get("source")) if isinstance(track, Mapping) else ""
+
+    @classmethod
+    def _tracks_source_name(cls, tracks: object) -> str:
+        if not isinstance(tracks, Sequence) or isinstance(tracks, str):
+            return ""
+        sources = {
+            cls._track_source_name(track) for track in tracks if cls._track_source_name(track)
+        }
+        return next(iter(sources)) if len(sources) == 1 else ""
+
+    @classmethod
+    def _source_name(cls, value: object, *, target: object = None) -> str:
+        normalized = cls.scalar(value, limit=32).casefold()
+        if normalized and normalized != "auto":
+            return cls._source_names.get(normalized, normalized)
+        host = cls.host(target).casefold()
+        if host.endswith("music.163.com"):
+            return cls._source_names["netease"]
+        if host.endswith(("youtube.com", "youtu.be")):
+            return cls._source_names["youtube"]
+        if host.endswith(("bilibili.com", "b23.tv")):
+            return cls._source_names["bilibili"]
+        return ""
+
+    @staticmethod
+    def _join(*values: str) -> str:
+        return " · ".join(value for value in values if value)
 
 
 class SkillProgressProjector(_ProjectionSupport):
@@ -552,9 +608,21 @@ class ToolProgressCatalog:
         "invalid_tool_output": "工具返回了无效结果",
         "invalid_web_search_query": "搜索内容不正确",
         "invalid_music_query": "歌曲搜索内容不正确",
+        "invalid_music_reference": "歌曲来源或标识不正确",
+        "music_authentication_required": "该音乐来源需要登录凭据",
         "music_catalog_unavailable": "音乐搜索服务暂不可用",
+        "music_content_unsupported": "该链接不是受支持的单曲内容",
+        "music_extraction_timeout": "音乐来源响应超时",
         "music_failed": "音乐工具执行失败",
+        "music_geo_restricted": "该内容在当前地区不可用",
+        "music_live_unsupported": "暂不支持直播内容",
+        "music_no_audio_format": "没有找到可播放的音频格式",
         "music_not_found": "没有找到匹配的歌曲",
+        "music_rate_limited": "音乐来源请求过于频繁",
+        "music_source_disabled": "该音乐来源尚未启用",
+        "music_source_unavailable": "该音乐来源暂不可用",
+        "music_track_too_long": "歌曲超过允许的播放时长",
+        "music_voice_busy": "语音频道正由语音对话占用",
         "music_area_required": "共享歌单只能在 area 内使用",
         "invalid_music_playlist_name": "歌单名称不正确",
         "music_playlist_exists": "当前 area 已有同名歌单",

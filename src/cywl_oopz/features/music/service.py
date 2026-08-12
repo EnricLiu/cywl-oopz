@@ -40,6 +40,7 @@ from .models import (
     MusicSourceKind,
     MusicTrack,
     MusicTrackReference,
+    PlayableTrack,
     PlaybackOrder,
     PlaybackPolicyChange,
     PlaybackState,
@@ -65,6 +66,7 @@ class _MusicSession:
     policy: MusicPlaybackPolicy = field(default_factory=MusicPlaybackPolicy)
     revision: int = 0
     playback: MusicPlayback | None = None
+    resolve_task: asyncio.Task[PlayableTrack] | None = None
     voice_reserved: bool = False
     worker: asyncio.Task[None] | None = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -92,6 +94,14 @@ class MusicRequestService:
         self._rng = rng or random.Random()
         self._sessions: dict[VoiceChannelKey, _MusicSession] = {}
         self._closing = False
+
+    @property
+    def default_source(self) -> MusicSourceKind:
+        return self._settings.default_source
+
+    @property
+    def enabled_sources(self) -> tuple[MusicSourceKind, ...]:
+        return self._settings.enabled_sources
 
     async def search(
         self,
@@ -256,8 +266,9 @@ class MusicRequestService:
                 while len(session.idempotent_enqueues) > 256:
                     session.idempotent_enqueues.popitem(last=False)
         logger.info(
-            "Music enqueued: channel=%s position=%s playback_worker_started=%s",
+            "Music enqueued: channel=%s source=%s position=%s playback_worker_started=%s",
             self._channel_ref(channel),
+            track.source.value,
             position,
             started,
         )
@@ -360,6 +371,7 @@ class MusicRequestService:
             if replaced_current:
                 session.retain_skipped_for_cycle = False
                 session.skip_requested.set()
+                self._cancel_resolve_locked(session)
             else:
                 session.state = PlaybackState.WAITING
             session.revision += 1
@@ -402,6 +414,7 @@ class MusicRequestService:
             if stopped_current:
                 session.retain_skipped_for_cycle = False
                 session.skip_requested.set()
+                self._cancel_resolve_locked(session)
             elif session.voice_reserved:
                 session.state = PlaybackState.WAITING
                 self._start_worker_locked(channel, session)
@@ -438,6 +451,7 @@ class MusicRequestService:
                 return False
             session.skip_requested.set()
             session.retain_skipped_for_cycle = session.policy.repeat is RepeatPolicy.ALL
+            self._cancel_resolve_locked(session)
             session.revision += 1
             playback = session.playback
         if playback is not None:
@@ -628,10 +642,37 @@ class MusicRequestService:
                 halt_after_failure = False
                 try:
                     logger.info(
-                        "Music track resolving: channel=%s",
+                        "Music track resolving: channel=%s source=%s",
                         self._channel_ref(channel),
+                        item.track.source.value,
                     )
-                    playable = await self._catalog.resolve(item.track)
+                    async with session.lock:
+                        if session.skip_requested.is_set():
+                            continue
+                        resolve_task = asyncio.create_task(
+                            self._catalog.resolve(item.track),
+                            name=f"music-resolve:{self._channel_ref(channel)}",
+                        )
+                        session.resolve_task = resolve_task
+                    try:
+                        playable = await resolve_task
+                    except asyncio.CancelledError:
+                        current = asyncio.current_task()
+                        if (
+                            session.skip_requested.is_set()
+                            and current is not None
+                            and current.cancelling() == 0
+                        ):
+                            logger.info(
+                                "Music track resolve cancelled by queue control: channel=%s",
+                                self._channel_ref(channel),
+                            )
+                            continue
+                        raise
+                    finally:
+                        async with session.lock:
+                            if session.resolve_task is resolve_task:
+                                session.resolve_task = None
                     if session.skip_requested.is_set():
                         logger.info(
                             "Music track skipped before playback: channel=%s",
@@ -647,8 +688,9 @@ class MusicRequestService:
                         session.state = PlaybackState.PLAYING
                         session.revision += 1
                     logger.info(
-                        "Music track playback started: channel=%s",
+                        "Music track playback started: channel=%s source=%s",
                         self._channel_ref(channel),
+                        item.track.source.value,
                     )
                     result = await playback.wait_finished()
                     completed = result.end_reason is MusicPlaybackEndReason.FINISHED
@@ -899,6 +941,8 @@ class MusicRequestService:
                 async with session.lock:
                     reserved = session.voice_reserved
                     session.playback = None
+                    self._cancel_resolve_locked(session)
+                    session.resolve_task = None
                     session.current = None
                     session.skip_requested.clear()
                     session.retain_skipped_for_cycle = False
@@ -1025,6 +1069,13 @@ class MusicRequestService:
         session.worker = worker
         worker.add_done_callback(lambda completed: self._on_worker_done(channel, completed))
         return True
+
+    @staticmethod
+    def _cancel_resolve_locked(session: _MusicSession) -> None:
+        """Cancel the current source lookup while the caller holds ``session.lock``."""
+        task = session.resolve_task
+        if task is not None and not task.done():
+            task.cancel()
 
     def _on_worker_done(
         self,

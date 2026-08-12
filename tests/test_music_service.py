@@ -323,6 +323,27 @@ async def eventually(predicate, *, attempts: int = 100) -> None:
     raise AssertionError("condition did not become true")
 
 
+class BlockingResolveCatalog(FakeCatalog):
+    def __init__(self) -> None:
+        super().__init__()
+        self.resolve_started = asyncio.Event()
+        self.resolve_cancelled = asyncio.Event()
+
+    async def resolve(self, track: MusicTrack) -> PlayableTrack:
+        self.resolved.append(track.source_id)
+        if track.source_id != "blocked":
+            return PlayableTrack(
+                track,
+                ResolvedMediaInput(f"https://music.example/{track.source_id}.mp3"),
+            )
+        self.resolve_started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            self.resolve_cancelled.set()
+            raise
+
+
 @pytest.mark.asyncio
 async def test_music_service_routes_explicit_source_search_and_validates_top_reference() -> None:
     catalog = FakeCatalog()
@@ -792,6 +813,44 @@ async def test_music_service_skip_in_repeat_all_returns_only_on_next_cycle() -> 
     await eventually(lambda: len(voice.played) == 3)
     assert voice.played[2][1].endswith("/first.mp3")
 
+    await service.aclose()
+
+
+@pytest.mark.asyncio
+async def test_music_service_skip_cancels_active_resolve_and_advances_queue() -> None:
+    voice = FakeVoice()
+    catalog = BlockingResolveCatalog()
+    service = MusicRequestService(settings(), catalog, voice)
+
+    await service.enqueue(identity(), "blocked")
+    await catalog.resolve_started.wait()
+    await service.enqueue(identity(), "next")
+
+    assert await service.skip(identity()) is True
+    await catalog.resolve_cancelled.wait()
+    await eventually(lambda: len(voice.played) == 1)
+
+    assert catalog.resolved == ["blocked", "next"]
+    assert voice.played[0][1].endswith("/next.mp3")
+    await service.aclose()
+
+
+@pytest.mark.asyncio
+async def test_music_service_clear_cancels_active_resolve_and_releases_voice() -> None:
+    voice = FakeVoice()
+    catalog = BlockingResolveCatalog()
+    service = MusicRequestService(settings(), catalog, voice)
+
+    await service.enqueue(identity(), "blocked")
+    await catalog.resolve_started.wait()
+
+    result = await service.clear(identity())
+    await catalog.resolve_cancelled.wait()
+    await eventually(lambda: len(voice.left) == 1)
+
+    assert result.stopped_current is True
+    assert result.removed_count == 1
+    assert (await service.queue(identity())).state is PlaybackState.IDLE
     await service.aclose()
 
 

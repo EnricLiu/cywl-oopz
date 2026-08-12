@@ -22,9 +22,10 @@ composition root that owns the OOPZ client and the lifecycle of every service.
   summarize long threads, retain opt-in user memory, load persistent skills,
   and call only policy-authorized tools. Agent progress can optionally update a
   single OOPZ reply in place.
-- **Play music in voice channels** — search a
-  NeteaseCloudMusicApi-compatible catalog, maintain a serialized queue per
-  voice channel, control playback, and manage/import playlists.
+- **Play music in voice channels** — search Netease, YouTube, or Bilibili,
+  accept supported single-media URLs through an isolated `yt-dlp` worker,
+  maintain a serialized queue per voice channel, and manage mixed-source
+  playlists.
 - **Research the web** — search DuckDuckGo without an API key and read pages
   with an optional, isolated `agent-browser` MCP session. Browser interaction
   is separately opt-in and channel-controlled.
@@ -42,7 +43,7 @@ composition root that owns the OOPZ client and the lifecycle of every service.
 - PostgreSQL 14+ or a compatible server
 - OOPZ account credentials obtained through the SDK-supported login flow
 - Optional: Node.js and `agent-browser` 0.33.x for browser-backed tools
-- Optional: FFmpeg for the PCM audio mixer path
+- Optional: FFmpeg plus Deno 2.3+ (or Node.js 22+) for YouTube/Bilibili audio
 
 ## Install
 
@@ -131,7 +132,7 @@ dependencies and runtime configuration are ready.
 | --- | --- | --- |
 | `CYWL_CHAT_ENABLED` | `false` | Enables legacy direct-LLM chat; requires `CYWL_LLM_*`. |
 | `CYWL_AGENT_MODE` | `legacy` | Set to `agent` for the database-backed provider/model catalog. |
-| `CYWL_MUSIC_ENABLED` | `false` | Requires a NeteaseCloudMusicApi-compatible endpoint. |
+| `CYWL_MUSIC_ENABLED` | `false` | Enables configured `CYWL_MUSIC_SOURCES`; Netease needs its API endpoint, while YouTube/Bilibili need the PCM mixer, FFmpeg, and a supported JavaScript runtime. |
 | `CYWL_AUDIO_MIXER_ENABLED` | `false` | Enables the PCM mixer path; requires a compatible FFmpeg binary. |
 | `CYWL_WEB_SEARCH_ENABLED` | `true` | Enables DuckDuckGo search tools; no API key is required. |
 | `CYWL_WEB_BROWSER_ENABLED` | `false` | Requires `agent-browser` on `PATH` and its browser installation. |
@@ -165,10 +166,18 @@ features; `/help` always displays the commands registered in the running bot.
 | `/tool <name> [JSON]` | Agent mode | Inspect a tool schema or invoke an authorized tool directly. |
 | `/memory …` | Agent mode | View, save, disable, or delete the caller's long-term memory. |
 | `/skills` | Agent mode with skills enabled | List skills available to the caller. |
+| `/music …` | Music enabled | Search or play by keyword/URL, inspect sources and queues, set modes, and manage area playlists. Use `--source youtube\|bilibili\|netease` before a text query to override the default. |
 | `/voice start\|stop\|status\|models\|model\|voice` | Voice enabled | Control experimental realtime voice conversation. |
 
 `/voice` requires both `CYWL_VOICE_ENABLED=true` and valid voice configuration
 and channel policy in PostgreSQL.
+
+For multi-source music, set `CYWL_MUSIC_SOURCES` and
+`CYWL_MUSIC_DEFAULT_SOURCE`. Plain text uses that default; supported Netease,
+YouTube, Bilibili, and `b23.tv` single-media URLs are detected automatically.
+YouTube/Bilibili extraction runs in bounded subprocesses and requires
+`CYWL_AUDIO_MIXER_ENABLED=true`. Optional browser cookie export paths can help
+with content that requires an authenticated session; never commit those files.
 
 ## Project layout
 
@@ -213,6 +222,17 @@ uv run alembic upgrade head
 Live OOPZ and Qwen tests are opt-in, credential-dependent tests controlled by
 the `CYWL_RUN_LIVE_*` variables documented in `.env.example`; they are skipped
 by default.
+
+The YouTube and Bilibili PCM gates are also opt-in and do not join OOPZ:
+
+```bash
+CYWL_RUN_LIVE_YOUTUBE_PCM_TESTS=1 uv run pytest tests/test_youtube_music_live.py
+CYWL_RUN_LIVE_BILIBILI_PCM_TESTS=1 uv run pytest tests/test_bilibili_music_live.py
+```
+
+When upgrading `yt-dlp`, update `uv.lock`, run both provider/unit matrices, and
+then run these public-network gates with the deployment's configured JS runtime
+and FFmpeg before rolling out the new lock.
 
 ## Security and privacy
 
