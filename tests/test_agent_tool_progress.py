@@ -141,7 +141,23 @@ def test_browser_and_music_results_have_compact_human_summaries() -> None:
             "data": {
                 "current": {"track": {"title": "Tell Your World"}},
                 "upcoming": [{"track": {"title": "39"}}],
-                "mode": "shuffle",
+                "order": "shuffle",
+                "repeat": "all",
+            },
+        },
+        succeeded=True,
+    )
+    failed_queue = catalog.result(
+        "get_music_queue",
+        {
+            "ok": True,
+            "data": {
+                "state": "failed",
+                "current": None,
+                "upcoming": [{"track": {"title": "39"}}],
+                "order": "sequential",
+                "repeat": "off",
+                "last_failure": {"code": "voice_left"},
             },
         },
         succeeded=True,
@@ -150,7 +166,7 @@ def test_browser_and_music_results_have_compact_human_summaries() -> None:
         "set_music_playback_mode",
         {
             "ok": True,
-            "data": {"mode": "repeat_all", "changed": True},
+            "data": {"order": "shuffle", "repeat": "all", "changed": True},
         },
         succeeded=True,
     )
@@ -204,15 +220,46 @@ def test_browser_and_music_results_have_compact_human_summaries() -> None:
         },
         succeeded=True,
     )
+    renamed = catalog.result(
+        "rename_music_playlist",
+        {
+            "ok": True,
+            "data": {"old_name": "夜间电台", "new_name": "深夜电台", "changed": True},
+        },
+        succeeded=True,
+    )
+    cleared_playlist = catalog.result(
+        "clear_music_playlist",
+        {"ok": True, "data": {"name": "深夜电台", "removed_track_count": 23}},
+        succeeded=True,
+    )
+    deleted_playlist = catalog.result(
+        "delete_music_playlist",
+        {
+            "ok": True,
+            "data": {"name": "深夜电台", "deleted": True, "removed_track_count": 0},
+        },
+        succeeded=True,
+    )
+    cleared_queue = catalog.result(
+        "clear_music_queue",
+        {"ok": True, "data": {"stopped_current": True, "removed_count": 8}},
+        succeeded=True,
+    )
 
     assert page.summary == "Example Domain"
     assert music.summary == "歌曲「Tell Your World」 · 队列第 2 位"
-    assert queue.summary == "正在播放 · 后续 1 首 · 随机播放"
-    assert mode.summary == "列表循环已设置"
+    assert queue.summary == "正在播放 · 后续 1 首 · 随机 · 列表循环"
+    assert failed_queue.summary == "播放已中断 · 保留 1 首 · 语音连接已断开"
+    assert mode.summary == "随机 · 列表循环已设置"
     assert playlists.summary == "找到 2 个共享歌单"
     assert loaded_playlist.summary == "歌单「夜间电台」· 已载入 3 首"
     assert preview_import.summary == ("歌单「Miku Favorites」· 可导入 50/80 首 · 需要确认部分导入")
     assert imported.summary == "歌单「Miku Favorites」· 已导入 50 首 · 跳过 30 首"
+    assert renamed.summary == "「夜间电台」→「深夜电台」"
+    assert cleared_playlist.summary == "歌单「深夜电台」· 已移除 23 首"
+    assert deleted_playlist.summary == "歌单「深夜电台」已删除"
+    assert cleared_queue.summary == "已停止播放 · 已移除 8 首"
     assert "voice_channel_id" not in repr(loaded_playlist)
     assert "snapshot" not in repr(page)
     assert "source_id" not in repr(music)

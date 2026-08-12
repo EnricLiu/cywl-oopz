@@ -448,5 +448,5 @@ class FfmpegMusicDecoder:
             )
             return None
         self._stderr_queue_subscribed = True
-        
+
         return self._stderr_lines()

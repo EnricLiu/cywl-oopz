@@ -13,6 +13,9 @@ from .models import (
     MusicTrack,
     NeteasePlaylistSnapshot,
     PlayableTrack,
+    PlaylistClear,
+    PlaylistDeletion,
+    PlaylistRename,
     PlaylistTrackRemoval,
     VoiceChannelKey,
 )
@@ -78,6 +81,9 @@ class MusicVoiceGateway(Protocol):
     async def release(self, channel: VoiceChannelKey) -> bool:
         """Release only the matching music lease after its queue drains."""
 
+    async def reset(self, channel: VoiceChannelKey) -> None:
+        """Invalidate a stale physical voice generation before a fresh acquire."""
+
     async def aclose(self) -> None:
         """Stop playback and leave the active voice channel."""
 
@@ -130,3 +136,18 @@ class MusicPlaylistRepository(Protocol):
         entry_id: UUID,
     ) -> PlaylistTrackRemoval:
         """Delete one entry and compact following positions."""
+
+    async def rename(
+        self,
+        area_id: str,
+        playlist_id: UUID,
+        name: str,
+        normalized_name: str,
+    ) -> PlaylistRename:
+        """Rename one playlist under its area-scoped uniqueness constraint."""
+
+    async def delete(self, area_id: str, playlist_id: UUID) -> PlaylistDeletion:
+        """Delete one playlist and its entries, or report that it is already absent."""
+
+    async def clear(self, area_id: str, playlist_id: UUID) -> PlaylistClear:
+        """Delete every entry while preserving the playlist."""

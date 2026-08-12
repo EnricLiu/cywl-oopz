@@ -34,6 +34,9 @@ class TupleDecoder:
     def __aiter__(self):
         return self
 
+    def status_logs(self) -> None:
+        return None
+
     async def __anext__(self) -> DecodedAudioBlock:
         try:
             return next(self._blocks)
@@ -51,6 +54,9 @@ class GatedDecoder:
 
     def __aiter__(self):
         return self
+
+    def status_logs(self) -> None:
+        return None
 
     async def __anext__(self) -> DecodedAudioBlock:
         item = await self.items.get()
@@ -72,6 +78,9 @@ class FailedDecoder:
 
     def __aiter__(self):
         return self
+
+    def status_logs(self) -> None:
+        return None
 
     async def __anext__(self) -> DecodedAudioBlock:
         if not self._emitted:

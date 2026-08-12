@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from uuid import UUID, uuid4
 
@@ -66,16 +66,36 @@ class PlaybackState(StrEnum):
     LOADING = "loading"
     PLAYING = "playing"
     PAUSED = "paused"
+    RECOVERING = "recovering"
+    RELEASING = "releasing"
     FAILED = "failed"
 
 
-class PlaybackMode(StrEnum):
-    """Queue selection and completed-track retention policy."""
+class PlaybackOrder(StrEnum):
+    """How one queue cycle selects its remaining tracks."""
 
     SEQUENTIAL = "sequential"
-    REPEAT_ONE = "repeat_one"
-    REPEAT_ALL = "repeat_all"
     SHUFFLE = "shuffle"
+
+
+class RepeatPolicy(StrEnum):
+    """How completed tracks are retained across queue cycles."""
+
+    OFF = "off"
+    ONE = "one"
+    ALL = "all"
+
+
+@dataclass(frozen=True, slots=True)
+class MusicPlaybackPolicy:
+    """Orthogonal playback order and repeat behavior for one active session."""
+
+    order: PlaybackOrder = PlaybackOrder.SEQUENTIAL
+    repeat: RepeatPolicy = RepeatPolicy.OFF
+
+    def __post_init__(self) -> None:
+        if self.order is PlaybackOrder.SHUFFLE and self.repeat is RepeatPolicy.ONE:
+            raise ValueError("Shuffle order cannot be combined with repeat-one")
 
 
 class MusicPlaybackEndReason(StrEnum):
@@ -87,6 +107,36 @@ class MusicPlaybackEndReason(StrEnum):
     TRACK_ERROR = "track_error"
     VOICE_LEFT = "voice_left"
     BACKEND_CLOSED = "backend_closed"
+
+
+class MusicFailureCode(StrEnum):
+    """Stable failure category safe to expose through queue snapshots."""
+
+    TRACK_ERROR = "track_error"
+    CATALOG_ERROR = "catalog_error"
+    VOICE_LEFT = "voice_left"
+    BACKEND_CLOSED = "backend_closed"
+    RELEASE_FAILED = "release_failed"
+
+
+class MusicFailureScope(StrEnum):
+    """Subsystem that must recover before playback can progress."""
+
+    TRACK = "track"
+    CATALOG = "catalog"
+    VOICE_SESSION = "voice_session"
+
+
+@dataclass(frozen=True, slots=True)
+class MusicFailure:
+    """Bounded historical failure independent from the current playback phase."""
+
+    code: MusicFailureCode
+    scope: MusicFailureScope
+    recoverable: bool
+    track_id: UUID | None
+    retry_count: int
+    occurred_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,10 +154,12 @@ class MusicQueueSnapshot:
 
     voice_channel: VoiceChannelKey
     state: PlaybackState
-    mode: PlaybackMode
+    policy: MusicPlaybackPolicy
     current: QueuedTrack | None
     upcoming: tuple[QueuedTrack, ...]
+    cycle_completed_count: int
     revision: int
+    last_failure: MusicFailure | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,11 +173,11 @@ class EnqueueResult:
 
 
 @dataclass(frozen=True, slots=True)
-class PlaybackModeChange:
+class PlaybackPolicyChange:
     """Result of changing one voice channel's playback policy."""
 
     voice_channel: VoiceChannelKey
-    mode: PlaybackMode
+    policy: MusicPlaybackPolicy
     changed: bool
 
 
@@ -137,6 +189,15 @@ class QueueRebuildResult:
     loaded_count: int
     replaced_current: bool
     started_worker: bool
+
+
+@dataclass(frozen=True, slots=True)
+class MusicQueueClearResult:
+    """Result of stopping and clearing one transient playback session."""
+
+    voice_channel: VoiceChannelKey
+    stopped_current: bool
+    removed_count: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,6 +248,35 @@ class PlaylistTrackRemoval:
     playlist_id: UUID
     entry_id: UUID
     removed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class PlaylistRename:
+    """Idempotent area-scoped playlist rename result."""
+
+    playlist_id: UUID
+    old_name: str
+    new_name: str
+    changed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class PlaylistDeletion:
+    """Idempotent playlist deletion and cascaded track count."""
+
+    playlist_id: UUID
+    name: str | None
+    deleted: bool
+    removed_track_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class PlaylistClear:
+    """Track deletion result that preserves the shared playlist."""
+
+    playlist_id: UUID
+    name: str
+    removed_track_count: int
 
 
 @dataclass(frozen=True, slots=True)

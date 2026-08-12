@@ -12,8 +12,10 @@ from cywl_oopz.features.agent.tools.models import ToolExecutionContext, ToolExec
 from cywl_oopz.features.agent.tools.playlists import (
     AddMusicPlaylistTrackInput,
     AddMusicPlaylistTrackTool,
+    ClearMusicPlaylistTool,
     CreateMusicPlaylistInput,
     CreateMusicPlaylistTool,
+    DeleteMusicPlaylistTool,
     GetMusicPlaylistTool,
     ImportNeteasePlaylistInput,
     ImportNeteasePlaylistTool,
@@ -24,6 +26,8 @@ from cywl_oopz.features.agent.tools.playlists import (
     PreviewNeteasePlaylistTool,
     RemoveMusicPlaylistTrackInput,
     RemoveMusicPlaylistTrackTool,
+    RenameMusicPlaylistInput,
+    RenameMusicPlaylistTool,
 )
 from cywl_oopz.features.chat.models import ConversationKey
 from cywl_oopz.features.music.errors import (
@@ -42,6 +46,9 @@ from cywl_oopz.features.music.models import (
     MusicPlaylistSummary,
     MusicTrack,
     NeteasePlaylistSnapshot,
+    PlaylistClear,
+    PlaylistDeletion,
+    PlaylistRename,
     PlaylistTrackRemoval,
     QueueRebuildResult,
     VoiceChannelKey,
@@ -221,6 +228,60 @@ class InMemoryPlaylistRepository:
         assert imported is not None
         return imported
 
+    async def rename(
+        self,
+        area_id: str,
+        playlist_id: UUID,
+        name: str,
+        normalized_name: str,
+    ) -> PlaylistRename:
+        playlist = await self.get(area_id, playlist_id)
+        if playlist is None:
+            raise MusicPlaylistNotFoundError
+        if any(
+            item.id != playlist_id
+            and item.area_id == area_id
+            and item.normalized_name == normalized_name
+            for item in self.playlists.values()
+        ):
+            raise MusicPlaylistConflictError
+        changed = playlist.name != name or playlist.normalized_name != normalized_name
+        if changed:
+            self.playlists[playlist_id] = MusicPlaylist(
+                playlist.id,
+                playlist.area_id,
+                name,
+                normalized_name,
+                playlist.created_by_person_id,
+                playlist.entries,
+                playlist.created_at,
+                datetime.now(UTC),
+            )
+        return PlaylistRename(playlist_id, playlist.name, name, changed)
+
+    async def delete(self, area_id: str, playlist_id: UUID) -> PlaylistDeletion:
+        playlist = await self.get(area_id, playlist_id)
+        if playlist is None:
+            return PlaylistDeletion(playlist_id, None, False, 0)
+        del self.playlists[playlist_id]
+        return PlaylistDeletion(playlist_id, playlist.name, True, playlist.track_count)
+
+    async def clear(self, area_id: str, playlist_id: UUID) -> PlaylistClear:
+        playlist = await self.get(area_id, playlist_id)
+        if playlist is None:
+            raise MusicPlaylistNotFoundError
+        self.playlists[playlist_id] = MusicPlaylist(
+            playlist.id,
+            playlist.area_id,
+            playlist.name,
+            playlist.normalized_name,
+            playlist.created_by_person_id,
+            (),
+            playlist.created_at,
+            datetime.now(UTC),
+        )
+        return PlaylistClear(playlist_id, playlist.name, playlist.track_count)
+
 
 @dataclass
 class FakeMusic:
@@ -314,6 +375,41 @@ async def test_playlist_service_rejects_private_scope_and_empty_load() -> None:
         await playlists.load(identity(), empty.id)
 
 
+@pytest.mark.asyncio
+async def test_playlist_service_renames_clears_and_deletes_inside_one_area() -> None:
+    playlists, _, _ = service()
+    first = await playlists.create(identity(), " First ")
+    second = await playlists.create(identity(), "Second")
+    await playlists.add(identity(), first.id, "Melt")
+
+    renamed = await playlists.rename(identity("other"), first.id, "  Favorites  ")
+    unchanged = await playlists.rename(identity(), first.id, "Favorites")
+    assert (renamed.old_name, renamed.new_name, renamed.changed) == (
+        "First",
+        "Favorites",
+        True,
+    )
+    assert unchanged.changed is False
+    with pytest.raises(MusicPlaylistConflictError):
+        await playlists.rename(identity(), first.id, second.name.casefold())
+
+    cleared = await playlists.clear(identity("other"), first.id)
+    cleared_again = await playlists.clear(identity(), first.id)
+    assert cleared.removed_track_count == 1
+    assert cleared_again.removed_track_count == 0
+    assert (await playlists.get(identity(), first.id)).entries == ()
+
+    deleted = await playlists.delete(identity(), first.id)
+    deleted_again = await playlists.delete(identity(), first.id)
+    assert (deleted.name, deleted.deleted, deleted.removed_track_count) == (
+        "Favorites",
+        True,
+        0,
+    )
+    assert deleted_again == PlaylistDeletion(first.id, None, False, 0)
+    assert (await playlists.delete(identity(area_id="other-area"), second.id)).deleted is False
+
+
 def tool_context() -> ToolExecutionContext:
     caller = identity()
     return ToolExecutionContext(
@@ -326,6 +422,9 @@ def tool_context() -> ToolExecutionContext:
             "get_music_playlist",
             "add_music_playlist_track",
             "remove_music_playlist_track",
+            "rename_music_playlist",
+            "delete_music_playlist",
+            "clear_music_playlist",
             "load_music_playlist",
             "preview_netease_playlist",
             "import_netease_playlist",
@@ -342,6 +441,9 @@ async def test_playlist_agent_tools_cover_the_shared_playlist_lifecycle() -> Non
     get = GetMusicPlaylistTool(playlists, **options)
     add = AddMusicPlaylistTrackTool(playlists, **options)
     remove = RemoveMusicPlaylistTrackTool(playlists, **options)
+    rename = RenameMusicPlaylistTool(playlists, **options)
+    clear = ClearMusicPlaylistTool(playlists, **options)
+    delete = DeleteMusicPlaylistTool(playlists, **options)
     load = LoadMusicPlaylistTool(playlists, **options)
     context = tool_context()
 
@@ -361,6 +463,17 @@ async def test_playlist_agent_tools_cover_the_shared_playlist_lifecycle() -> Non
             entry_id=added.entry.id,
         ),
     )
+    renamed = await rename.execute(
+        context,
+        RenameMusicPlaylistInput(playlist_id=playlist_id, name="Miku Favorites"),
+    )
+    await add.execute(
+        context,
+        AddMusicPlaylistTrackInput(playlist_id=playlist_id, query="World is Mine"),
+    )
+    cleared = await clear.execute(context, PlaylistIdInput(playlist_id=playlist_id))
+    deleted = await delete.execute(context, PlaylistIdInput(playlist_id=playlist_id))
+    deleted_again = await delete.execute(context, PlaylistIdInput(playlist_id=playlist_id))
 
     assert listed.playlists[0].track_count == 1
     assert detailed.entries[0].track.title == "Melt"
@@ -368,6 +481,12 @@ async def test_playlist_agent_tools_cover_the_shared_playlist_lifecycle() -> Non
     assert loaded.replaced_current is True
     assert [track.title for track in music.replaced] == ["Melt"]
     assert removed.removed is True
+    assert renamed.new_name == "Miku Favorites"
+    assert renamed.changed is True
+    assert cleared.removed_track_count == 1
+    assert deleted.name == "Miku Favorites"
+    assert deleted.deleted is True
+    assert deleted_again.deleted is False
 
 
 @pytest.mark.asyncio

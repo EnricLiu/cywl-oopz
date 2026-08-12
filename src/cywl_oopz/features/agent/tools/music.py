@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Never
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from cywl_oopz.features.music.errors import (
     MusicCatalogError,
@@ -17,10 +18,12 @@ from cywl_oopz.features.music.errors import (
     MusicVoiceChannelRequiredError,
 )
 from cywl_oopz.features.music.models import (
+    MusicFailure,
     MusicQueueSnapshot,
     MusicTrack,
-    PlaybackMode,
+    PlaybackOrder,
     QueuedTrack,
+    RepeatPolicy,
 )
 from cywl_oopz.features.music.service import MusicRequestService
 
@@ -214,29 +217,59 @@ class QueuedMusicOutput(BaseModel):
         )
 
 
+class MusicFailureOutput(BaseModel):
+    """Stable recent failure without provider exception text or stream URLs."""
+
+    code: str
+    scope: str
+    recoverable: bool
+    retry_count: int
+    occurred_at: datetime
+
+    @classmethod
+    def from_failure(cls, failure: MusicFailure) -> MusicFailureOutput:
+        return cls(
+            code=failure.code.value,
+            scope=failure.scope.value,
+            recoverable=failure.recoverable,
+            retry_count=failure.retry_count,
+            occurred_at=failure.occurred_at,
+        )
+
+
 class MusicQueueOutput(BaseModel):
     """Bounded queue state visible to the model."""
 
     voice_channel_id: str
     state: str
-    mode: PlaybackMode
+    order: PlaybackOrder
+    repeat: RepeatPolicy
     current: QueuedMusicOutput | None
     upcoming: tuple[QueuedMusicOutput, ...]
+    cycle_completed_count: int
     revision: int
+    last_failure: MusicFailureOutput | None
 
     @classmethod
     def from_snapshot(cls, snapshot: MusicQueueSnapshot) -> MusicQueueOutput:
         return cls(
             voice_channel_id=snapshot.voice_channel.channel_id,
             state=snapshot.state.value,
-            mode=snapshot.mode,
+            order=snapshot.policy.order,
+            repeat=snapshot.policy.repeat,
             current=(
                 QueuedMusicOutput.from_item(snapshot.current)
                 if snapshot.current is not None
                 else None
             ),
             upcoming=tuple(QueuedMusicOutput.from_item(item) for item in snapshot.upcoming),
+            cycle_completed_count=snapshot.cycle_completed_count,
             revision=snapshot.revision,
+            last_failure=(
+                MusicFailureOutput.from_failure(snapshot.last_failure)
+                if snapshot.last_failure is not None
+                else None
+            ),
         )
 
 
@@ -287,23 +320,88 @@ class MusicControlOutput(BaseModel):
     applied: bool
 
 
+class MusicQueueClearOutput(BaseModel):
+    """Committed transient queue clear result."""
+
+    voice_channel_id: str
+    stopped_current: bool
+    removed_count: int
+
+
+class ClearMusicQueueTool(_MusicTool):
+    """Stop playback and clear the transient queue without touching shared playlists."""
+
+    def __init__(
+        self,
+        music: MusicRequestService,
+        *,
+        timeout_seconds: float,
+        max_output_characters: int,
+    ) -> None:
+        self._music = music
+        self._descriptor = ToolDescriptor(
+            name="clear_music_queue",
+            display_name="清空播放队列",
+            description=(
+                "停止用户当前语音频道正在播放的歌曲并清空临时播放队列；"
+                "不会修改 PostgreSQL 共享歌单。"
+            ),
+            input_model=EmptyToolInput,
+            output_model=MusicQueueClearOutput,
+            effect=ToolEffect.WRITE,
+            timeout_seconds=timeout_seconds,
+            max_output_characters=max_output_characters,
+            concurrency_safe=False,
+            idempotent=True,
+        )
+
+    @property
+    def descriptor(self) -> ToolDescriptor:
+        return self._descriptor
+
+    async def execute(
+        self,
+        context: ToolExecutionContext,
+        arguments: BaseModel,
+    ) -> BaseModel:
+        del arguments
+        try:
+            result = await self._music.clear(context.identity)
+        except MusicError as exc:
+            self._raise_tool_error(exc)
+        return MusicQueueClearOutput(
+            voice_channel_id=result.voice_channel.channel_id,
+            stopped_current=result.stopped_current,
+            removed_count=result.removed_count,
+        )
+
+
 class MusicPlaybackModeInput(BaseModel):
-    """One explicit queue policy selected by the user."""
+    """A partial playback policy update; omitted dimensions stay unchanged."""
 
     model_config = ConfigDict(extra="forbid")
 
-    mode: PlaybackMode = Field(
-        description=(
-            "播放模式：sequential 顺序播放；repeat_one 单曲循环；"
-            "repeat_all 列表循环；shuffle 随机播放"
-        )
+    order: PlaybackOrder | None = Field(
+        default=None,
+        description="播放顺序：sequential 顺序；shuffle 每轮无放回随机",
     )
+    repeat: RepeatPolicy | None = Field(
+        default=None,
+        description="循环策略：off 不循环；one 单曲循环；all 列表循环",
+    )
+
+    @model_validator(mode="after")
+    def require_one_dimension(self) -> MusicPlaybackModeInput:
+        if self.order is None and self.repeat is None:
+            raise ValueError("order 和 repeat 至少提供一个")
+        return self
 
 
 class MusicPlaybackModeOutput(BaseModel):
     """Committed playback policy for the caller's voice channel."""
 
-    mode: PlaybackMode
+    order: PlaybackOrder
+    repeat: RepeatPolicy
     changed: bool
 
 
@@ -321,7 +419,7 @@ class SetMusicPlaybackModeTool(_MusicTool):
         self._descriptor = ToolDescriptor(
             name="set_music_playback_mode",
             display_name="设置播放模式",
-            description=("设置用户当前语音频道的顺序播放、单曲循环、列表循环或随机播放模式。"),
+            description=("分别设置用户当前语音频道的播放顺序和循环策略；可只修改一个维度。"),
             input_model=MusicPlaybackModeInput,
             output_model=MusicPlaybackModeOutput,
             effect=ToolEffect.WRITE,
@@ -342,10 +440,18 @@ class SetMusicPlaybackModeTool(_MusicTool):
     ) -> BaseModel:
         values = MusicPlaybackModeInput.model_validate(arguments)
         try:
-            result = await self._music.set_mode(context.identity, values.mode)
+            result = await self._music.set_policy(
+                context.identity,
+                order=values.order,
+                repeat=values.repeat,
+            )
         except MusicError as exc:
             self._raise_tool_error(exc)
-        return MusicPlaybackModeOutput(mode=result.mode, changed=result.changed)
+        return MusicPlaybackModeOutput(
+            order=result.policy.order,
+            repeat=result.policy.repeat,
+            changed=result.changed,
+        )
 
 
 class _MusicControlTool(_MusicTool):
