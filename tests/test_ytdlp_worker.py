@@ -101,6 +101,33 @@ def test_ytdlp_worker_maps_flat_search_without_leaking_media() -> None:
     assert factory.options[0]["js_runtimes"] == {"node": {"path": "/fixture/node"}}
 
 
+def test_ytdlp_worker_retains_flat_page_url_when_webpage_url_is_absent() -> None:
+    factory = FakeExtractorFactory(
+        {
+            "_type": "playlist",
+            "entries": [
+                {
+                    "ie_key": "BiliBili",
+                    "id": "170001",
+                    "title": "fixture",
+                    "url": "https://www.bilibili.com/video/BV17x411w7KC",
+                }
+            ],
+        }
+    )
+
+    response = YtDlpWorker(factory).execute(
+        request(
+            YtDlpOperation.SEARCH,
+            YtDlpMode.FLAT_SEARCH,
+            expected=("BiliBili",),
+        )
+    )
+
+    assert response.ok is True
+    assert response.items[0].webpage_url == ("https://www.bilibili.com/video/BV17x411w7KC")
+
+
 def test_ytdlp_worker_selects_one_audio_input_and_merges_headers() -> None:
     factory = FakeExtractorFactory(
         {
@@ -196,6 +223,22 @@ def test_ytdlp_worker_bounds_and_redacts_external_errors() -> None:
     assert secret_url not in response.error.message
     assert "session-secret" not in response.error.message
     assert "<url>" in response.error.message
+
+
+def test_ytdlp_worker_classifies_bilibili_412_as_rate_limited() -> None:
+    response = YtDlpWorker(
+        FakeExtractorFactory({}, RuntimeError("HTTP Error 412: Precondition Failed"))
+    ).execute(
+        request(
+            YtDlpOperation.SEARCH,
+            YtDlpMode.FLAT_SEARCH,
+            expected=("BiliBili",),
+        )
+    )
+
+    assert response.ok is False
+    assert response.error is not None
+    assert response.error.code == "rate_limited"
 
 
 def test_ytdlp_protocol_round_trip_preserves_only_owned_fields() -> None:

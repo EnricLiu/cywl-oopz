@@ -185,6 +185,13 @@ class YtDlpWorker:
         artists = self._artists(info)
         duration = _finite_float(info.get("duration"))
         media = self._media(info) if request.mode is YtDlpMode.PLAYABLE_MEDIA else None
+        webpage_url = _optional_clean_text(info.get("webpage_url"), 2_048)
+        if webpage_url is None:
+            webpage_url = _optional_clean_text(info.get("original_url"), 2_048)
+        if webpage_url is None and request.mode is YtDlpMode.FLAT_SEARCH:
+            # In flat-search mode ``url`` is an extractor page, not an expiring
+            # media input. Providers need it to recover canonical platform IDs.
+            webpage_url = _optional_clean_text(info.get("url"), 2_048)
         return YtDlpWorkerItem(
             extractor_key=extractor_key,
             id=identifier,
@@ -193,7 +200,7 @@ class YtDlpWorker:
             channel=_optional_clean_text(info.get("channel"), 128),
             uploader=_optional_clean_text(info.get("uploader"), 128),
             duration_seconds=duration,
-            webpage_url=_optional_clean_text(info.get("webpage_url"), 2_048),
+            webpage_url=webpage_url,
             live_status=_optional_clean_text(info.get("live_status"), 64),
             is_live=info.get("is_live") if isinstance(info.get("is_live"), bool) else None,
             availability=_optional_clean_text(info.get("availability"), 64),
@@ -317,6 +324,8 @@ class YtDlpWorker:
             "rate limit" in normalized
             or "too many requests" in normalized
             or "http error 429" in normalized
+            or "http error 412" in normalized
+            or "precondition failed" in normalized
         ):
             code = "rate_limited"
         elif "not found" in normalized or "unavailable" in normalized:

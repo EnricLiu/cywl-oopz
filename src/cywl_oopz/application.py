@@ -125,6 +125,7 @@ from .features.chat.provider import ChatProvider, DisabledChatProvider
 from .features.chat.repository import SqlAlchemyConversationRepository
 from .features.chat.service import ChatService
 from .features.chat.tasks import ChatTaskSupervisor
+from .features.music.bilibili import BilibiliMusicProvider
 from .features.music.catalog import CompositeMusicCatalog, MusicProviderRegistry
 from .features.music.commands import MusicCommand
 from .features.music.errors import MusicSourceUnavailableError
@@ -256,6 +257,7 @@ class BotApplication:
         self.music: MusicRequestService | None = None
         self.music_catalog: CompositeMusicCatalog | None = None
         self.netease_music_provider: NeteaseMusicProvider | None = None
+        self.bilibili_music_provider: BilibiliMusicProvider | None = None
         self.music_playlists: MusicPlaylistService | None = None
         enabled_agent_tools = settings.agent.enabled_tools
         if settings.agent.skills_enabled:
@@ -277,10 +279,21 @@ class BotApplication:
                 for source in settings.music.enabled_sources
             ):
                 self.music_ytdlp_runner = YtDlpProcessRunner(settings.music_ytdlp)
-            self.netease_music_provider = NeteaseMusicProvider(settings.music)
+            music_providers = []
+            if MusicSourceKind.NETEASE in settings.music.enabled_sources:
+                self.netease_music_provider = NeteaseMusicProvider(settings.music)
+                music_providers.append(self.netease_music_provider)
+            if MusicSourceKind.BILIBILI in settings.music.enabled_sources:
+                assert self.music_ytdlp_runner is not None
+                self.bilibili_music_provider = BilibiliMusicProvider(
+                    settings.music,
+                    settings.music_ytdlp,
+                    self.music_ytdlp_runner,
+                )
+                music_providers.append(self.bilibili_music_provider)
             self.music_catalog = CompositeMusicCatalog(
-                MusicProviderRegistry((self.netease_music_provider,)),
-                MusicSourceKind.NETEASE,
+                MusicProviderRegistry(music_providers),
+                settings.music.default_source,
             )
             self.music_voice = OopzMusicVoiceGateway(
                 self.bot,

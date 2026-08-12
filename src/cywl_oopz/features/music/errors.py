@@ -33,6 +33,34 @@ class MusicExtractorProtocolError(MusicSourceUnavailableError):
     """Raised when the isolated worker violates the project JSON protocol."""
 
 
+class MusicAuthenticationRequiredError(MusicCatalogError):
+    """Raised when a source requires credentials that are not configured or valid."""
+
+
+class MusicGeoRestrictedError(MusicCatalogError):
+    """Raised when media is unavailable from the bot's current region."""
+
+
+class MusicSourceRateLimitedError(MusicSourceUnavailableError):
+    """Raised when a source asks the caller to retry later."""
+
+
+class MusicLiveUnsupportedError(MusicCatalogError):
+    """Raised when a live or upcoming stream is outside the playback policy."""
+
+
+class MusicUnsupportedContentError(MusicCatalogError):
+    """Raised for DRM, collections, interactive video, or another excluded shape."""
+
+
+class MusicNoAudioFormatError(MusicCatalogError):
+    """Raised when extraction cannot produce one supported audio input."""
+
+
+class MusicTrackTooLongError(MusicCatalogError):
+    """Raised when trusted metadata exceeds the configured duration bound."""
+
+
 class MusicReferenceError(MusicError):
     """Raised when a music URL or stable provider identifier is invalid."""
 
