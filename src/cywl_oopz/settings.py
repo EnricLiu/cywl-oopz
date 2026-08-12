@@ -14,6 +14,7 @@ from oopz_sdk import OopzConfig
 
 from .core.errors import ConfigurationError
 from .features.audio.models import MixerLevels
+from .features.music.models import MusicSourceKind
 from .storage.url import normalize_asyncpg_url
 
 DEFAULT_AGENT_TOOLS = (
@@ -636,9 +637,11 @@ class AgentSettings:
 
 @dataclass(frozen=True, slots=True)
 class MusicSettings:
-    """Configuration for the optional Netease-backed OOPZ music feature."""
+    """Provider-neutral bounds and source selection for OOPZ music."""
 
     enabled: bool
+    enabled_sources: tuple[MusicSourceKind, ...]
+    default_source: MusicSourceKind
     catalog_base_url: str
     catalog_cookie: str
     request_timeout_seconds: float
@@ -647,20 +650,50 @@ class MusicSettings:
     max_queue_length: int
     max_playlist_tracks: int
     max_query_characters: int
+    max_track_duration_seconds: int
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, str]) -> MusicSettings:
         """Build music settings and require an HTTP catalog only when enabled."""
         enabled = _boolean(values, "CYWL_MUSIC_ENABLED", False)
+        raw_sources = _csv(values, "CYWL_MUSIC_SOURCES") or (MusicSourceKind.NETEASE.value,)
+        try:
+            enabled_sources = tuple(MusicSourceKind(value.casefold()) for value in raw_sources)
+            default_source = MusicSourceKind(
+                values.get("CYWL_MUSIC_DEFAULT_SOURCE", MusicSourceKind.NETEASE.value)
+                .strip()
+                .casefold()
+            )
+        except ValueError as exc:
+            raise ConfigurationError(
+                "CYWL_MUSIC_SOURCES and CYWL_MUSIC_DEFAULT_SOURCE contain an unknown source"
+            ) from exc
+        if len(set(enabled_sources)) != len(enabled_sources):
+            raise ConfigurationError("CYWL_MUSIC_SOURCES must not contain duplicates")
+        if default_source not in enabled_sources:
+            raise ConfigurationError("CYWL_MUSIC_DEFAULT_SOURCE must be enabled")
         base_url = values.get("CYWL_MUSIC_CATALOG_BASE_URL", "").strip().rstrip("/")
-        if enabled:
+        if enabled and MusicSourceKind.NETEASE in enabled_sources:
             parsed = urlparse(base_url)
             if parsed.scheme not in {"http", "https"} or not parsed.netloc:
                 raise ConfigurationError(
                     "CYWL_MUSIC_CATALOG_BASE_URL must be an HTTP(S) URL when music is enabled"
                 )
+        if (
+            enabled
+            and any(
+                source in {MusicSourceKind.YOUTUBE, MusicSourceKind.BILIBILI}
+                for source in enabled_sources
+            )
+            and not _boolean(values, "CYWL_AUDIO_MIXER_ENABLED", False)
+        ):
+            raise ConfigurationError(
+                "YouTube and Bilibili music sources require CYWL_AUDIO_MIXER_ENABLED=true"
+            )
         return cls(
             enabled=enabled,
+            enabled_sources=enabled_sources,
+            default_source=default_source,
             catalog_base_url=base_url,
             catalog_cookie=values.get("CYWL_MUSIC_NETEASE_COOKIE", "").strip(),
             request_timeout_seconds=_positive_float(
@@ -681,7 +714,80 @@ class MusicSettings:
                 "CYWL_MUSIC_MAX_QUERY_CHARACTERS",
                 200,
             ),
+            max_track_duration_seconds=_positive_integer(
+                values,
+                "CYWL_MUSIC_MAX_TRACK_DURATION_SECONDS",
+                10_800,
+            ),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class YtDlpMusicSettings:
+    """Bounded worker-process settings shared by yt-dlp-backed providers."""
+
+    search_timeout_seconds: float
+    process_timeout_seconds: float
+    socket_timeout_seconds: float
+    stop_timeout_seconds: float
+    max_concurrency: int
+    max_audio_bitrate_kbps: int
+    cache_dir: str
+    js_runtime: str
+    js_runtime_path: str
+    youtube_cookie_file: str
+    bilibili_cookie_file: str
+
+    @classmethod
+    def from_mapping(cls, values: Mapping[str, str]) -> YtDlpMusicSettings:
+        runtime = values.get("CYWL_MUSIC_YTDLP_JS_RUNTIME", "deno").strip().casefold()
+        if runtime not in {"deno", "node"}:
+            raise ConfigurationError("CYWL_MUSIC_YTDLP_JS_RUNTIME must be deno or node")
+        cache_dir = values.get("CYWL_MUSIC_YTDLP_CACHE_DIR", ".cache/yt-dlp").strip()
+        if not cache_dir:
+            raise ConfigurationError("CYWL_MUSIC_YTDLP_CACHE_DIR must not be empty")
+        settings = cls(
+            search_timeout_seconds=_positive_float(
+                values,
+                "CYWL_MUSIC_YTDLP_SEARCH_TIMEOUT_SECONDS",
+                15.0,
+            ),
+            process_timeout_seconds=_positive_float(
+                values,
+                "CYWL_MUSIC_YTDLP_PROCESS_TIMEOUT_SECONDS",
+                20.0,
+            ),
+            socket_timeout_seconds=_positive_float(
+                values,
+                "CYWL_MUSIC_YTDLP_SOCKET_TIMEOUT_SECONDS",
+                8.0,
+            ),
+            stop_timeout_seconds=_positive_float(
+                values,
+                "CYWL_MUSIC_YTDLP_STOP_TIMEOUT_SECONDS",
+                1.0,
+            ),
+            max_concurrency=_positive_integer(
+                values,
+                "CYWL_MUSIC_YTDLP_MAX_CONCURRENCY",
+                2,
+            ),
+            max_audio_bitrate_kbps=_positive_integer(
+                values,
+                "CYWL_MUSIC_YTDLP_MAX_AUDIO_BITRATE_KBPS",
+                192,
+            ),
+            cache_dir=cache_dir,
+            js_runtime=runtime,
+            js_runtime_path=values.get("CYWL_MUSIC_YTDLP_JS_RUNTIME_PATH", "").strip(),
+            youtube_cookie_file=values.get("CYWL_MUSIC_YOUTUBE_COOKIE_FILE", "").strip(),
+            bilibili_cookie_file=values.get("CYWL_MUSIC_BILIBILI_COOKIE_FILE", "").strip(),
+        )
+        if settings.max_concurrency > 8:
+            raise ConfigurationError("CYWL_MUSIC_YTDLP_MAX_CONCURRENCY must not exceed 8")
+        if settings.max_audio_bitrate_kbps > 512:
+            raise ConfigurationError("CYWL_MUSIC_YTDLP_MAX_AUDIO_BITRATE_KBPS must not exceed 512")
+        return settings
 
 
 @dataclass(frozen=True, slots=True)
@@ -1073,6 +1179,7 @@ class AppSettings:
     chat: ChatSettings
     agent: AgentSettings
     music: MusicSettings
+    music_ytdlp: YtDlpMusicSettings
     audio: AudioMixerSettings
     voice: VoiceSettings
     web: WebToolsSettings
@@ -1109,6 +1216,7 @@ class AppSettings:
             chat=ChatSettings.from_mapping(values),
             agent=AgentSettings.from_mapping(values),
             music=MusicSettings.from_mapping(values),
+            music_ytdlp=YtDlpMusicSettings.from_mapping(values),
             audio=AudioMixerSettings.from_mapping(values),
             voice=VoiceSettings.from_mapping(values),
             web=WebToolsSettings.from_mapping(values),

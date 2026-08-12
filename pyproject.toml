@@ -20,6 +20,7 @@ dependencies = [
     "sqlalchemy>=2.0.0",
     "soxr>=1.0.0",
     "websockets>=15.0.1,<16",
+    "yt-dlp[curl-cffi,default]>=2026.6.9",
 ]
 
 [project.scripts]

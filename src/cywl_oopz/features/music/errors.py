@@ -21,6 +21,18 @@ class MusicSourceUnavailableError(MusicCatalogError):
     """Raised when an enabled provider cannot currently serve requests."""
 
 
+class MusicExtractionTimeoutError(MusicSourceUnavailableError):
+    """Raised when a bounded yt-dlp operation does not settle in time."""
+
+
+class MusicExtractorProcessError(MusicSourceUnavailableError):
+    """Raised when the isolated extractor worker exits without a valid response."""
+
+
+class MusicExtractorProtocolError(MusicSourceUnavailableError):
+    """Raised when the isolated worker violates the project JSON protocol."""
+
+
 class MusicReferenceError(MusicError):
     """Raised when a music URL or stable provider identifier is invalid."""
 
