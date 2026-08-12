@@ -125,6 +125,7 @@ from .features.chat.provider import ChatProvider, DisabledChatProvider
 from .features.chat.repository import SqlAlchemyConversationRepository
 from .features.chat.service import ChatService
 from .features.chat.tasks import ChatTaskSupervisor
+from .features.music.commands import MusicCommand
 from .features.music.netease import NeteaseMusicCatalog
 from .features.music.playlist_repository import SqlAlchemyMusicPlaylistRepository
 from .features.music.playlists import MusicPlaylistService
@@ -638,6 +639,14 @@ class BotApplication:
         else:
             self.commands.register(ModelCommand(self.legacy_chat, self.chat_tasks))
         self.commands.register(ChatStatusCommand(self.chat))
+        if self.music is not None and self.music_playlists is not None:
+            self.commands.register(
+                MusicCommand(
+                    self.music,
+                    self.music_playlists,
+                    self.settings.command_prefix,
+                )
+            )
         if self.settings.agent.enabled:
             self.commands.register(
                 ProviderCommand(

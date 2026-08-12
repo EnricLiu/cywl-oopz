@@ -142,9 +142,11 @@ async def test_composition_root_registers_music_tools_only_when_music_is_enabled
 
     assert disabled.music is None
     assert disabled.music_playlists is None
+    assert "music" not in {command.name for command in disabled.commands.commands}
     assert "enqueue_music" not in disabled.agent_tool_registry.names
     assert enabled.music is not None
     assert enabled.music_playlists is not None
+    assert "music" in {command.name for command in enabled.commands.commands}
     assert enabled.music._voice._leases is enabled.voice_channel_sessions
     assert {
         "search_music_catalog",
