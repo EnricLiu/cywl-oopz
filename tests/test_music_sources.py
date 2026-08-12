@@ -154,9 +154,35 @@ def test_music_provider_registry_rejects_duplicate_and_missing_default_sources()
 def test_resolved_media_input_keeps_transport_details_out_of_repr() -> None:
     media = ResolvedMediaInput(
         "https://media.example/audio?token=sensitive",
-        (("Referer", "https://secret.example"),),
+        (
+            ("referer", "https://secret.example"),
+            ("User-Agent", "CYWL/1"),
+            ("Cookie", "session=forbidden"),
+            ("Authorization", "Bearer forbidden"),
+            ("X-Extractor-Internal", "ignored"),
+        ),
         protocol="https",
     )
 
+    assert media.http_headers == (
+        ("User-Agent", "CYWL/1"),
+        ("Referer", "https://secret.example"),
+    )
     assert "sensitive" not in repr(media)
     assert "secret.example" not in repr(media)
+    assert "forbidden" not in repr(media)
+
+
+@pytest.mark.parametrize(
+    "headers",
+    (
+        (("Referer", "https://example.com\r\nCookie: injected"),),
+        (("User-Agent\nInjected", "value"),),
+        (("Origin", "bad\0value"),),
+    ),
+)
+def test_resolved_media_input_rejects_header_injection(
+    headers: tuple[tuple[str, str], ...],
+) -> None:
+    with pytest.raises(ValueError, match="control characters"):
+        ResolvedMediaInput("https://media.example/audio", headers)

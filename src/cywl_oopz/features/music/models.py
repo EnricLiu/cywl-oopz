@@ -7,6 +7,8 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from uuid import UUID, uuid4
 
+from .media import DEFAULT_MUSIC_MEDIA_HEADER_POLICY
+
 
 class MusicSourceKind(StrEnum):
     """Stable provider identifiers persisted with queue and playlist metadata."""
@@ -97,6 +99,11 @@ class ResolvedMediaInput:
         if not normalized:
             raise ValueError("Music media URL must not be empty")
         object.__setattr__(self, "url", normalized)
+        object.__setattr__(
+            self,
+            "http_headers",
+            DEFAULT_MUSIC_MEDIA_HEADER_POLICY.sanitize(self.http_headers),
+        )
 
 
 @dataclass(frozen=True, slots=True)

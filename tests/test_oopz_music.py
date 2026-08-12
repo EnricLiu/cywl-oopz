@@ -18,7 +18,7 @@ from cywl_oopz.features.audio.models import (
     VoiceParticipantKind,
     VoiceParticipantRequest,
 )
-from cywl_oopz.features.music.errors import MusicBackendClosedError
+from cywl_oopz.features.music.errors import MusicBackendClosedError, MusicPlaybackError
 from cywl_oopz.features.music.models import (
     MusicPlaybackEndReason,
     MusicTrack,
@@ -245,6 +245,31 @@ async def test_oopz_music_gateway_reuses_one_lease_and_typed_playback() -> None:
     assert await gateway.release(VoiceChannelKey("area", "other")) is False
     assert await gateway.release(channel) is True
     assert bot.voice.leaves == 1
+
+
+@pytest.mark.asyncio
+async def test_oopz_native_music_rejects_media_that_requires_http_headers() -> None:
+    bot = FakeBot()
+    leases = OopzVoiceChannelSessionManager(bot)
+    gateway = OopzMusicVoiceGateway(bot, leases)
+    channel = VoiceChannelKey("area", "voice")
+    track = MusicTrack("bilibili", "BV1fixture:p=1", "fixture", ("uploader",))
+    source = PlayableTrack(
+        track,
+        ResolvedMediaInput(
+            "https://media.example/audio",
+            (("Referer", "https://www.bilibili.com/video/BV1fixture"),),
+        ),
+    )
+    assert await gateway.acquire(channel) is True
+
+    with pytest.raises(MusicPlaybackError, match="shared audio mixer"):
+        await gateway.start_playback(channel, source)
+
+    assert bot.voice.urls == []
+    await gateway.release(channel)
+    await gateway.aclose()
+    await leases.aclose()
     assert await leases.current() is None
 
     await gateway.aclose()

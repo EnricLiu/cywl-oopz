@@ -115,6 +115,7 @@ class LocalAudioHttpServer:
         self._writers: set[asyncio.StreamWriter] = set()
         self._closing = asyncio.Event()
         self.requests = 0
+        self.request_headers: list[dict[str, str]] = []
         self.port = 0
 
     async def start(self) -> None:
@@ -151,7 +152,13 @@ class LocalAudioHttpServer:
     ) -> None:
         self._writers.add(writer)
         try:
-            await reader.readuntil(b"\r\n\r\n")
+            request = await reader.readuntil(b"\r\n\r\n")
+            headers: dict[str, str] = {}
+            for line in request.decode("latin-1").split("\r\n")[1:]:
+                name, separator, value = line.partition(":")
+                if separator:
+                    headers[name.strip().casefold()] = value.strip()
+            self.request_headers.append(headers)
             self.requests += 1
             status, body = self._responses.popleft() if self._responses else self._last_response
             if status == 503:
@@ -213,7 +220,8 @@ def test_ffmpeg_command_is_argument_list_with_canonical_output() -> None:
     assert command[0] == "/usr/bin/ffmpeg"
     assert command[command.index("-i") + 1] == stream_url
     assert "-reconnect" in command
-    assert "-reconnect_max_retries" not in command
+    assert command[command.index("-reconnect_max_retries") + 1] == "3"
+    assert command[command.index("-reconnect_delay_total_max") + 1] == "10"
     assert command[-9:] == (
         "-f",
         "f32le",
@@ -234,6 +242,29 @@ def test_ffmpeg_command_is_argument_list_with_canonical_output() -> None:
     )
     assert "-rw_timeout" not in local_command
     assert "-reconnect" not in local_command
+
+
+def test_ffmpeg_command_places_sanitized_headers_before_input() -> None:
+    source = ResolvedMediaInput(
+        "https://music.example/audio",
+        (
+            ("User-Agent", "CYWL fixture"),
+            ("Referer", "https://www.bilibili.com/video/BV1"),
+            ("Origin", "https://www.bilibili.com"),
+            ("Accept-Language", "zh-CN"),
+            ("Cookie", "not-forwarded"),
+        ),
+    )
+
+    command = FfmpegMusicDecoder.command("ffmpeg", source, settings())
+    input_index = command.index("-i")
+
+    assert command.index("-user_agent") < input_index
+    assert command[command.index("-user_agent") + 1] == "CYWL fixture"
+    assert command.index("-referer") < input_index
+    serialized = command[command.index("-headers") + 1]
+    assert serialized == "Origin: https://www.bilibili.com\r\nAccept-Language: zh-CN\r\n"
+    assert "not-forwarded" not in command
 
 
 @pytest.mark.asyncio
@@ -400,3 +431,38 @@ async def test_real_ffmpeg_reconnects_after_temporary_http_503() -> None:
 
     assert server.requests >= 2
     assert sum(block.valid_frames for block in decoded) == frames
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg is not installed")
+async def test_real_ffmpeg_forwards_provider_media_headers() -> None:
+    frames = 4_800
+    server = LocalAudioHttpServer(((200, wav_bytes(frames)),))
+    await server.start()
+    decoder: FfmpegMusicDecoder | None = None
+    try:
+        decoder = await FfmpegMusicDecoder.open(
+            shutil.which("ffmpeg") or "ffmpeg",
+            ResolvedMediaInput(
+                server.url(),
+                (
+                    ("User-Agent", "CYWL header fixture"),
+                    ("Referer", "https://www.bilibili.com/video/BV1fixture"),
+                    ("Origin", "https://www.bilibili.com"),
+                ),
+            ),
+            settings(
+                CYWL_AUDIO_DECODER_START_TIMEOUT_SECONDS="5",
+                CYWL_AUDIO_DECODER_READ_TIMEOUT_SECONDS="2",
+            ),
+        )
+        decoded = [block async for block in decoder]
+    finally:
+        if decoder is not None:
+            await decoder.aclose()
+        await server.aclose()
+
+    assert sum(block.valid_frames for block in decoded) == frames
+    assert server.request_headers[0]["user-agent"] == "CYWL header fixture"
+    assert server.request_headers[0]["referer"] == ("https://www.bilibili.com/video/BV1fixture")
+    assert server.request_headers[0]["origin"] == "https://www.bilibili.com"

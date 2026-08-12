@@ -241,8 +241,22 @@ class FfmpegMusicDecoder:
                     "1",
                     "-reconnect_delay_max",
                     "2",
+                    "-reconnect_max_retries",
+                    "3",
+                    "-reconnect_delay_total_max",
+                    "10",
                 )
             )
+            headers = dict(media.http_headers)
+            if user_agent := headers.pop("User-Agent", None):
+                command.extend(("-user_agent", user_agent))
+            if referer := headers.pop("Referer", None):
+                command.extend(("-referer", referer))
+            if headers:
+                serialized_headers = "".join(
+                    f"{name}: {value}\r\n" for name, value in headers.items()
+                )
+                command.extend(("-headers", serialized_headers))
         command.extend(
             (
                 "-i",

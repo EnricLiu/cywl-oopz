@@ -17,6 +17,7 @@ from cywl_oopz.settings import MusicSettings
 from .errors import (
     MusicBackendClosedError,
     MusicCatalogError,
+    MusicDecoderError,
     MusicNotFoundError,
     MusicPlaybackError,
     MusicQueryError,
@@ -443,6 +444,7 @@ class MusicRequestService:
     ) -> None:
         drained_normally = False
         backend_retries: dict[UUID, int] = {}
+        media_retries: dict[UUID, int] = {}
         try:
             while True:
                 async with session.lock:
@@ -562,6 +564,32 @@ class MusicRequestService:
                             backend_retries[item.id],
                             result.end_reason is MusicPlaybackEndReason.VOICE_LEFT,
                         )
+                    elif (
+                        result.end_reason is MusicPlaybackEndReason.TRACK_ERROR
+                        and result.duration_seconds is not None
+                        and result.duration_seconds <= 3.0
+                        and media_retries.get(item.id, 0) < 1
+                        and not session.skip_requested.is_set()
+                    ):
+                        media_retries[item.id] = media_retries.get(item.id, 0) + 1
+                        retry_current = True
+                        async with session.lock:
+                            self._record_failure_locked(
+                                session,
+                                item,
+                                MusicFailureCode.TRACK_ERROR,
+                                MusicFailureScope.TRACK,
+                                recoverable=True,
+                                retry_count=media_retries[item.id],
+                            )
+                        logger.warning(
+                            "Re-resolving music after early media failure: "
+                            "channel=%s source=%s attempt=%s elapsed_seconds=%.3f",
+                            self._channel_ref(channel),
+                            item.track.source.value,
+                            media_retries[item.id],
+                            result.duration_seconds,
+                        )
                     elif not completed and result.end_reason not in {
                         MusicPlaybackEndReason.STOPPED,
                         MusicPlaybackEndReason.REPLACED,
@@ -580,6 +608,30 @@ class MusicRequestService:
                                     MusicFailureScope.VOICE_SESSION,
                                     recoverable=False,
                                     retry_count=backend_retries.get(item.id, 0),
+                                )
+                                session.revision += 1
+                        elif result.end_reason is MusicPlaybackEndReason.TRACK_ERROR:
+                            logger.error(
+                                "Music media playback failed: "
+                                "channel=%s source=%s retries=%s error=%s",
+                                self._channel_ref(channel),
+                                item.track.source.value,
+                                media_retries.get(item.id, 0),
+                                (
+                                    type(result.terminal_error).__name__
+                                    if result.terminal_error is not None
+                                    else "none"
+                                ),
+                            )
+                            async with session.lock:
+                                session.state = PlaybackState.FAILED
+                                self._record_failure_locked(
+                                    session,
+                                    item,
+                                    MusicFailureCode.TRACK_ERROR,
+                                    MusicFailureScope.TRACK,
+                                    recoverable=False,
+                                    retry_count=media_retries.get(item.id, 0),
                                 )
                                 session.revision += 1
                         else:
@@ -620,6 +672,45 @@ class MusicRequestService:
                             )
                             session.revision += 1
                         halt_after_failure = True
+                except MusicDecoderError as exc:
+                    if media_retries.get(item.id, 0) < 1 and not session.skip_requested.is_set():
+                        media_retries[item.id] = media_retries.get(item.id, 0) + 1
+                        retry_current = True
+                        async with session.lock:
+                            self._record_failure_locked(
+                                session,
+                                item,
+                                MusicFailureCode.TRACK_ERROR,
+                                MusicFailureScope.TRACK,
+                                recoverable=True,
+                                retry_count=media_retries[item.id],
+                            )
+                        logger.warning(
+                            "Re-resolving music after decoder startup failure: "
+                            "channel=%s source=%s attempt=%s error=%s",
+                            self._channel_ref(channel),
+                            item.track.source.value,
+                            media_retries[item.id],
+                            type(exc).__name__,
+                        )
+                    else:
+                        logger.error(
+                            "Music media recovery exhausted: channel=%s source=%s error=%s",
+                            self._channel_ref(channel),
+                            item.track.source.value,
+                            type(exc).__name__,
+                        )
+                        async with session.lock:
+                            session.state = PlaybackState.FAILED
+                            self._record_failure_locked(
+                                session,
+                                item,
+                                MusicFailureCode.TRACK_ERROR,
+                                MusicFailureScope.TRACK,
+                                recoverable=False,
+                                retry_count=media_retries.get(item.id, 0),
+                            )
+                            session.revision += 1
                 except Exception as exc:
                     logger.error(
                         "Music playback failed: channel=%s error=%s",
@@ -654,10 +745,12 @@ class MusicRequestService:
                         if halt_after_failure and not session.skip_requested.is_set():
                             session.queue.appendleft(item)
                             backend_retries.pop(item.id, None)
+                            media_retries.pop(item.id, None)
                         elif not session.skip_requested.is_set() and completed:
                             self._retain_completed(session, item)
                             session.last_failure = None
                             backend_retries.pop(item.id, None)
+                            media_retries.pop(item.id, None)
                         elif not session.skip_requested.is_set() and retry_current:
                             session.queue.appendleft(item)
                             session.state = PlaybackState.WAITING
@@ -665,8 +758,10 @@ class MusicRequestService:
                         elif session.retain_skipped_for_cycle:
                             session.cycle_history.append(item)
                             backend_retries.pop(item.id, None)
+                            media_retries.pop(item.id, None)
                         else:
                             backend_retries.pop(item.id, None)
+                            media_retries.pop(item.id, None)
                         if session.playback is playback:
                             session.playback = None
                         session.current = None

@@ -19,7 +19,7 @@ from cywl_oopz.features.audio.models import (
 )
 from cywl_oopz.features.audio.ports import AudioDecoder
 from cywl_oopz.features.audio.session import SharedAudioMixerBus
-from cywl_oopz.features.music.errors import MusicBackendClosedError
+from cywl_oopz.features.music.errors import MusicBackendClosedError, MusicPlaybackError
 from cywl_oopz.features.music.models import (
     MusicPlaybackEndReason,
     MusicPlaybackResult,
@@ -249,6 +249,8 @@ class OopzMusicVoiceGateway:
                 playback = ObservedMusicPlayback(source_playback, self._lease)
                 self._playback = playback
                 return playback
+            if playable.media.http_headers:
+                raise MusicPlaybackError("Music media HTTP headers require the shared audio mixer")
             await self._bot.voice.set_volume(DEFAULT_VOLUME)
             source_playback = OopzMusicPlayback(
                 await self._bot.voice.start_url_playback(playable.media.url)

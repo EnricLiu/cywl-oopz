@@ -11,6 +11,7 @@ from cywl_oopz.features.chat.models import ConversationKey
 from cywl_oopz.features.music.errors import (
     MusicBackendClosedError,
     MusicCatalogError,
+    MusicDecoderError,
     MusicQueryError,
     MusicQueueFullError,
     MusicVoiceBusyError,
@@ -243,6 +244,48 @@ class VoiceLeftRecoveringVoice(FakeVoice):
         await super().reset(channel)
 
 
+class EarlyMediaFailureVoice(FakeVoice):
+    def __init__(self, *, duration_seconds: float = 0.5, failures: int = 1) -> None:
+        super().__init__()
+        self._failures_remaining = failures
+        self._duration_seconds = duration_seconds
+
+    async def start_playback(
+        self,
+        channel: VoiceChannelKey,
+        playable: PlayableTrack,
+    ):
+        if self._failures_remaining:
+            self._failures_remaining -= 1
+            self.played.append((channel, playable.media.url))
+            self.play_started.set()
+            return TerminalPlayback(
+                MusicPlaybackResult(
+                    MusicPlaybackEndReason.TRACK_ERROR,
+                    self._duration_seconds,
+                    RuntimeError("fixture media input failure"),
+                )
+            )
+        return await super().start_playback(channel, playable)
+
+
+class DecoderStartupRecoveringVoice(FakeVoice):
+    def __init__(self) -> None:
+        super().__init__()
+        self._failed = False
+
+    async def start_playback(
+        self,
+        channel: VoiceChannelKey,
+        playable: PlayableTrack,
+    ):
+        if not self._failed:
+            self._failed = True
+            self.played.append((channel, playable.media.url))
+            raise MusicDecoderError("fixture decoder startup failure")
+        return await super().start_playback(channel, playable)
+
+
 async def eventually(predicate, *, attempts: int = 100) -> None:
     for _ in range(attempts):
         if predicate():
@@ -406,6 +449,81 @@ async def test_music_service_reresolves_once_when_backend_fails_during_startup()
     await eventually(lambda: len(voice.played) == 2)
 
     assert catalog.resolved == ["startup-recover", "startup-recover"]
+    assert (await service.queue(identity())).state is PlaybackState.PLAYING
+    voice.current_finished.set()
+    await eventually(lambda: voice.acquired is None)
+    await service.aclose()
+
+
+@pytest.mark.asyncio
+async def test_music_service_reresolves_once_after_early_media_failure() -> None:
+    catalog = FakeCatalog()
+    voice = EarlyMediaFailureVoice(duration_seconds=0.5)
+    service = MusicRequestService(settings(), catalog, voice)
+
+    await service.enqueue(identity(), "expired-media")
+    await eventually(lambda: len(voice.played) == 2)
+
+    assert catalog.resolved == ["expired-media", "expired-media"]
+    snapshot = await service.queue(identity())
+    assert snapshot.state is PlaybackState.PLAYING
+    assert snapshot.last_failure is not None
+    assert snapshot.last_failure.scope is MusicFailureScope.TRACK
+    assert snapshot.last_failure.recoverable is True
+    assert snapshot.last_failure.retry_count == 1
+    voice.current_finished.set()
+    await eventually(lambda: voice.acquired is None)
+    assert (await service.queue(identity())).last_failure is None
+    await service.aclose()
+
+
+@pytest.mark.asyncio
+async def test_music_service_does_not_restart_track_after_late_media_failure() -> None:
+    catalog = FakeCatalog()
+    voice = EarlyMediaFailureVoice(duration_seconds=3.1)
+    service = MusicRequestService(settings(), catalog, voice)
+
+    await service.enqueue(identity(), "late-failure")
+    await eventually(lambda: voice.acquired is None)
+
+    assert catalog.resolved == ["late-failure"]
+    assert len(voice.played) == 1
+    snapshot = await service.queue(identity())
+    assert snapshot.last_failure is not None
+    assert snapshot.last_failure.scope is MusicFailureScope.TRACK
+    assert snapshot.last_failure.recoverable is False
+    assert snapshot.last_failure.retry_count == 0
+    await service.aclose()
+
+
+@pytest.mark.asyncio
+async def test_music_service_bounds_early_media_recovery_to_one_retry() -> None:
+    catalog = FakeCatalog()
+    voice = EarlyMediaFailureVoice(failures=2)
+    service = MusicRequestService(settings(), catalog, voice)
+
+    await service.enqueue(identity(), "still-expired")
+    await eventually(lambda: voice.acquired is None)
+
+    assert catalog.resolved == ["still-expired", "still-expired"]
+    assert len(voice.played) == 2
+    snapshot = await service.queue(identity())
+    assert snapshot.last_failure is not None
+    assert snapshot.last_failure.recoverable is False
+    assert snapshot.last_failure.retry_count == 1
+    await service.aclose()
+
+
+@pytest.mark.asyncio
+async def test_music_service_reresolves_once_after_decoder_startup_failure() -> None:
+    catalog = FakeCatalog()
+    voice = DecoderStartupRecoveringVoice()
+    service = MusicRequestService(settings(), catalog, voice)
+
+    await service.enqueue(identity(), "decoder-recover")
+    await eventually(lambda: len(voice.played) == 2)
+
+    assert catalog.resolved == ["decoder-recover", "decoder-recover"]
     assert (await service.queue(identity())).state is PlaybackState.PLAYING
     voice.current_finished.set()
     await eventually(lambda: voice.acquired is None)
