@@ -17,6 +17,10 @@ from .core.errors import ConfigurationError, DatabaseError
 from .core.health import HealthRegistry, HealthState
 from .core.observability import exception_kind, opaque_ref
 from .core.tasks import TaskSupervisor
+from .features.access.administration import RoleAdministrationService
+from .features.access.commands import RoleCommand, RoleCommandAccess, WhoAmICommand
+from .features.access.repository import SqlAlchemyRoleBindingRepository
+from .features.access.service import AuthorizationService
 from .features.agent.catalog import ProviderCatalogAdminService, ReloadableProviderCatalog
 from .features.agent.commands import (
     AgentModelCommand,
@@ -188,6 +192,15 @@ class BotApplication:
         self.settings = settings
         self.health = HealthRegistry()
         self.database = Database(settings.database)
+        self.role_bindings = SqlAlchemyRoleBindingRepository(self.database.session_factory)
+        self.authorization = AuthorizationService(
+            self.role_bindings,
+            settings.rbac.bootstrap_owner_ids,
+        )
+        self.role_administration = RoleAdministrationService(
+            self.role_bindings,
+            self.authorization,
+        )
         self.bot = OopzBot(settings.oopz)
         self.voice_capability_gate = OopzVoiceCapabilityGate()
         self.master_audio = OopzMasterPcmOutputFactory.from_settings(self.bot, settings.audio)
@@ -214,7 +227,7 @@ class BotApplication:
             enabled=settings.agent.enabled and settings.agent.live_display,
             edit_interval_seconds=settings.agent.display_edit_interval_seconds,
         )
-        self.commands = CommandRouter(settings.command_prefix)
+        self.commands = CommandRouter(settings.command_prefix, self.authorization)
         catalog_repository = SqlAlchemyProviderCatalogRepository(self.database.session_factory)
         self.agent_catalog = ReloadableProviderCatalog(catalog_repository)
         self.agent_catalog_admin = ProviderCatalogAdminService(
@@ -650,6 +663,11 @@ class BotApplication:
         self.commands.register(PingCommand())
         self.commands.register(HelpCommand(self.commands))
         self.commands.register(StatusCommand(self.health))
+        self.commands.register(WhoAmICommand())
+        self.commands.register(
+            RoleCommand(self.authorization, self.role_administration),
+            access=RoleCommandAccess(),
+        )
         self.commands.register(
             ChatCommand(
                 self.chat,
@@ -718,6 +736,11 @@ class BotApplication:
     async def run(self) -> None:
         """Start the database check before entering the long-running OOPZ client."""
         logger.info("Application startup started")
+        if not self.settings.rbac.bootstrap_owner_ids:
+            logger.warning(
+                "No RBAC bootstrap owner is configured; privileged recovery requires "
+                "a database role"
+            )
         try:
             if self.settings.voice.enabled:
                 self.voice_capability_gate.validate(self.bot.voice.capabilities)

@@ -1,5 +1,6 @@
 """Role-based access control for privileged bot capabilities."""
 
+from .administration import RoleAdministrationService
 from .models import (
     AccessPrincipal,
     AccessResource,
@@ -21,6 +22,7 @@ __all__ = [
     "Permission",
     "RoleBinding",
     "RoleBindingScope",
+    "RoleAdministrationService",
     "RolePermissionPolicy",
     "ScopeMatcher",
 ]

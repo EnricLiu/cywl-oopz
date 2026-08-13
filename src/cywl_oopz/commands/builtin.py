@@ -32,7 +32,7 @@ class HelpCommand:
         lines = ["可用命令："]
         lines.extend(
             f"{self._router.prefix}{command.name} — {command.description}"
-            for command in self._router.commands
+            for command in await self._router.available_commands(context)
         )
         await context.reply("\n".join(lines))
 
