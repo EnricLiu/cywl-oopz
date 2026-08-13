@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from cywl_oopz.commands.builtin import HelpCommand
+from cywl_oopz.commands.builtin import HelpCommand, PingCommand
 from cywl_oopz.commands.router import AccessRequirement, CommandRouter, ParsedCommand
 from cywl_oopz.core.errors import DatabaseError
 from cywl_oopz.features.access.models import (
@@ -109,6 +109,17 @@ async def test_dispatch_executes_registered_command() -> None:
 
     assert consumed is True
     assert command.received == ParsedCommand("echo", ("hello",))
+
+
+@pytest.mark.asyncio
+async def test_typed_ping_rejects_extra_arguments() -> None:
+    router = CommandRouter("/")
+    router.register_definition(PingCommand().definition())
+    context = FakeContext()
+
+    await router.dispatch(FakeMessage("/ping extra"), context)
+
+    assert context.replies == ["此命令不接受额外参数。\n用法：/ping"]
 
 
 @pytest.mark.asyncio

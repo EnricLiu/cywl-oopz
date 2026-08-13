@@ -11,7 +11,7 @@ from cywl_oopz.application import BotApplication
 from cywl_oopz.commands.router import CommandRouter
 from cywl_oopz.features.access.models import AccessRole, RoleBinding, RoleBindingScope
 from cywl_oopz.features.access.service import AuthorizationService
-from cywl_oopz.features.admin.commands import RebootCommand, RebootCommandAccess
+from cywl_oopz.features.admin.commands import RebootCommand
 from cywl_oopz.features.admin.lifecycle import ApplicationLifecycleCoordinator
 from cywl_oopz.features.admin.models import ShutdownDisposition
 
@@ -91,7 +91,7 @@ def reboot_router(
     binding: RoleBinding,
 ) -> CommandRouter:
     router = CommandRouter("/", AuthorizationService(RoleRepository((binding,))))
-    router.register(RebootCommand(lifecycle), access=RebootCommandAccess())
+    router.register_definition(RebootCommand(lifecycle).definition())
     return router
 
 
@@ -139,7 +139,7 @@ async def test_reboot_rejects_arguments_before_requesting_restart() -> None:
 
     await router.dispatch(message, context)
 
-    assert context.replies == ["用法：/reboot"]
+    assert context.replies == ["此命令不接受额外参数。\n用法：/reboot"]
     assert lifecycle.restart_requested is False
 
 

@@ -4,71 +4,35 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass
+from enum import StrEnum
 
-from oopz_sdk.events.context import EventContext
-
-from cywl_oopz.commands.router import AccessRequirement, ParsedCommand
+from cywl_oopz.commands.catalog import CommandSpec
+from cywl_oopz.commands.definitions import (
+    AccessRequirement,
+    CommandDefinition,
+    CommandUsageError,
+    NoArguments,
+    NoArgumentsParser,
+    PublicCommandAuthorization,
+)
+from cywl_oopz.commands.models import CommandRequest, CommandScope
 from cywl_oopz.core.errors import DatabaseError
 from cywl_oopz.core.observability import opaque_ref
-from cywl_oopz.integrations.oopz.access import OopzAccessInvocation
 
 from .administration import RoleAdministrationService
-from .models import AccessPrincipal, AccessRole, Permission, RoleBinding, RoleBindingScope
+from .models import (
+    AccessPrincipal,
+    AccessResource,
+    AccessRole,
+    Permission,
+    RoleBinding,
+    RoleBindingScope,
+)
 from .policy import RolePermissionPolicy
 from .service import AuthorizationService
 
 logger = logging.getLogger(__name__)
-
-
-class _RoleCommandSyntax:
-    """Normalize OOPZ's redundant inline mention markers in `/role` arguments."""
-
-    _mention_argument = re.compile(r"\(met\)[^\s()]+\(met\)", re.IGNORECASE)
-
-    @classmethod
-    def arguments(cls, command: ParsedCommand) -> tuple[str, ...]:
-        """Return semantic arguments; mentioned people still come from `mention_list`."""
-        source = command.raw_arguments or " ".join(command.arguments)
-        return tuple(cls._mention_argument.sub(" ", source).split())
-
-
-class RoleCommandAccess:
-    """Resolve the mixed public/view/manage paths of `/role`."""
-
-    def is_available(self, invocation: OopzAccessInvocation) -> bool:
-        del invocation
-        return True
-
-    def requirement(
-        self,
-        command: ParsedCommand,
-        invocation: OopzAccessInvocation,
-    ) -> AccessRequirement | None:
-        arguments = _RoleCommandSyntax.arguments(command)
-        if not arguments or arguments[0].casefold() == "me":
-            return None
-        operation = arguments[0].casefold()
-        if operation == "list":
-            return AccessRequirement(Permission.RBAC_VIEW, invocation.resource)
-        if operation in {"grant", "revoke"}:
-            resource = invocation.resource
-            if len(arguments) >= 3:
-                try:
-                    scope = RoleBindingScope(arguments[2].casefold())
-                    resource = RoleAdministrationService.resource_for_scope(
-                        scope, invocation.resource
-                    )
-                except ValueError:
-                    resource = invocation.resource
-            return AccessRequirement(Permission.RBAC_MANAGE, resource)
-        return None
-
-    def visibility_requirement(
-        self,
-        invocation: OopzAccessInvocation,
-    ) -> AccessRequirement | None:
-        del invocation
-        return None
 
 
 class WhoAmICommand:
@@ -79,12 +43,125 @@ class WhoAmICommand:
     category = "权限与管理"
     usage = ("whoami",)
 
-    async def execute(self, command: ParsedCommand, context: EventContext) -> None:
-        if command.arguments:
-            await context.reply("用法：/whoami")
-            return
-        invocation = OopzAccessInvocation.from_context(context)
-        await context.reply(f"你的 OOPZ ID：{invocation.principal.person_id}")
+    def definition(self) -> CommandDefinition[NoArguments]:
+        return CommandDefinition(
+            CommandSpec.from_command(self),
+            NoArgumentsParser(),
+            self,
+            PublicCommandAuthorization(),
+        )
+
+    async def handle(self, request: CommandRequest, arguments: NoArguments) -> None:
+        del arguments
+        await request.responder.reply(f"你的 OOPZ ID：{request.actor.person_id}")
+
+
+class RoleAction(StrEnum):
+    ME = "me"
+    LIST = "list"
+    GRANT = "grant"
+    REVOKE = "revoke"
+
+
+@dataclass(frozen=True, slots=True)
+class RoleMeArguments:
+    action: RoleAction = RoleAction.ME
+
+
+@dataclass(frozen=True, slots=True)
+class RoleListArguments:
+    subject: AccessPrincipal | None
+    action: RoleAction = RoleAction.LIST
+
+
+@dataclass(frozen=True, slots=True)
+class RoleMutationArguments:
+    action: RoleAction
+    subject: AccessPrincipal
+    role: AccessRole
+    scope: RoleBindingScope
+
+
+type RoleArguments = RoleMeArguments | RoleListArguments | RoleMutationArguments
+
+
+class RoleArgumentsParser:
+    """Parse operation, structured mention, role and scope exactly once."""
+
+    _mention_argument = re.compile(r"\(met\)[^\s()]+\(met\)", re.IGNORECASE)
+
+    def parse(self, request: CommandRequest) -> RoleArguments:
+        assert request.text is not None
+        arguments = tuple(self._mention_argument.sub(" ", request.text.raw_tail).split())
+        mentioned = tuple(
+            dict.fromkeys(mention.person_id for mention in request.mentions if not mention.is_bot)
+        )
+        operation = arguments[0].casefold() if arguments else ""
+        if operation == RoleAction.ME:
+            if len(arguments) != 1 or mentioned:
+                raise CommandUsageError("")
+            return RoleMeArguments()
+        if operation == RoleAction.LIST:
+            if len(arguments) != 1:
+                raise CommandUsageError("")
+            if len(mentioned) > 1:
+                raise CommandUsageError(
+                    "一次只能查看一位用户。",
+                    include_usage=False,
+                )
+            return RoleListArguments(AccessPrincipal(mentioned[0]) if mentioned else None)
+        if operation not in {RoleAction.GRANT, RoleAction.REVOKE}:
+            raise CommandUsageError("")
+        if len(arguments) != 3:
+            raise CommandUsageError("")
+        if len(mentioned) != 1:
+            raise CommandUsageError(
+                "请在当前消息中准确 @ 一位目标用户。",
+                include_usage=False,
+            )
+        try:
+            role = AccessRole(arguments[1].casefold())
+            scope = RoleBindingScope(arguments[2].casefold())
+        except ValueError as exc:
+            raise CommandUsageError("") from exc
+        if request.location.scope is CommandScope.PRIVATE and scope is not RoleBindingScope.GLOBAL:
+            raise CommandUsageError(
+                "Area/channel 角色只能在文字频道中管理。",
+                include_usage=False,
+            )
+        return RoleMutationArguments(
+            RoleAction(operation),
+            AccessPrincipal(mentioned[0]),
+            role,
+            scope,
+        )
+
+
+class RoleCommandAuthorization:
+    """Authorize the exact immutable Role arguments later executed by the handler."""
+
+    def is_available(self, request: CommandRequest) -> bool:
+        del request
+        return True
+
+    def requirement(
+        self,
+        request: CommandRequest,
+        arguments: RoleArguments,
+    ) -> AccessRequirement | None:
+        resource = _request_resource(request)
+        if isinstance(arguments, RoleMeArguments):
+            return None
+        if isinstance(arguments, RoleListArguments):
+            return AccessRequirement(Permission.RBAC_VIEW, resource)
+        return AccessRequirement(
+            Permission.RBAC_MANAGE,
+            RoleAdministrationService.resource_for_scope(arguments.scope, resource),
+        )
+
+    def visibility_requirement(self, request: CommandRequest) -> None:
+        del request
+        return None
 
 
 class RoleCommand:
@@ -110,32 +187,35 @@ class RoleCommand:
         self._authorizer = authorizer
         self._administration = administration
 
-    async def execute(self, command: ParsedCommand, context: EventContext) -> None:
-        arguments = _RoleCommandSyntax.arguments(command)
-        operation = arguments[0].casefold() if arguments else ""
+    def definition(self) -> CommandDefinition[RoleArguments]:
+        return CommandDefinition(
+            CommandSpec.from_command(self),
+            RoleArgumentsParser(),
+            self,
+            RoleCommandAuthorization(),
+        )
+
+    async def handle(self, request: CommandRequest, arguments: RoleArguments) -> None:
         try:
-            if operation == "me":
-                await self._me(command, context)
-            elif operation == "list":
-                await self._list(command, context)
-            elif operation in {"grant", "revoke"}:
-                await self._mutate(operation, command, context)
+            if isinstance(arguments, RoleMeArguments):
+                await self._handle_me(request)
+            elif isinstance(arguments, RoleListArguments):
+                await self._handle_list(request, arguments)
             else:
-                await context.reply(self._usage())
+                await self._handle_mutation(request, arguments)
         except DatabaseError as exc:
             logger.warning("Role command persistence failed: error=%s", type(exc).__name__)
-            await context.reply("权限服务暂时不可用，请稍后重试。")
+            await request.responder.reply("权限服务暂时不可用，请稍后重试。")
         except ValueError as exc:
             logger.info("Role command rejected invalid input: error=%s", type(exc).__name__)
-            await context.reply(self._input_error(exc))
+            await request.responder.reply(self._input_error(exc))
 
-    async def _me(self, command: ParsedCommand, context: EventContext) -> None:
-        if len(_RoleCommandSyntax.arguments(command)) != 1 or self._mentioned_people(context):
-            raise ValueError("invalid_role_me")
-        invocation = OopzAccessInvocation.from_context(context)
-        roles = await self._authorizer.effective_roles(invocation.principal, invocation.resource)
+    async def _handle_me(self, request: CommandRequest) -> None:
+        principal = AccessPrincipal(request.actor.person_id)
+        resource = _request_resource(request)
+        roles = await self._authorizer.effective_roles(principal, resource)
         if not roles:
-            await context.reply("当前身份：普通成员\n当前范围内没有管理权限。")
+            await request.responder.reply("当前身份：普通成员\n当前范围内没有管理权限。")
             return
         permissions = frozenset(
             permission for role in roles for permission in RolePermissionPolicy.permissions(role)
@@ -144,31 +224,25 @@ class RoleCommand:
         permission_names = "、".join(
             permission.value for permission in sorted(permissions, key=lambda item: item.value)
         )
-        source = (
-            " · bootstrap owner"
-            if self._authorizer.is_bootstrap_owner(invocation.principal)
-            else ""
-        )
-        await context.reply(
+        source = " · bootstrap owner" if self._authorizer.is_bootstrap_owner(principal) else ""
+        await request.responder.reply(
             f"当前角色：{role_names}{source}\n"
-            f"当前范围：{self._resource_label(invocation)}\n"
+            f"当前范围：{self._resource_label_value(resource)}\n"
             f"权限：{permission_names}"
         )
 
-    async def _list(self, command: ParsedCommand, context: EventContext) -> None:
-        if len(_RoleCommandSyntax.arguments(command)) != 1:
-            raise ValueError("invalid_role_list")
-        mentions = self._mentioned_people(context)
-        if len(mentions) > 1:
-            raise ValueError("role_target_limit")
-        invocation = OopzAccessInvocation.from_context(context)
+    async def _handle_list(
+        self,
+        request: CommandRequest,
+        arguments: RoleListArguments,
+    ) -> None:
         records = await self._administration.visible_bindings(
-            invocation.principal,
-            invocation.resource,
-            subject=AccessPrincipal(mentions[0]) if mentions else None,
+            AccessPrincipal(request.actor.person_id),
+            _request_resource(request),
+            subject=arguments.subject,
         )
         if not records:
-            await context.reply("当前范围内没有可见的角色绑定。")
+            await request.responder.reply("当前范围内没有可见的角色绑定。")
             return
         visible = records[: self.max_visible_bindings]
         lines = ["**角色绑定**"]
@@ -176,67 +250,43 @@ class RoleCommand:
         hidden = len(records) - len(visible)
         if hidden:
             lines.append(f"… 另有 {hidden} 项未显示")
-        await context.reply("\n".join(lines))
+        await request.responder.reply("\n".join(lines))
 
-    async def _mutate(
+    async def _handle_mutation(
         self,
-        operation: str,
-        command: ParsedCommand,
-        context: EventContext,
+        request: CommandRequest,
+        arguments: RoleMutationArguments,
     ) -> None:
-        arguments = _RoleCommandSyntax.arguments(command)
-        if len(arguments) != 3:
-            raise ValueError("invalid_role_mutation")
-        mentions = self._mentioned_people(context)
-        if len(mentions) != 1:
-            raise ValueError("role_target_required")
-        try:
-            role = AccessRole(arguments[1].casefold())
-            scope = RoleBindingScope(arguments[2].casefold())
-        except ValueError as exc:
-            raise ValueError("invalid_role_or_scope") from exc
-        invocation = OopzAccessInvocation.from_context(context)
-        subject = AccessPrincipal(mentions[0])
-        if operation == "grant":
+        actor = AccessPrincipal(request.actor.person_id)
+        resource = _request_resource(request)
+        if arguments.action is RoleAction.GRANT:
             changed = await self._administration.grant(
-                invocation.principal,
-                subject,
-                role,
-                scope,
-                invocation.resource,
+                actor,
+                arguments.subject,
+                arguments.role,
+                arguments.scope,
+                resource,
             )
             verb = "已授予" if changed else "已经拥有"
         else:
             changed = await self._administration.revoke(
-                subject,
-                role,
-                scope,
-                invocation.resource,
+                arguments.subject,
+                arguments.role,
+                arguments.scope,
+                resource,
             )
             verb = "已撤销" if changed else "原本没有"
         logger.info(
             "Role binding mutation completed: operation=%s actor=%s subject=%s role=%s "
             "scope=%s changed=%s",
-            operation,
-            opaque_ref(invocation.principal.person_id),
-            opaque_ref(subject.person_id),
-            role.value,
-            scope.value,
+            arguments.action.value,
+            opaque_ref(actor.person_id),
+            opaque_ref(arguments.subject.person_id),
+            arguments.role.value,
+            arguments.scope.value,
             changed,
         )
-        await context.reply(f"{verb}：{role.value} · {scope.value}")
-
-    @staticmethod
-    def _mentioned_people(context: EventContext) -> tuple[str, ...]:
-        event = getattr(context, "event", None)
-        message = getattr(event, "message", None)
-        bot_id = str(getattr(getattr(context, "config", None), "person_uid", "")).strip()
-        result: list[str] = []
-        for mention in getattr(message, "mention_list", ()) or ():
-            person_id = str(getattr(mention, "person", "")).strip()
-            if person_id and person_id != bot_id and person_id not in result:
-                result.append(person_id)
-        return tuple(result)
+        await request.responder.reply(f"{verb}：{arguments.role.value} · {arguments.scope.value}")
 
     @staticmethod
     def _binding_line(binding: RoleBinding) -> str:
@@ -248,21 +298,10 @@ class RoleCommand:
         return f"• {binding.subject_person_id} · {binding.role.value} · {address}"
 
     @staticmethod
-    def _resource_label(invocation: OopzAccessInvocation) -> str:
-        resource = invocation.resource
+    def _resource_label_value(resource: AccessResource) -> str:
         if resource.area_id and resource.channel_id:
             return f"channel:{resource.area_id}/{resource.channel_id}"
         return resource.kind.value
-
-    @staticmethod
-    def _usage() -> str:
-        return (
-            "用法：\n"
-            "/role me\n"
-            "/role list [@用户]\n"
-            "/role grant @用户 <owner|admin|moderator> <global|area|channel>\n"
-            "/role revoke @用户 <owner|admin|moderator> <global|area|channel>"
-        )
 
     @classmethod
     def _input_error(cls, error: ValueError) -> str:
@@ -272,8 +311,13 @@ class RoleCommand:
             return "Area/channel 角色只能在文字频道中管理。"
         if str(error) == "Channel roles require a channel context":
             return "Channel 角色只能在具体文字频道中管理。"
-        if str(error) == "role_target_required":
-            return "请在当前消息中准确 @ 一位目标用户。"
-        if str(error) == "role_target_limit":
-            return "一次只能查看一位用户。"
-        return cls._usage()
+        return "角色操作失败，请检查命令参数。"
+
+
+def _request_resource(request: CommandRequest) -> AccessResource:
+    if request.location.scope is CommandScope.PRIVATE:
+        return AccessResource.private()
+    return AccessResource.channel(
+        request.location.area_id,
+        request.location.channel_id,
+    )

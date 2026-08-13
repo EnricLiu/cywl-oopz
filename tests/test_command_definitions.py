@@ -161,7 +161,7 @@ async def test_usage_error_stops_before_authorization_and_handler() -> None:
     assert outcome.status is DispatchStatus.COMPLETED
     assert authorization.arguments == []
     assert handler.arguments == []
-    assert responder.replies == ["需要一个参数。\n用法：\n!typed <value>"]
+    assert responder.replies == ["需要一个参数。\n用法：!typed <value>"]
 
 
 @pytest.mark.asyncio
@@ -181,4 +181,4 @@ async def test_no_arguments_parser_rejects_before_state_change() -> None:
     await router.dispatch_request(command_request, object())
 
     assert handler.calls == 0
-    assert responder.replies == ["此命令不接受额外参数。\n用法：\n/typed"]
+    assert responder.replies == ["此命令不接受额外参数。\n用法：/typed"]

@@ -33,6 +33,7 @@ class FakeMessage:
     client_message_id: str = "client-message"
     timestamp: str = "123"
     reference_message_id: str = ""
+    reference_message: object | None = None
     mention_list: list[object] = field(default_factory=list)
 
 
@@ -103,6 +104,26 @@ def test_oopz_factory_projects_private_location_without_area() -> None:
     assert request.location.area_id == ""
     assert request.location.channel_id == "private-channel"
     assert request.location.target_person_id == "actor"
+
+
+def test_oopz_factory_projects_reference_evidence_at_the_sdk_boundary() -> None:
+    evidence = object()
+    embedded = object()
+    message = FakeMessage(
+        "/echo hi",
+        reference_message_id="referenced-message",
+        reference_message=embedded,
+    )
+    factory = OopzCommandRequestFactory(
+        CommandTextParser("/"),
+        lambda value: evidence if value is embedded else None,
+    )
+
+    request = factory.from_message(message, FakeContext(message))
+
+    assert request is not None
+    assert request.target is not None
+    assert request.target.evidence is evidence
 
 
 def test_oopz_factory_ignores_non_command_before_validating_metadata() -> None:

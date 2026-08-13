@@ -9,6 +9,14 @@ from datetime import UTC
 from oopz_sdk.events.context import EventContext
 from oopz_sdk.models import Message as OopzMessage
 
+from cywl_oopz.commands.catalog import CommandSpec
+from cywl_oopz.commands.definitions import (
+    CommandDefinition,
+    NoArguments,
+    NoArgumentsParser,
+    PublicCommandAuthorization,
+)
+from cywl_oopz.commands.models import CommandRequest, CommandScope
 from cywl_oopz.commands.router import ParsedCommand
 from cywl_oopz.core.errors import (
     AuthorizationError,
@@ -54,6 +62,16 @@ class ChatCommandController:
         return ConversationKey.from_oopz_context(context)
 
     @staticmethod
+    def _request_key(request: CommandRequest) -> ConversationKey:
+        private = request.location.scope is CommandScope.PRIVATE
+        return ConversationKey(
+            scope="private" if private else "channel",
+            area_id="" if private else request.location.area_id,
+            channel_id="" if private else request.location.channel_id,
+            person_id=request.actor.person_id,
+        )
+
+    @staticmethod
     def _error_message(error: Exception) -> str:
         if isinstance(error, FeatureDisabledError):
             return "文字对话功能当前未启用。"
@@ -88,6 +106,19 @@ class ChatCommandController:
             type(error).__name__,
         )
         await context.reply(self._error_message(error))
+
+    async def _reply_request_error(
+        self,
+        request: CommandRequest,
+        error: Exception,
+    ) -> None:
+        key = self._request_key(request)
+        logger.warning(
+            "Chat command failed: conversation=%s error=%s",
+            opaque_ref(key.scope, key.area_id, key.channel_id, key.person_id),
+            type(error).__name__,
+        )
+        await request.responder.reply(self._error_message(error))
 
     async def _ask_with_presenter(
         self,
@@ -287,6 +318,25 @@ class NewConversationCommand(ChatCommandController):
         super().__init__(service)
         self._tasks = tasks
 
+    def definition(self) -> CommandDefinition[NoArguments]:
+        return CommandDefinition(
+            CommandSpec.from_command(self),
+            NoArgumentsParser(),
+            self,
+            PublicCommandAuthorization(),
+        )
+
+    async def handle(self, request: CommandRequest, arguments: NoArguments) -> None:
+        del arguments
+        try:
+            key = self._request_key(request)
+            await self._tasks.cancel(key)
+            await self._service.clear(key)
+        except Exception as exc:
+            await self._reply_request_error(request, exc)
+            return
+        await request.responder.reply("已开始新的对话。")
+
     async def execute(self, _: ParsedCommand, context: EventContext) -> None:
         try:
             key = self._key(context)
@@ -316,6 +366,27 @@ class CancelChatCommand(ChatCommandController):
         super().__init__(service)
         self._tasks = tasks
         self._active_message_reports_cancel = active_message_reports_cancel
+
+    def definition(self) -> CommandDefinition[NoArguments]:
+        return CommandDefinition(
+            CommandSpec.from_command(self),
+            NoArgumentsParser(),
+            self,
+            PublicCommandAuthorization(),
+        )
+
+    async def handle(self, request: CommandRequest, arguments: NoArguments) -> None:
+        del arguments
+        try:
+            cancelled = await self._tasks.cancel(self._request_key(request))
+        except Exception as exc:
+            await self._reply_request_error(request, exc)
+            return
+        if cancelled:
+            if not self._active_message_reports_cancel:
+                await request.responder.reply("已取消当前文字回复。")
+        else:
+            await request.responder.reply("当前没有正在生成的文字回复。")
 
     async def execute(self, _: ParsedCommand, context: EventContext) -> None:
         try:
@@ -373,15 +444,35 @@ class ChatStatusCommand(ChatCommandController):
     category = "对话"
     usage = ("chat-status",)
 
+    def definition(self) -> CommandDefinition[NoArguments]:
+        return CommandDefinition(
+            CommandSpec.from_command(self),
+            NoArgumentsParser(),
+            self,
+            PublicCommandAuthorization(),
+        )
+
+    async def handle(self, request: CommandRequest, arguments: NoArguments) -> None:
+        del arguments
+        try:
+            status = await self._service.status(self._request_key(request))
+        except Exception as exc:
+            await self._reply_request_error(request, exc)
+            return
+        await request.responder.reply(self._status_message(status))
+
     async def execute(self, _: ParsedCommand, context: EventContext) -> None:
         try:
             status = await self._service.status(self._key(context))
         except Exception as exc:
             await self._reply_error(context, exc)
             return
+        await context.reply(self._status_message(status))
+
+    @staticmethod
+    def _status_message(status) -> str:
         if not status.enabled:
-            await context.reply("文字对话功能当前未启用。")
-            return
+            return "文字对话功能当前未启用。"
 
         lines = [
             "文字对话状态：已启用",
@@ -394,4 +485,4 @@ class ChatStatusCommand(ChatCommandController):
             lines.append(f"会话过期时间（UTC）：{expires_at}")
         if status.cooldown_seconds > 0:
             lines.append(f"冷却剩余：{status.cooldown_seconds:.1f} 秒")
-        await context.reply("\n".join(lines))
+        return "\n".join(lines)

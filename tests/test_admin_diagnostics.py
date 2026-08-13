@@ -10,7 +10,7 @@ import pytest
 from cywl_oopz.commands.router import CommandRouter
 from cywl_oopz.features.access.models import AccessRole, RoleBinding, RoleBindingScope
 from cywl_oopz.features.access.service import AuthorizationService
-from cywl_oopz.features.admin.commands import DebugCommand, DebugCommandAccess
+from cywl_oopz.features.admin.commands import DebugCommand
 from cywl_oopz.features.admin.models import (
     AgentDiagnosticTool,
     AgentResponseDiagnostic,
@@ -252,10 +252,7 @@ async def test_debug_requires_permission_and_exact_reference_address() -> None:
     )
     repository = DiagnosticRepository(diagnostic())
     router = CommandRouter("/", AuthorizationService(roles))
-    router.register(
-        DebugCommand(repository, OopzAgentDiagnosticRenderer()),
-        access=DebugCommandAccess(),
-    )
+    router.register_definition(DebugCommand(repository, OopzAgentDiagnosticRenderer()).definition())
     message = FakeMessage("/debug --verbose")
     context = FakeCommandContext(message)
 
@@ -274,10 +271,7 @@ async def test_debug_requires_permission_and_exact_reference_address() -> None:
 async def test_debug_rejects_unprivileged_user_before_reading_diagnostic() -> None:
     repository = DiagnosticRepository(diagnostic())
     router = CommandRouter("/", AuthorizationService(RoleRepository(())))
-    router.register(
-        DebugCommand(repository, OopzAgentDiagnosticRenderer()),
-        access=DebugCommandAccess(),
-    )
+    router.register_definition(DebugCommand(repository, OopzAgentDiagnosticRenderer()).definition())
     message = FakeMessage("/debug")
     context = FakeCommandContext(message)
 

@@ -129,6 +129,7 @@ class CommandTarget:
     """A referenced or reacted message selected by the invocation."""
 
     message_id: str
+    evidence: object | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "message_id", _identifier(self.message_id, "Target message"))

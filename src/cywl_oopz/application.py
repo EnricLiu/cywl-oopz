@@ -21,17 +21,14 @@ from .core.observability import exception_kind, opaque_ref
 from .core.tasks import TaskSupervisor
 from .features.access.administration import RoleAdministrationService
 from .features.access.agent_tools import AgentToolAuthorizationAdapter
-from .features.access.commands import RoleCommand, RoleCommandAccess, WhoAmICommand
+from .features.access.commands import RoleCommand, WhoAmICommand
 from .features.access.repository import SqlAlchemyRoleBindingRepository
 from .features.access.service import AuthorizationService
 from .features.admin.commands import (
     DebugCommand,
-    DebugCommandAccess,
     InitCommand,
     RebootCommand,
-    RebootCommandAccess,
     RecallCommand,
-    RecallCommandAccess,
 )
 from .features.admin.initialization import ChannelInitializationService
 from .features.admin.lifecycle import ApplicationLifecycleCoordinator
@@ -293,7 +290,11 @@ class BotApplication:
             self.authorization,
             parser=self.command_parser,
         )
-        self.command_requests = OopzCommandRequestFactory(self.command_parser)
+        self.referenced_message_parser = OopzReferencedMessageParser()
+        self.command_requests = OopzCommandRequestFactory(
+            self.command_parser,
+            self.referenced_message_parser.parse,
+        )
         catalog_repository = SqlAlchemyProviderCatalogRepository(self.database.session_factory)
         self.agent_catalog = ReloadableProviderCatalog(catalog_repository)
         self.agent_catalog_admin = ProviderCatalogAdminService(
@@ -626,7 +627,6 @@ class BotApplication:
             OutboundChatTaskCanceller(self.chat_tasks),
             OopzBotMessageRecallGateway(self.bot),
         )
-        self.referenced_message_parser = OopzReferencedMessageParser()
         self.reaction_commands = ReactionCommandRouter(
             self.authorization,
             self.referenced_messages,
@@ -763,27 +763,25 @@ class BotApplication:
         return OpenAICompatibleChatProvider(self.settings.chat)
 
     def _register_commands(self) -> None:
-        self.commands.register(PingCommand())
+        self.commands.register_definition(PingCommand().definition())
         self.commands.register_definition(HelpCommand(self.commands).definition())
-        self.commands.register(StatusCommand(self.health))
-        self.commands.register(WhoAmICommand())
-        self.commands.register(
-            RoleCommand(self.authorization, self.role_administration),
-            access=RoleCommandAccess(),
+        self.commands.register_definition(StatusCommand(self.health).definition())
+        self.commands.register_definition(WhoAmICommand().definition())
+        self.commands.register_definition(
+            RoleCommand(
+                self.authorization,
+                self.role_administration,
+            ).definition()
         )
         self.commands.register_definition(InitCommand(self.channel_initialization).definition())
-        self.commands.register(
-            DebugCommand(self.agent_diagnostics, self.agent_diagnostic_renderer),
-            access=DebugCommandAccess(),
+        self.commands.register_definition(
+            DebugCommand(
+                self.agent_diagnostics,
+                self.agent_diagnostic_renderer,
+            ).definition()
         )
-        self.commands.register(
-            RecallCommand(self.message_recall, self.referenced_message_parser),
-            access=RecallCommandAccess(),
-        )
-        self.commands.register(
-            RebootCommand(self.lifecycle),
-            access=RebootCommandAccess(),
-        )
+        self.commands.register_definition(RecallCommand(self.message_recall).definition())
+        self.commands.register_definition(RebootCommand(self.lifecycle).definition())
         self.commands.register(
             ChatCommand(
                 self.chat,
@@ -791,15 +789,17 @@ class BotApplication:
                 self.chat_invocations,
             )
         )
-        self.commands.register(NewConversationCommand(self.chat, self.chat_tasks))
-        self.commands.register(
+        self.commands.register_definition(
+            NewConversationCommand(self.chat, self.chat_tasks).definition()
+        )
+        self.commands.register_definition(
             CancelChatCommand(
                 self.chat,
                 self.chat_tasks,
                 active_message_reports_cancel=(
                     self.settings.agent.enabled and self.settings.agent.live_display
                 ),
-            )
+            ).definition()
         )
         if self.settings.agent.enabled:
             self.commands.register(
@@ -811,7 +811,7 @@ class BotApplication:
             )
         else:
             self.commands.register(ModelCommand(self.legacy_chat, self.chat_tasks))
-        self.commands.register(ChatStatusCommand(self.chat))
+        self.commands.register_definition(ChatStatusCommand(self.chat).definition())
         if self.music is not None and self.music_playlists is not None:
             self.commands.register(
                 MusicCommand(

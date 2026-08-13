@@ -5,19 +5,23 @@ from types import SimpleNamespace
 
 import pytest
 
-from cywl_oopz.commands.router import CommandRouter, ParsedCommand
+from cywl_oopz.commands.parsing import CommandTextParser
+from cywl_oopz.commands.router import CommandRouter
 from cywl_oopz.features.access.administration import RoleAdministrationService
-from cywl_oopz.features.access.commands import RoleCommand, RoleCommandAccess, WhoAmICommand
+from cywl_oopz.features.access.commands import (
+    RoleArgumentsParser,
+    RoleCommand,
+    RoleCommandAuthorization,
+    WhoAmICommand,
+)
 from cywl_oopz.features.access.models import (
-    AccessPrincipal,
-    AccessResource,
     AccessResourceKind,
     AccessRole,
     RoleBinding,
     RoleBindingScope,
 )
 from cywl_oopz.features.access.service import AuthorizationService
-from cywl_oopz.integrations.oopz.access import OopzAccessInvocation
+from cywl_oopz.integrations.oopz.command_requests import OopzCommandRequestFactory
 
 
 @dataclass
@@ -118,11 +122,8 @@ def router_and_repository() -> tuple[CommandRouter, InMemoryRoleRepository]:
     authorizer = AuthorizationService(repository, frozenset({"owner"}))
     administration = RoleAdministrationService(repository, authorizer)
     router = CommandRouter("/", authorizer)
-    router.register(WhoAmICommand())
-    router.register(
-        RoleCommand(authorizer, administration),
-        access=RoleCommandAccess(),
-    )
+    router.register_definition(WhoAmICommand().definition())
+    router.register_definition(RoleCommand(authorizer, administration).definition())
     return router, repository
 
 
@@ -192,17 +193,20 @@ async def test_role_grant_uses_mention_list_and_ignores_oopz_inline_marker() -> 
 
 def test_role_grant_access_scope_ignores_oopz_inline_mention_marker() -> None:
     target = "96610cfa481f11ef887a2ab75f6d1b3b"
-    command = ParsedCommand(
-        "role",
-        (f"grant(met){target}(met)admin", "area"),
-        f"grant(met){target}(met)admin area",
+    message = FakeMessage(
+        f"/role grant(met){target}(met)admin area",
+        "owner",
+        mentions=(target,),
+        plain_text="/role grantadmin area",
     )
-    invocation = OopzAccessInvocation(
-        AccessPrincipal("owner"),
-        AccessResource.channel("area", "channel"),
+    request = OopzCommandRequestFactory(CommandTextParser("/")).from_message(
+        message,
+        FakeContext(message),
     )
+    assert request is not None
+    arguments = RoleArgumentsParser().parse(request)
 
-    requirement = RoleCommandAccess().requirement(command, invocation)
+    requirement = RoleCommandAuthorization().requirement(request, arguments)
 
     assert requirement is not None
     assert requirement.resource.kind is AccessResourceKind.AREA

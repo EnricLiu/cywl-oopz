@@ -77,7 +77,7 @@ async def test_chat_and_new_commands_use_the_same_scoped_session(chat_settings) 
     chat = ChatService(chat_settings, RecordingChatProvider(["answer"]), repository)
     router = CommandRouter("/")
     router.register(ChatCommand(chat))
-    router.register(NewConversationCommand(chat, ChatTaskSupervisor()))
+    router.register_definition(NewConversationCommand(chat, ChatTaskSupervisor()).definition())
     message = FakeMessage("/chat hello")
     first_context = context_for(message)
 
@@ -99,7 +99,7 @@ async def test_chat_status_does_not_expose_message_contents(chat_settings) -> No
     )
     router = CommandRouter("/")
     router.register(ChatCommand(chat))
-    router.register(ChatStatusCommand(chat))
+    router.register_definition(ChatStatusCommand(chat).definition())
     await router.dispatch(
         FakeMessage("/chat private question"), context_for(FakeMessage("/chat private question"))
     )
@@ -136,12 +136,38 @@ async def test_bot_mention_starts_a_scoped_conversation(chat_settings) -> None:
 async def test_cancel_command_reports_when_no_response_is_running(chat_settings) -> None:
     chat = ChatService(chat_settings, RecordingChatProvider(), InMemoryConversationRepository())
     router = CommandRouter("/")
-    router.register(CancelChatCommand(chat, ChatTaskSupervisor()))
+    router.register_definition(CancelChatCommand(chat, ChatTaskSupervisor()).definition())
     context = context_for(FakeMessage("/cancel"))
 
     await router.dispatch(FakeMessage("/cancel"), context)
 
     assert context.replies == ["当前没有正在生成的文字回复。"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", ["new", "cancel", "chat-status"])
+async def test_no_argument_chat_commands_reject_accidental_arguments(
+    chat_settings,
+    name: str,
+) -> None:
+    chat = ChatService(
+        chat_settings,
+        RecordingChatProvider(),
+        InMemoryConversationRepository(),
+    )
+    router = CommandRouter("/")
+    commands = {
+        "new": NewConversationCommand(chat, ChatTaskSupervisor()),
+        "cancel": CancelChatCommand(chat, ChatTaskSupervisor()),
+        "chat-status": ChatStatusCommand(chat),
+    }
+    router.register_definition(commands[name].definition())
+    message = FakeMessage(f"/{name} unexpected")
+    context = context_for(message)
+
+    await router.dispatch(message, context)
+
+    assert context.replies == [f"此命令不接受额外参数。\n用法：/{name}"]
 
 
 @pytest.mark.asyncio

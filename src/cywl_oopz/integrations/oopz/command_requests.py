@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from cywl_oopz.commands.models import (
@@ -23,8 +24,13 @@ from .command_responses import OopzCommandResponder
 class OopzCommandRequestFactory:
     """Build one trusted request before feature dispatch starts."""
 
-    def __init__(self, parser: CommandTextParser) -> None:
+    def __init__(
+        self,
+        parser: CommandTextParser,
+        reference_projector: Callable[[object], object | None] | None = None,
+    ) -> None:
         self._parser = parser
+        self._reference_projector = reference_projector
 
     def from_message(self, message: Any, context: Any) -> CommandRequest | None:
         """Read raw OOPZ text once and retain structured message metadata."""
@@ -81,7 +87,18 @@ class OopzCommandRequestFactory:
             ),
             responder=OopzCommandResponder(context),
             text=text,
-            target=CommandTarget(reference_id) if reference_id else None,
+            target=(
+                CommandTarget(
+                    reference_id,
+                    evidence=(
+                        self._reference_projector(getattr(message, "reference_message", None))
+                        if self._reference_projector is not None
+                        else None
+                    ),
+                )
+                if reference_id
+                else None
+            ),
             mentions=self._mentions(message),
         )
 

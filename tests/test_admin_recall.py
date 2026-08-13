@@ -9,7 +9,7 @@ import pytest
 from cywl_oopz.commands.router import CommandRouter
 from cywl_oopz.features.access.models import AccessRole, RoleBinding, RoleBindingScope
 from cywl_oopz.features.access.service import AuthorizationService
-from cywl_oopz.features.admin.commands import RecallCommand, RecallCommandAccess
+from cywl_oopz.features.admin.commands import RecallCommand
 from cywl_oopz.features.admin.models import (
     MessageRecallOutcome,
     OopzMessageAddress,
@@ -431,9 +431,8 @@ def recall_router(use_case: RecallUseCase, *, allowed: bool = True) -> CommandRo
         else ()
     )
     router = CommandRouter("/", AuthorizationService(RoleRepository(records)))
-    router.register(
-        RecallCommand(use_case, OopzReferencedMessageParser()),  # type: ignore[arg-type]
-        access=RecallCommandAccess(),
+    router.register_definition(
+        RecallCommand(use_case).definition()  # type: ignore[arg-type]
     )
     return router
 

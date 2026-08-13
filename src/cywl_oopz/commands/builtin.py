@@ -9,7 +9,13 @@ from oopz_sdk.events.context import EventContext
 from cywl_oopz.core.health import HealthRegistry, HealthState
 
 from .catalog import CommandSpec
-from .definitions import CommandDefinition, CommandUsageError, PublicCommandAuthorization
+from .definitions import (
+    CommandDefinition,
+    CommandUsageError,
+    NoArguments,
+    NoArgumentsParser,
+    PublicCommandAuthorization,
+)
 from .models import CommandRequest
 from .responses import CommandMessage, CommandMessageBudget, MessageOverflowPolicy
 from .router import CommandRouter, ParsedCommand
@@ -22,6 +28,18 @@ class PingCommand:
     description = "检查机器人是否在线。"
     category = "基础"
     usage = ("ping",)
+
+    def definition(self) -> CommandDefinition[NoArguments]:
+        return CommandDefinition(
+            CommandSpec.from_command(self),
+            NoArgumentsParser(),
+            self,
+            PublicCommandAuthorization(),
+        )
+
+    async def handle(self, request: CommandRequest, arguments: NoArguments) -> None:
+        del arguments
+        await request.responder.reply("pong")
 
     async def execute(self, _: ParsedCommand, context: EventContext) -> None:
         await context.reply("pong")
@@ -145,7 +163,22 @@ class StatusCommand:
     def __init__(self, health: HealthRegistry) -> None:
         self._health = health
 
+    def definition(self) -> CommandDefinition[NoArguments]:
+        return CommandDefinition(
+            CommandSpec.from_command(self),
+            NoArgumentsParser(),
+            self,
+            PublicCommandAuthorization(),
+        )
+
+    async def handle(self, request: CommandRequest, arguments: NoArguments) -> None:
+        del arguments
+        await request.responder.reply(self._render())
+
     async def execute(self, _: ParsedCommand, context: EventContext) -> None:
+        await context.reply(self._render())
+
+    def _render(self) -> str:
         icons = {
             HealthState.HEALTHY: "正常",
             HealthState.PENDING: "检查中",
@@ -154,8 +187,7 @@ class StatusCommand:
         }
         checks = self._health.snapshot()
         if not checks:
-            await context.reply("状态：尚未初始化。")
-            return
+            return "状态：尚未初始化。"
         lines = ["组件状态："]
         lines.extend(f"{check.name}：{icons[check.state]}" for check in checks)
-        await context.reply("\n".join(lines))
+        return "\n".join(lines)

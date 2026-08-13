@@ -55,8 +55,11 @@ class CommandUsageError(ValueError):
     def render(self, spec: CommandSpec, prefix: str) -> str:
         lines = [self.user_message] if self.user_message else []
         if self.include_usage:
-            lines.append("用法：")
-            lines.extend(f"{prefix}{usage}" for usage in spec.usage)
+            if len(spec.usage) == 1:
+                lines.append(f"用法：{prefix}{spec.usage[0]}")
+            else:
+                lines.append("用法：")
+                lines.extend(f"{prefix}{usage}" for usage in spec.usage)
         return "\n".join(lines)
 
 
