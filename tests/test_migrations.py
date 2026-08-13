@@ -8,7 +8,7 @@ def test_initial_schema_models_and_migration_head_are_present() -> None:
     config = Config("alembic.ini")
     revisions = ScriptDirectory.from_config(config)
 
-    assert revisions.get_current_head() == "20260812_23"
+    assert revisions.get_current_head() == "20260813_24"
     assert set(Base.metadata.tables) == {
         "agent_memory_items",
         "agent_memory_preferences",
@@ -26,7 +26,9 @@ def test_initial_schema_models_and_migration_head_are_present() -> None:
         "llm_providers",
         "music_playlist_tracks",
         "music_playlists",
+        "oopz_outbound_messages",
         "rate_limit_buckets",
+        "rbac_role_bindings",
         "user_llm_preferences",
         "voice_channel_settings",
         "voice_models",
@@ -40,6 +42,14 @@ def test_initial_schema_models_and_migration_head_are_present() -> None:
     assert Base.metadata.tables["channel_settings"].c.created_at.server_default is not None
     assert Base.metadata.tables["channel_settings"].c.updated_at.server_default is not None
     assert Base.metadata.tables["agent_runs"].c.status.type.name == "agent_run_status"
+    assert Base.metadata.tables["agent_runs"].c.diagnostics.server_default is not None
+    assert Base.metadata.tables["rbac_role_bindings"].c.role.type.name == "rbac_role"
+    assert Base.metadata.tables["rbac_role_bindings"].c.scope.type.name == "rbac_scope"
+    outbound = Base.metadata.tables["oopz_outbound_messages"]
+    assert outbound.c.scope.type.name == "oopz_message_scope"
+    assert outbound.c.kind.type.name == "oopz_outbound_message_kind"
+    assert outbound.c.state.type.name == "oopz_outbound_message_state"
+    assert outbound.c.diagnostic_snapshot.server_default is not None
     assert (
         Base.metadata.tables["agent_tool_executions"].c.status.type.name == "tool_execution_status"
     )

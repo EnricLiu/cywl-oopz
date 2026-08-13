@@ -2,15 +2,18 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+from uuid import UUID
 
 import pytest
 from oopz_sdk.exceptions import OopzConnectionError
 
 from cywl_oopz.features.chat.models import ChatResponse
 from cywl_oopz.features.chat.progress import ConversationProgressEvent, ProgressKind
+from cywl_oopz.integrations.oopz.active_presentations import ActivePresentationRegistry
 from cywl_oopz.integrations.oopz.agent_presenter import (
     OopzAgentLoopMessage,
     OopzAgentPresenterFactory,
+    OopzPassiveAgentTraceSession,
 )
 from cywl_oopz.integrations.oopz.editable_messages import (
     EditableMessageRef,
@@ -43,6 +46,11 @@ class FakeGateway:
         self.max_active_edits = 0
         self.edit_started: asyncio.Event | None = None
         self.release_edit: asyncio.Event | None = None
+        self.tracked: list[tuple[str, object, object, str]] = []
+        self.bound: list[tuple[str, UUID]] = []
+        self.finalized: list[tuple[str, dict[str, object]]] = []
+        self.superseded: list[tuple[str, dict[str, object]]] = []
+        self.promoted: list[tuple[str, UUID | None, dict[str, object]]] = []
 
     async def create_reply(
         self,
@@ -75,6 +83,41 @@ class FakeGateway:
             self.edits.append(text)
         finally:
             self.active_edits -= 1
+
+    async def track_created(
+        self,
+        message: EditableMessageRef,
+        *,
+        kind: object,
+        state: object,
+        owner_person_id: str = "",
+    ) -> None:
+        self.tracked.append((message.message_id, kind, state, owner_person_id))
+
+    async def bind_agent_run(self, message: EditableMessageRef, run_id: UUID) -> None:
+        self.bound.append((message.message_id, run_id))
+
+    async def finalize(
+        self,
+        message: EditableMessageRef,
+        snapshot: dict[str, object],
+    ) -> None:
+        self.finalized.append((message.message_id, snapshot))
+
+    async def supersede(
+        self,
+        message: EditableMessageRef,
+        snapshot: dict[str, object],
+    ) -> None:
+        self.superseded.append((message.message_id, snapshot))
+
+    async def promote_agent_response(
+        self,
+        message: EditableMessageRef,
+        run_id: UUID | None,
+        snapshot: dict[str, object],
+    ) -> None:
+        self.promoted.append((message.message_id, run_id, snapshot))
 
 
 def address() -> MessageAddress:
@@ -298,6 +341,126 @@ async def test_provider_retry_is_shown_immediately_and_counted_at_terminal() -> 
 
 
 @pytest.mark.asyncio
+async def test_live_response_tracks_run_and_full_terminal_snapshot() -> None:
+    gateway = FakeGateway()
+    session = await opened_session(gateway)
+    run_id = UUID("10000000-0000-0000-0000-000000000001")
+
+    await session.bind_run(run_id)
+    await session.emit(
+        ConversationProgressEvent(
+            ProgressKind.TOOL_STARTED,
+            call_id="search-call",
+            tool_name="search_web",
+            tool_display_name="搜索公开网页",
+            tool_subject="初音未来 新闻",
+        )
+    )
+    await session.emit(
+        ConversationProgressEvent(
+            ProgressKind.TOOL_SUCCEEDED,
+            call_id="search-call",
+            tool_name="search_web",
+            tool_display_name="搜索公开网页",
+            tool_subject="初音未来 新闻",
+            tool_summary="找到 3 条结果",
+        )
+    )
+    await session.complete(ChatResponse("完整回答", "provider/model", tool_calls=1))
+    await session.aclose()
+
+    assert gateway.tracked[0][0] == "message-1"
+    assert gateway.bound == [("message-1", run_id)]
+    assert gateway.finalized[0][0] == "message-1"
+    snapshot = gateway.finalized[0][1]
+    assert snapshot["phase"] == "succeeded"
+    assert snapshot["final_text"] == "完整回答"
+    assert snapshot["tool_calls"] == 1
+    assert snapshot["steps"] == [
+        {
+            "call_id": "search-call",
+            "tool_name": "search_web",
+            "display_name": "搜索公开网页",
+            "status": "succeeded",
+            "subject": "初音未来 新闻",
+            "summary": "找到 3 条结果",
+            "items": [],
+            "preview_lines": [],
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_passive_response_promotes_direct_reply_with_run_snapshot() -> None:
+    gateway = FakeGateway()
+    session = OopzPassiveAgentTraceSession(gateway, address())  # type: ignore[arg-type]
+    run_id = UUID("10000000-0000-0000-0000-000000000001")
+    await session.bind_run(run_id)
+    await session.emit(
+        ConversationProgressEvent(
+            ProgressKind.MODEL_RETRY,
+            retry_attempt=1,
+            retry_max_attempts=2,
+            retry_delay_seconds=0.5,
+            retry_reason="HTTP 429",
+        )
+    )
+
+    await session.record_delivery(
+        SimpleNamespace(message_id="direct-message", timestamp="456"),
+        response=ChatResponse(
+            "普通回复的完整答案",
+            "provider/model",
+            input_tokens=120,
+            output_tokens=30,
+            model_requests=2,
+        ),
+    )
+
+    assert gateway.tracked[0][0] == "direct-message"
+    message_id, promoted_run, snapshot = gateway.promoted[0]
+    assert message_id == "direct-message"
+    assert promoted_run == run_id
+    assert snapshot["phase"] == "succeeded"
+    assert snapshot["final_text"] == "普通回复的完整答案"
+    assert snapshot["provider_retry_count"] == 1
+    assert snapshot["provider_retries"] == [
+        {
+            "attempt": 1,
+            "max_attempts": 2,
+            "delay_seconds": 0.5,
+            "reason": "HTTP 429",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_dismissed_live_response_never_edits_or_creates_terminal_fallback() -> None:
+    gateway = FakeGateway()
+    registry = ActivePresentationRegistry()
+    session = OopzAgentLoopMessage(
+        gateway,  # type: ignore[arg-type]
+        address(),
+        OopzMessageRenderer(),
+        edit_interval_seconds=0.01,
+        active_presentations=registry,
+    )
+    await session.open()
+
+    assert await registry.dismiss("message-1") is True
+    await session.emit(ConversationProgressEvent(ProgressKind.THINKING))
+    await session.complete(ChatResponse("不应重新出现", "provider/model"))
+    await session.aclose()
+
+    assert len(gateway.created) == 1
+    assert "不应重新出现" not in gateway.created[0]
+    assert gateway.edits == []
+    assert gateway.finalized == []
+    assert gateway.superseded == []
+    assert await registry.dismiss("message-1") is False
+
+
+@pytest.mark.asyncio
 async def test_revision_arriving_during_edit_flushes_the_latest_terminal_snapshot() -> None:
     gateway = FakeGateway()
     gateway.edit_started = asyncio.Event()
@@ -343,6 +506,8 @@ async def test_deterministic_terminal_edit_failure_creates_exactly_one_fallback(
     assert len(gateway.created) == 2
     assert gateway.created[-1].endswith("最终回答")
     assert gateway.edits == []
+    assert gateway.finalized[0][0] == "message-2"
+    assert gateway.superseded[0][0] == "message-1"
 
 
 @pytest.mark.asyncio

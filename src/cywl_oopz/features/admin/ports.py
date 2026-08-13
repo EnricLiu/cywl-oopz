@@ -1,0 +1,140 @@
+"""Framework-neutral ports for privileged administration use cases."""
+
+from __future__ import annotations
+
+from typing import Protocol
+from uuid import UUID
+
+from .models import (
+    AgentResponseDiagnostic,
+    AreaChannelCatalog,
+    AreaInitializationResult,
+    ChannelInitializationResult,
+    ChannelKey,
+    OopzMessageAddress,
+    OutboundMessageReceipt,
+    OutboundMessageState,
+    ReferencedMessageCandidate,
+)
+
+
+class AreaChannelCatalogPort(Protocol):
+    """Discover channels visible to the Bot without leaking SDK models."""
+
+    async def discover(self, area_id: str) -> AreaChannelCatalog:
+        """Return a typed, deduplicated area channel catalog."""
+
+
+class ChannelInitializationRepository(Protocol):
+    """Persist missing channel settings while preserving all existing rows."""
+
+    async def initialize_text_channel(
+        self,
+        channel: ChannelKey,
+    ) -> ChannelInitializationResult:
+        """Insert one text settings row if it does not exist."""
+
+    async def initialize_area(
+        self,
+        catalog: AreaChannelCatalog,
+    ) -> AreaInitializationResult:
+        """Insert missing text/voice settings together in one transaction."""
+
+
+class OutboundMessageRepository(Protocol):
+    """Best-effort persistence for Bot-owned OOPZ messages."""
+
+    async def create(self, receipt: OutboundMessageReceipt) -> bool:
+        """Insert one receipt and report whether it was new."""
+
+    async def bind_agent_run(self, message_id: str, run_id: UUID) -> bool:
+        """Link a newly-created Agent run to its already-visible reply."""
+
+    async def promote_agent_response(
+        self,
+        message_id: str,
+        run_id: UUID | None,
+        diagnostic_snapshot: dict[str, object],
+    ) -> bool:
+        """Turn a generic tracked reply into a terminal Agent response."""
+
+    async def update_state(
+        self,
+        message_id: str,
+        state: OutboundMessageState,
+        *,
+        diagnostic_snapshot: dict[str, object] | None = None,
+    ) -> bool:
+        """Update lifecycle state and an optional display-safe diagnostic snapshot."""
+
+    async def get_by_message(
+        self,
+        message_id: str,
+        address: OopzMessageAddress,
+    ) -> OutboundMessageReceipt | None:
+        """Read any exact Bot-owned receipt for recall."""
+
+    async def mark_recalled(self, message_id: str) -> bool:
+        """Atomically move a non-recalled receipt to recalled."""
+
+
+class AgentDiagnosticRepository(Protocol):
+    """Read a bounded diagnostic aggregate by exact tracked message address."""
+
+    async def get_by_outbound_message(
+        self,
+        message_id: str,
+        address: OopzMessageAddress,
+    ) -> AgentResponseDiagnostic | None:
+        """Return the matching Bot Agent response or none."""
+
+
+class AgentDiagnosticRenderer(Protocol):
+    """Render one immutable diagnostic into OOPZ-safe pages."""
+
+    def render(
+        self,
+        diagnostic: AgentResponseDiagnostic,
+        *,
+        verbose: bool,
+    ) -> tuple[str, ...]:
+        """Return bounded pages without performing I/O."""
+
+
+class RecentBotMessageLookup(Protocol):
+    """Bounded migration fallback for pre-tracking channel messages."""
+
+    async def find(
+        self,
+        message_id: str,
+        address: OopzMessageAddress,
+    ) -> ReferencedMessageCandidate | None:
+        """Find an exact recent message, or none when unsupported/not found."""
+
+
+class ReferencedMessageParser(Protocol):
+    """Parse a trusted subset of an SDK or mapping reference object."""
+
+    def parse(self, value: object) -> ReferencedMessageCandidate | None:
+        """Return a strict candidate, or none for incomplete/malformed data."""
+
+
+class ActivePresentationDismissal(Protocol):
+    """Stop edits and terminal fallback for one active Agent display."""
+
+    async def dismiss(self, message_id: str) -> bool:
+        """Dismiss a registered presentation and report whether it existed."""
+
+
+class OutboundConversationCanceller(Protocol):
+    """Cancel the Agent task that owns one active outbound message."""
+
+    async def cancel_for_message(self, receipt: OutboundMessageReceipt) -> bool:
+        """Cancel and await matching work when enough owner metadata exists."""
+
+
+class BotMessageRecallGateway(Protocol):
+    """Recall an exact tracked channel or private message through OOPZ."""
+
+    async def recall(self, receipt: OutboundMessageReceipt) -> None:
+        """Raise a transport error when OOPZ does not confirm the recall."""

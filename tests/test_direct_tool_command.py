@@ -27,6 +27,7 @@ from cywl_oopz.features.agent.tools.models import (
 )
 from cywl_oopz.features.agent.tools.registry import ToolRegistry
 from cywl_oopz.settings import AgentSettings
+from cywl_oopz.testing.commands import dispatch_command
 
 
 class EchoInput(BaseModel):
@@ -108,6 +109,13 @@ class FakeAvailabilityService:
 @dataclass
 class FakeMessage:
     plain_text: str
+    sender_id: str = "person"
+    area: str = "area"
+    channel: str = "channel"
+    message_id: str = "message"
+    text: str = ""
+    content: str = ""
+    mention_list: tuple[object, ...] = ()
 
 
 class FakeContext:
@@ -138,7 +146,7 @@ def direct_command(
         FakeSelectionService(),  # type: ignore[arg-type]
     )
     router = CommandRouter("/")
-    router.register(ToolCommand(service, "/"))
+    router.register_definition(ToolCommand(service, "/").definition())
     return router, tool, availability
 
 
@@ -147,7 +155,8 @@ async def test_tool_command_executes_json_without_losing_string_spacing() -> Non
     router, tool, availability = direct_command()
     context = FakeContext()
 
-    consumed = await router.dispatch(
+    consumed = await dispatch_command(
+        router,
         FakeMessage('/tool echo_debug {"value": "hello  world"}'),  # type: ignore[arg-type]
         context,  # type: ignore[arg-type]
     )
@@ -168,7 +177,8 @@ async def test_tool_command_help_returns_descriptor_and_schemas() -> None:
     router, _, _ = direct_command()
     context = FakeContext()
 
-    await router.dispatch(
+    await dispatch_command(
+        router,
         FakeMessage("/tool echo_debug --help"),  # type: ignore[arg-type]
         context,  # type: ignore[arg-type]
     )
@@ -195,7 +205,8 @@ async def test_tool_command_returns_json_errors(command: str, error: str) -> Non
     router, _, _ = direct_command()
     context = FakeContext()
 
-    await router.dispatch(
+    await dispatch_command(
+        router,
         FakeMessage(command),  # type: ignore[arg-type]
         context,  # type: ignore[arg-type]
     )
@@ -208,7 +219,8 @@ async def test_tool_command_honors_tool_availability() -> None:
     router, tool, _ = direct_command(enabled_tools=())
     context = FakeContext()
 
-    await router.dispatch(
+    await dispatch_command(
+        router,
         FakeMessage('/tool echo_debug {"value":"hello"}'),  # type: ignore[arg-type]
         context,  # type: ignore[arg-type]
     )
@@ -231,10 +243,11 @@ async def test_direct_skill_loader_is_explicitly_unavailable_without_run_scope()
         FakeSelectionService(),  # type: ignore[arg-type]
     )
     router = CommandRouter("/")
-    router.register(ToolCommand(service, "/"))
+    router.register_definition(ToolCommand(service, "/").definition())
     context = FakeContext()
 
-    await router.dispatch(
+    await dispatch_command(
+        router,
         FakeMessage(f'/tool load_agent_skill {{"skill_id":"{uuid4()}"}}'),  # type: ignore[arg-type]
         context,  # type: ignore[arg-type]
     )

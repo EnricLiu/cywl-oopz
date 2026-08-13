@@ -11,6 +11,8 @@ from uuid import UUID, uuid4
 import pytest
 from pydantic import BaseModel
 
+from cywl_oopz.core.errors import DatabaseError
+from cywl_oopz.features.access.models import Permission
 from cywl_oopz.features.agent.models import (
     AgentIdentity,
     AgentModelRef,
@@ -59,6 +61,7 @@ class RecordingTool:
         wait: asyncio.Event | None = None,
         timeout_seconds: float = 1,
         persist_input_payload: bool = True,
+        required_permission: Permission | None = None,
     ) -> None:
         self._descriptor = ToolDescriptor(
             name=name,
@@ -67,6 +70,7 @@ class RecordingTool:
             input_model=NumberInput,
             output_model=NumberOutput,
             effect=effect,
+            required_permission=required_permission,
             timeout_seconds=timeout_seconds,
             max_output_characters=1000,
             concurrency_safe=effect is ToolEffect.READ,
@@ -151,6 +155,19 @@ class FakeChannels:
     ) -> frozenset[str]:
         del area_id, channel_id
         return self.enabled
+
+
+class FakeToolAuthorization:
+    def __init__(self, allowed: bool, *, unavailable: bool = False) -> None:
+        self.allowed = allowed
+        self.unavailable = unavailable
+        self.calls: list[tuple[AgentIdentity, Permission]] = []
+
+    async def allows(self, identity: AgentIdentity, permission: Permission) -> bool:
+        self.calls.append((identity, permission))
+        if self.unavailable:
+            raise DatabaseError("authorization unavailable")
+        return self.allowed
 
 
 def tool_context(*enabled: str) -> ToolExecutionContext:
@@ -290,14 +307,19 @@ async def test_executor_propagates_cancellation_and_persists_terminal_state() ->
 
 
 @pytest.mark.asyncio
-async def test_executor_bounds_timeout_and_denies_admin_for_normal_identity() -> None:
+async def test_executor_bounds_timeout_and_denies_required_permission() -> None:
     wait = asyncio.Event()
     slow = RecordingTool("slow", wait=wait, timeout_seconds=0.001)
-    admin = RecordingTool("admin_tool", effect=ToolEffect.ADMIN)
+    admin = RecordingTool(
+        "admin_tool",
+        effect=ToolEffect.ADMIN,
+        required_permission=Permission.CHANNEL_INITIALIZE,
+    )
+    authorization = FakeToolAuthorization(False)
     repository = InMemoryExecutionRepository()
     executor = ToolExecutor(
         ToolRegistry((slow, admin)),
-        ToolPolicy(),
+        ToolPolicy(authorization),
         repository,
     )
 
@@ -311,8 +333,9 @@ async def test_executor_bounds_timeout_and_denies_admin_for_normal_identity() ->
     )
 
     assert timed_out.error_code == "tool_timeout"
-    assert denied.error_code == "administrator_required"
+    assert denied.error_code == "permission_denied"
     assert admin.calls == 0
+    assert [permission for _, permission in authorization.calls] == [Permission.CHANNEL_INITIALIZE]
 
 
 @pytest.mark.asyncio
@@ -367,12 +390,19 @@ async def test_executor_logs_failure_context_without_arguments(caplog) -> None:
 async def test_availability_intersects_channel_and_model_capability() -> None:
     read = RecordingTool("read_tool")
     write = RecordingTool("write_tool", effect=ToolEffect.WRITE)
-    admin = RecordingTool("admin_tool", effect=ToolEffect.ADMIN)
+    admin = RecordingTool(
+        "admin_tool",
+        effect=ToolEffect.ADMIN,
+        required_permission=Permission.CHANNEL_INITIALIZE,
+    )
     registry = ToolRegistry((read, write, admin))
+    authorization = FakeToolAuthorization(False)
+    policy = ToolPolicy(authorization)
     availability = ToolAvailabilityService(
         registry,
         FakeChannels(frozenset({"read_tool", "admin_tool"})),
         ("read_tool", "write_tool", "admin_tool"),
+        policy,
     )
     identity = AgentIdentity(
         "person",
@@ -384,9 +414,9 @@ async def test_availability_intersects_channel_and_model_capability() -> None:
         tool_model(ModelCapability.TOOL_CALLING),
     )
     unsupported = await availability.resolve(identity, tool_model())
+    authorization.allowed = True
     administrator_enabled = await availability.resolve(
-        replace(identity, is_administrator=True),
-        tool_model(ModelCapability.TOOL_CALLING),
+        identity, tool_model(ModelCapability.TOOL_CALLING)
     )
 
     assert [item.name for item in enabled] == ["read_tool"]
@@ -395,6 +425,90 @@ async def test_availability_intersects_channel_and_model_capability() -> None:
         "admin_tool",
         "read_tool",
     ]
+
+
+@pytest.mark.asyncio
+async def test_executor_rechecks_permission_after_availability_and_effect_is_not_authority() -> (
+    None
+):
+    protected = RecordingTool(
+        "protected_tool",
+        effect=ToolEffect.ADMIN,
+        required_permission=Permission.CHANNEL_INITIALIZE,
+    )
+    unprotected_admin_effect = RecordingTool("admin_effect_only", effect=ToolEffect.ADMIN)
+    registry = ToolRegistry((protected, unprotected_admin_effect))
+    authorization = FakeToolAuthorization(True)
+    policy = ToolPolicy(authorization)
+    availability = ToolAvailabilityService(
+        registry,
+        FakeChannels(frozenset({"protected_tool", "admin_effect_only"})),
+        ("protected_tool", "admin_effect_only"),
+        policy,
+    )
+    identity = AgentIdentity(
+        "person",
+        ConversationKey("channel", "area", "channel", "person"),
+    )
+    names = await availability.names(identity, tool_model(ModelCapability.TOOL_CALLING))
+    assert names == ("admin_effect_only", "protected_tool")
+
+    authorization.allowed = False
+    repository = InMemoryExecutionRepository()
+    executor = ToolExecutor(registry, policy, repository)
+    context = replace(tool_context(*names), identity=identity)
+    denied = await executor.execute(
+        ToolCall("protected", "protected_tool", {"value": 1}),
+        context,
+    )
+    allowed = await executor.execute(
+        ToolCall("effect-only", "admin_effect_only", {"value": 2}),
+        context,
+    )
+
+    assert denied.status is ToolExecutionStatus.DENIED
+    assert denied.error_code == "permission_denied"
+    assert protected.calls == 0
+    assert allowed.status is ToolExecutionStatus.SUCCEEDED
+    assert unprotected_admin_effect.calls == 1
+    assert len(authorization.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_tool_authorization_database_failure_fails_closed_at_both_layers() -> None:
+    tool = RecordingTool(
+        "protected_tool",
+        effect=ToolEffect.ADMIN,
+        required_permission=Permission.CHANNEL_INITIALIZE,
+    )
+    registry = ToolRegistry((tool,))
+    authorization = FakeToolAuthorization(False, unavailable=True)
+    policy = ToolPolicy(authorization)
+    identity = AgentIdentity(
+        "person",
+        ConversationKey("channel", "area", "channel", "person"),
+    )
+    availability = ToolAvailabilityService(
+        registry,
+        FakeChannels(frozenset({"protected_tool"})),
+        ("protected_tool",),
+        policy,
+    )
+
+    assert await availability.names(identity, tool_model(ModelCapability.TOOL_CALLING)) == ()
+
+    result = await ToolExecutor(
+        registry,
+        policy,
+        InMemoryExecutionRepository(),
+    ).execute(
+        ToolCall("call", "protected_tool", {"value": 1}),
+        replace(tool_context("protected_tool"), identity=identity),
+    )
+
+    assert result.status is ToolExecutionStatus.DENIED
+    assert result.error_code == "authorization_unavailable"
+    assert tool.calls == 0
 
 
 @pytest.mark.asyncio

@@ -99,12 +99,8 @@ class ToolExecutor:
             )
             return self._from_execution(claim.execution)
 
-        if not self._policy.allows(context, descriptor):
-            error_code = (
-                "administrator_required"
-                if descriptor.effect is ToolEffect.ADMIN and not context.identity.is_administrator
-                else "tool_not_enabled"
-            )
+        error_code = await self._policy.denial_reason(context, descriptor)
+        if error_code:
             logger.warning(
                 "Denied Agent tool execution: run=%s call=%s tool=%s reason=%s",
                 context.run_id,

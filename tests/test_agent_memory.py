@@ -7,10 +7,11 @@ from uuid import UUID
 
 import pytest
 
-from cywl_oopz.commands.router import ParsedCommand
+from cywl_oopz.commands.router import CommandRouter
 from cywl_oopz.features.agent.commands import MemoryCommand
 from cywl_oopz.features.agent.memory import MemoryItem, MemoryService
 from cywl_oopz.settings import AgentSettings
+from cywl_oopz.testing.commands import dispatch_command
 
 
 class InMemoryRepository:
@@ -85,6 +86,19 @@ class FakeContext:
         self.replies.append(text)
 
 
+def command_message(text: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        plain_text=text,
+        text=text,
+        content=text,
+        sender_id="person",
+        area="",
+        channel="",
+        message_id="message",
+        mention_list=(),
+    )
+
+
 def settings() -> AgentSettings:
     return AgentSettings.from_mapping(
         {
@@ -134,22 +148,22 @@ async def test_memory_service_enforces_item_and_size_limits() -> None:
 @pytest.mark.asyncio
 async def test_memory_command_remember_list_off_and_forget_all() -> None:
     memory = MemoryService(settings(), InMemoryRepository())
-    command = MemoryCommand(SimpleNamespace(), memory)
+    router = CommandRouter("/")
+    router.register_definition(MemoryCommand(memory).definition())
     remember_context = FakeContext()
     list_context = FakeContext()
     off_context = FakeContext()
     forget_context = FakeContext()
 
-    await command.execute(
-        ParsedCommand("memory", ("remember", "喜欢", "Lo-fi")),
-        remember_context,
-    )
-    await command.execute(ParsedCommand("memory", ("list",)), list_context)
-    await command.execute(ParsedCommand("memory", ("off",)), off_context)
-    await command.execute(
-        ParsedCommand("memory", ("forget", "all")),
-        forget_context,
-    )
+    for target_context, text in (
+        (remember_context, "/memory remember 喜欢 Lo-fi"),
+        (list_context, "/memory list"),
+        (off_context, "/memory off"),
+        (forget_context, "/memory forget all"),
+    ):
+        message = command_message(text)
+        target_context.event.message = message
+        await dispatch_command(router, message, target_context)
 
     assert "记忆 ID" in remember_context.replies[0]
     assert "喜欢 Lo-fi" in list_context.replies[0]
@@ -157,8 +171,7 @@ async def test_memory_command_remember_list_off_and_forget_all() -> None:
     assert forget_context.replies == ["已删除 1 条长期记忆。"]
 
     disabled_context = FakeContext()
-    await command.execute(
-        ParsedCommand("memory", ("remember", "new")),
-        disabled_context,
-    )
+    message = command_message("/memory remember new")
+    disabled_context.event.message = message
+    await dispatch_command(router, message, disabled_context)
     assert disabled_context.replies == ["长期记忆当前已关闭；请先使用 /memory on。"]

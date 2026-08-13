@@ -41,6 +41,7 @@ from cywl_oopz.features.music.models import (
     RepeatPolicy,
     VoiceChannelKey,
 )
+from cywl_oopz.testing.commands import dispatch_command
 
 
 @dataclass
@@ -292,14 +293,16 @@ def fixture() -> tuple[CommandRouter, StubMusic, StubPlaylists]:
     music = StubMusic()
     playlists = StubPlaylists()
     router = CommandRouter("!")
-    router.register(MusicCommand(music, playlists, "!"))  # type: ignore[arg-type]
+    router.register_definition(
+        MusicCommand(music, playlists, "!").definition()  # type: ignore[arg-type]
+    )
     return router, music, playlists
 
 
 async def dispatch(router: CommandRouter, text: str) -> FakeContext:
     message = FakeMessage(text)
     target = context(message)
-    assert await router.dispatch(message, target) is True
+    assert await dispatch_command(router, message, target) is True
     return target
 
 
@@ -396,6 +399,7 @@ async def test_music_command_manages_playlists_with_human_friendly_indexes() -> 
     assert rename_call[2:] == (playlists.first_id, "初音收藏")
     remove_call = next(call for call in playlists.calls if call[0] == "remove")
     assert remove_call[2:] == (playlists.first_id, playlists.entry_id)
+    assert sum(call[0] == "load" for call in playlists.calls) == 1
 
 
 @pytest.mark.asyncio
@@ -435,12 +439,12 @@ async def test_music_command_maps_expected_errors_and_invalid_syntax() -> None:
             raise MusicPlaylistConflictError
 
     router = CommandRouter("!")
-    router.register(
+    router.register_definition(
         MusicCommand(  # type: ignore[arg-type]
             MissingVoiceMusic(),
             ConflictingPlaylists(),
             "!",
-        )
+        ).definition()
     )
 
     missing_voice = await dispatch(router, "!music play 39")

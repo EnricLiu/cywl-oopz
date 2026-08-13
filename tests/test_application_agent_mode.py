@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from uuid import UUID
 
@@ -9,6 +10,7 @@ from oopz_sdk import VoiceCapabilities
 import cywl_oopz.application as application_module
 from cywl_oopz.application import BotApplication
 from cywl_oopz.core.errors import ConfigurationError
+from cywl_oopz.features.admin.models import ShutdownDisposition
 from cywl_oopz.features.agent.catalog import ProviderCatalog
 from cywl_oopz.features.agent.commands import AgentModelCommand
 from cywl_oopz.features.agent.models import (
@@ -29,12 +31,20 @@ MODEL_ID = UUID("10000000-0000-0000-0000-000000000002")
 class FakeOopzBot:
     def __init__(self, config) -> None:
         self.config = config
+        self.event_handlers: dict[str, object] = {}
 
     def on_ready(self, handler) -> None:
         self.ready_handler = handler
 
     def on_message(self, handler) -> None:
         self.message_handler = handler
+
+    def on(self, event_name: str):
+        def register(handler):
+            self.event_handlers[event_name] = handler
+            return handler
+
+        return register
 
     async def run(self) -> None:
         self.did_run = True
@@ -96,6 +106,10 @@ async def test_composition_root_routes_chat_and_provider_command_by_agent_flag(
     assert "tool" in {command.name for command in agent_application.commands.commands}
     assert "memory" in {command.name for command in agent_application.commands.commands}
     assert "skills" in {command.name for command in agent_application.commands.commands}
+    assert {"debug", "init", "reboot", "recall", "role", "whoami"}.issubset(
+        {command.name for command in agent_application.commands.commands}
+    )
+    assert "message.reaction" in agent_application.bot.event_handlers
     assert {
         "load_agent_skill",
         "read_agent_skill_resource",
@@ -118,6 +132,10 @@ async def test_composition_root_routes_chat_and_provider_command_by_agent_flag(
     assert "tool" not in {command.name for command in legacy_application.commands.commands}
     assert "memory" not in {command.name for command in legacy_application.commands.commands}
     assert "skills" not in {command.name for command in legacy_application.commands.commands}
+
+    for application in (agent_application, legacy_application):
+        assert all(spec.category != "其他" for spec in application.commands.specs)
+        assert all(spec.usage for spec in application.commands.specs)
 
     for application in (agent_application, legacy_application):
         if application.music is not None:
@@ -470,6 +488,121 @@ async def test_application_keeps_delegated_runtime_active_when_agent_and_voice_a
         "run_oopz",
     ]
     assert application.bot.did_run is True
+
+
+@pytest.mark.asyncio
+async def test_restart_stops_oopz_before_running_all_existing_cleanup(monkeypatch) -> None:
+    monkeypatch.setattr(application_module, "OopzBot", FakeOopzBot)
+    application = BotApplication(settings("legacy"))
+    events: list[str] = []
+    bot_started = asyncio.Event()
+    bot_stopped = asyncio.Event()
+
+    async def database_start() -> None:
+        events.append("database_start")
+
+    async def recover_stale(now) -> int:
+        del now
+        events.append("recover_voice")
+        return 0
+
+    async def abandon_runs(before, now) -> int:
+        del before, now
+        events.append("abandon_runs")
+        return 0
+
+    async def run_bot() -> None:
+        events.append("oopz_run")
+        bot_started.set()
+        await bot_stopped.wait()
+
+    async def stop_bot() -> None:
+        events.append("oopz_stop")
+        bot_stopped.set()
+
+    def recorder(name: str):
+        async def record() -> None:
+            events.append(name)
+
+        return record
+
+    monkeypatch.setattr(application.database, "start", database_start)
+    monkeypatch.setattr(application.database, "close", recorder("database_close"))
+    monkeypatch.setattr(application.voice_sessions, "recover_stale", recover_stale)
+    monkeypatch.setattr(application.agent_runs, "abandon_stale", abandon_runs)
+    monkeypatch.setattr(
+        application.delegated_task_scheduler,
+        "start",
+        recorder("scheduler_start"),
+    )
+    monkeypatch.setattr(
+        application.delegated_task_scheduler,
+        "aclose",
+        recorder("scheduler_close"),
+    )
+    monkeypatch.setattr(
+        application.delegated_task_text_fallback,
+        "start",
+        recorder("fallback_start"),
+    )
+    monkeypatch.setattr(
+        application.delegated_task_text_fallback,
+        "aclose",
+        recorder("fallback_close"),
+    )
+    monkeypatch.setattr(application.bot, "run", run_bot)
+    monkeypatch.setattr(application.bot, "stop", stop_bot, raising=False)
+    monkeypatch.setattr(application.chat_tasks, "close", recorder("chat_tasks_close"))
+    monkeypatch.setattr(
+        application.agent_summary_tasks,
+        "close",
+        recorder("summary_tasks_close"),
+    )
+    monkeypatch.setattr(
+        application.voice_conversations,
+        "aclose",
+        recorder("voice_conversations_close"),
+    )
+    monkeypatch.setattr(
+        application.voice_channel_sessions,
+        "aclose",
+        recorder("voice_channels_close"),
+    )
+    if application.web_search is not None:
+        monkeypatch.setattr(application.web_search, "aclose", recorder("web_search_close"))
+    monkeypatch.setattr(application.agent_engine, "aclose", recorder("agent_engine_close"))
+    monkeypatch.setattr(application._provider, "aclose", recorder("provider_close"))
+
+    running = asyncio.create_task(application.run())
+    await asyncio.wait_for(bot_started.wait(), timeout=1)
+
+    async def confirmed() -> None:
+        events.append("restart_confirmed")
+
+    assert await application.lifecycle.request_restart("actor", confirmed)
+    disposition = await asyncio.wait_for(running, timeout=2)
+
+    assert disposition is ShutdownDisposition.RESTART
+    assert events == [
+        "database_start",
+        "recover_voice",
+        "abandon_runs",
+        "scheduler_start",
+        "fallback_start",
+        "oopz_run",
+        "restart_confirmed",
+        "oopz_stop",
+        "chat_tasks_close",
+        "summary_tasks_close",
+        "voice_conversations_close",
+        "scheduler_close",
+        "fallback_close",
+        "voice_channels_close",
+        "web_search_close",
+        "agent_engine_close",
+        "provider_close",
+        "database_close",
+    ]
 
 
 @pytest.mark.asyncio

@@ -174,7 +174,6 @@ class AgentIdentity:
 
     person_id: str
     conversation: ConversationKey
-    is_administrator: bool = False
     source_message_id: str = ""
     transport_channel_id: str = ""
     mentioned_person_ids: tuple[str, ...] = field(default=(), repr=False)

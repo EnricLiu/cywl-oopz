@@ -597,6 +597,7 @@ class ToolProgressCatalog:
 
     _error_summaries = {
         "administrator_required": "需要管理员权限",
+        "authorization_unavailable": "权限服务暂不可用",
         "browser_action_failed": "网页操作失败",
         "browser_navigation_failed": "网页打开失败",
         "browser_stale_ref": "网页元素已失效，请刷新页面",
@@ -670,6 +671,7 @@ class ToolProgressCatalog:
         "invalid_agent_skill": "技能内容格式不正确",
         "invalid_agent_skill_resource": "技能资料格式不正确",
         "browser_failed": "浏览器操作失败",
+        "permission_denied": "当前用户没有执行权限",
         "tool_failed": "工具执行失败",
         "tool_not_enabled": "当前频道未启用此工具",
         "tool_not_registered": "工具当前不可用",

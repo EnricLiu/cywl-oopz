@@ -3,11 +3,19 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Protocol
+from dataclasses import dataclass
+from enum import StrEnum
+from typing import Protocol
 
-from oopz_sdk.events.context import EventContext
-
-from cywl_oopz.commands.router import ParsedCommand
+from cywl_oopz.commands.catalog import CommandSpec
+from cywl_oopz.commands.definitions import (
+    CommandDefinition,
+    CommandExecutionPolicy,
+    CommandUsageError,
+    ExecutionMode,
+    PublicCommandAuthorization,
+)
+from cywl_oopz.commands.models import CommandRequest, CommandScope
 from cywl_oopz.core.observability import exception_kind, opaque_ref
 
 from .errors import (
@@ -38,29 +46,60 @@ logger = logging.getLogger(__name__)
 class VoiceCommandPresenter(Protocol):
     """Render command results at the OOPZ integration boundary."""
 
-    async def open_session(self, context: EventContext) -> VoiceSessionStatusSink: ...
+    async def open_session(self, request: CommandRequest) -> VoiceSessionStatusSink: ...
 
-    async def started(self, context: EventContext, status: VoiceSessionStatus) -> None: ...
+    async def started(self, request: CommandRequest, status: VoiceSessionStatus) -> None: ...
 
-    async def stopped(self, context: EventContext, status: VoiceSessionStatus) -> None: ...
+    async def stopped(self, request: CommandRequest, status: VoiceSessionStatus) -> None: ...
 
-    async def status(self, context: EventContext, status: VoiceSessionStatus) -> None: ...
+    async def status(self, request: CommandRequest, status: VoiceSessionStatus) -> None: ...
 
     async def models(
         self,
-        context: EventContext,
+        request: CommandRequest,
         models: tuple[SelectableVoiceModel, ...],
     ) -> None: ...
 
-    async def model_selected(self, context: EventContext, model: SelectableVoiceModel) -> None: ...
-
-    async def voice_selected(
-        self, context: EventContext, selection: VoiceUserSelection
+    async def model_selected(
+        self, request: CommandRequest, model: SelectableVoiceModel
     ) -> None: ...
 
-    async def error(self, context: EventContext, message: str) -> None: ...
+    async def voice_selected(
+        self, request: CommandRequest, selection: VoiceUserSelection
+    ) -> None: ...
 
-    async def usage(self, context: EventContext, prefix: str) -> None: ...
+    async def error(self, request: CommandRequest, message: str) -> None: ...
+
+
+class VoiceAction(StrEnum):
+    START = "start"
+    STOP = "stop"
+    STATUS = "status"
+    MODEL = "model"
+    VOICE = "voice"
+
+
+@dataclass(frozen=True, slots=True)
+class VoiceArguments:
+    action: VoiceAction
+    value: str = ""
+
+
+class VoiceArgumentsParser:
+    def parse(self, request: CommandRequest) -> VoiceArguments:
+        assert request.text is not None
+        tokens = request.text.tokens
+        if not tokens or len(tokens) > 2:
+            raise CommandUsageError("请选择一个语音操作。")
+        try:
+            action = VoiceAction(tokens[0].casefold())
+        except ValueError as exc:
+            raise CommandUsageError("未知的语音操作。") from exc
+        if action in {VoiceAction.START, VoiceAction.STOP, VoiceAction.STATUS}:
+            if len(tokens) != 1:
+                raise CommandUsageError("此语音操作不接受额外参数。")
+            return VoiceArguments(action)
+        return VoiceArguments(action, tokens[1] if len(tokens) == 2 else "")
 
 
 class VoiceCommand:
@@ -68,92 +107,94 @@ class VoiceCommand:
 
     name = "voice"
     description = "启动、停止或查看实验性实时语音对话。"
+    category = "语音"
+    usage = (
+        "voice <start|stop|status>",
+        "voice model [模型别名]",
+        "voice voice [音色]",
+    )
 
     def __init__(
         self,
         conversations: VoiceConversationService,
         configurations: VoiceConfigurationRepository,
         presenter: VoiceCommandPresenter,
-        command_prefix: str,
     ) -> None:
         self._conversations = conversations
         self._configurations = configurations
         self._presenter = presenter
-        self._prefix = command_prefix
 
-    async def execute(self, command: ParsedCommand, context: EventContext) -> None:
-        action = command.arguments[0].casefold() if command.arguments else ""
-        valid = (action in {"start", "stop", "status"} and len(command.arguments) == 1) or (
-            action in {"model", "voice"} and len(command.arguments) in {1, 2}
+    def definition(self) -> CommandDefinition[VoiceArguments]:
+        return CommandDefinition(
+            CommandSpec.from_command(self),
+            VoiceArgumentsParser(),
+            self,
+            PublicCommandAuthorization(),
+            CommandExecutionPolicy(ExecutionMode.BACKGROUND, timeout_seconds=45.0),
         )
-        if not valid:
-            await self._presenter.usage(context, self._prefix)
-            return
+
+    async def handle(self, request: CommandRequest, arguments: VoiceArguments) -> None:
+        action = arguments.action
         display: VoiceSessionStatusSink | None = None
         try:
-            owner = self._owner_person_id(context)
-            if action == "start":
-                request = self._start_request(context, owner)
-                display = await self._presenter.open_session(context)
+            owner = request.actor.person_id
+            if action is VoiceAction.START:
+                start_request = self._start_request(request, owner)
+                display = await self._presenter.open_session(request)
                 status = await self._conversations.start(
-                    request,
+                    start_request,
                     display,
                 )
                 if not display.owns_message:
-                    await self._presenter.started(context, status)
-            elif action == "stop":
+                    await self._presenter.started(request, status)
+            elif action is VoiceAction.STOP:
                 status = await self._conversations.stop(owner)
-                await self._presenter.stopped(context, status)
-            elif action == "status":
-                await self._presenter.status(context, await self._conversations.status())
-            elif action == "model":
-                if len(command.arguments) == 1:
+                await self._presenter.stopped(request, status)
+            elif action is VoiceAction.STATUS:
+                await self._presenter.status(request, await self._conversations.status())
+            elif action is VoiceAction.MODEL:
+                if not arguments.value:
                     await self._presenter.models(
-                        context,
+                        request,
                         await self._configurations.list_selectable_models(owner),
                     )
                 else:
                     selected = await self._configurations.set_user_model(
                         owner,
-                        command.arguments[1],
+                        arguments.value,
                     )
-                    await self._presenter.model_selected(context, selected)
-            elif len(command.arguments) == 1:
+                    await self._presenter.model_selected(request, selected)
+            elif not arguments.value:
                 await self._presenter.voice_selected(
-                    context,
+                    request,
                     await self._configurations.user_selection(owner),
                 )
             else:
-                await self._configurations.set_user_voice(owner, command.arguments[1])
+                await self._configurations.set_user_voice(owner, arguments.value)
                 await self._presenter.voice_selected(
-                    context,
+                    request,
                     await self._configurations.user_selection(owner),
                 )
         except VoiceConversationError as exc:
             logger.info(
                 "Voice command rejected: action=%s owner=%s error=%s",
-                action,
-                opaque_ref(self._safe_owner(context)),
+                action.value,
+                opaque_ref(owner),
                 exception_kind(exc),
             )
             message = self._error_message(exc)
             if not await self._finish_display_error(display, message):
-                await self._presenter.error(context, message)
-        except ValueError as exc:
-            logger.info("Voice command context invalid: error=%s", exception_kind(exc))
-            message = "无法识别发起人或当前文字频道。"
-            if not await self._finish_display_error(display, message):
-                await self._presenter.error(context, message)
+                await self._presenter.error(request, message)
         except Exception as exc:
             logger.error(
                 "Unexpected voice command failure: action=%s error=%s",
-                action,
+                action.value,
                 exception_kind(exc),
                 exc_info=True,
             )
             message = "语音会话处理失败，请稍后重试。"
             if not await self._finish_display_error(display, message):
-                await self._presenter.error(context, message)
+                await self._presenter.error(request, message)
 
     @staticmethod
     async def _finish_display_error(
@@ -176,28 +217,13 @@ class VoiceCommand:
         return True
 
     @staticmethod
-    def _owner_person_id(context: Any) -> str:
-        owner = VoiceCommand._safe_owner(context)
-        if not owner:
-            raise ValueError("Voice command sender is required")
-        return owner
-
-    @staticmethod
-    def _safe_owner(context: Any) -> str:
-        message = getattr(getattr(context, "event", None), "message", None)
-        return str(getattr(message, "sender_id", "")).strip()
-
-    @staticmethod
-    def _start_request(context: Any, owner: str) -> VoiceStartRequest:
-        event = getattr(context, "event", None)
-        if bool(getattr(event, "is_private", False)):
+    def _start_request(request: CommandRequest, owner: str) -> VoiceStartRequest:
+        if request.location.scope is CommandScope.PRIVATE:
             raise VoiceChannelContextRequiredError
-        message = getattr(event, "message", None)
-        area_id = str(getattr(message, "area", "")).strip()
-        channel_id = str(getattr(message, "channel", "")).strip()
-        if not area_id or not channel_id:
-            raise VoiceChannelContextRequiredError
-        return VoiceStartRequest(owner, VoiceTextAddress(area_id, channel_id))
+        return VoiceStartRequest(
+            owner,
+            VoiceTextAddress(request.location.area_id, request.location.channel_id),
+        )
 
     @staticmethod
     def _error_message(error: VoiceConversationError) -> str:

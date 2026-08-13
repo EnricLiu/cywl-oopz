@@ -37,6 +37,12 @@ class TaskSupervisor[KeyT: Hashable]:
         task = self._tasks.get(key)
         return task is not None and not task.done()
 
+    async def wait(self, key: KeyT) -> None:
+        """Await the currently owned task without changing its lifecycle."""
+        task = self._tasks.get(key)
+        if task is not None:
+            await task
+
     async def cancel(self, key: KeyT) -> bool:
         """Cancel and await active work so leases and locks are released."""
         task = self._tasks.get(key)

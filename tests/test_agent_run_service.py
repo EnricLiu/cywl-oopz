@@ -161,6 +161,32 @@ async def test_agent_run_service_persists_isolated_run_messages_usage_and_heartb
     assert len(runs.heartbeats) >= 2
 
 
+@pytest.mark.asyncio
+async def test_agent_run_service_binds_progress_after_run_persistence_before_engine() -> None:
+    events: list[tuple[str, UUID]] = []
+
+    class RecordingProgress:
+        async def bind_run(self, run_id: UUID) -> None:
+            assert run_id in runs.runs
+            events.append(("bound", run_id))
+
+        async def emit(self, event) -> None:
+            del event
+
+    class AssertingEngine(ScriptedEngine):
+        async def run(self, request, progress=None):
+            assert events == [("bound", request.run_id)]
+            return await super().run(request, progress)
+
+    result = AgentRunResult("完成", AgentStopReason.COMPLETED)
+    runs = RecordingRuns()
+    service = AgentRunService(AssertingEngine(result), runs, RecordingMessages())
+
+    outcome = await service.run(run_spec(), RecordingProgress())
+
+    assert events == [("bound", outcome.run_id)]
+
+
 @pytest.mark.parametrize(
     ("error", "reason", "code"),
     (

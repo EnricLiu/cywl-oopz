@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Coroutine
 from datetime import UTC, datetime, timedelta
@@ -12,11 +13,40 @@ from oopz_sdk.events.context import EventContext
 from oopz_sdk.models import Message as OopzMessage
 
 from .commands.builtin import HelpCommand, PingCommand, StatusCommand
+from .commands.execution import CommandTaskSupervisor
+from .commands.parsing import CommandTextParser
 from .commands.router import CommandRouter
 from .core.errors import ConfigurationError, DatabaseError
 from .core.health import HealthRegistry, HealthState
 from .core.observability import exception_kind, opaque_ref
 from .core.tasks import TaskSupervisor
+from .features.access.administration import RoleAdministrationService
+from .features.access.agent_tools import AgentToolAuthorizationAdapter
+from .features.access.commands import RoleCommand, WhoAmICommand
+from .features.access.repository import SqlAlchemyRoleBindingRepository
+from .features.access.service import AuthorizationService
+from .features.admin.actions import DebugMessageAction, RecallMessageAction
+from .features.admin.commands import (
+    DebugCommand,
+    InitCommand,
+    RebootCommand,
+    RecallCommand,
+)
+from .features.admin.initialization import ChannelInitializationService
+from .features.admin.lifecycle import ApplicationLifecycleCoordinator
+from .features.admin.models import ShutdownDisposition
+from .features.admin.outbound_repository import (
+    SqlAlchemyAgentDiagnosticRepository,
+    SqlAlchemyOutboundMessageRepository,
+)
+from .features.admin.reaction_commands import (
+    DebugReactionCommand,
+    ReactionCommandRouter,
+    RecallReactionCommand,
+)
+from .features.admin.recall import MessageRecallService
+from .features.admin.references import ReferencedMessageResolver
+from .features.admin.repository import SqlAlchemyChannelInitializationRepository
 from .features.agent.catalog import ProviderCatalogAdminService, ReloadableProviderCatalog
 from .features.agent.commands import (
     AgentModelCommand,
@@ -111,11 +141,9 @@ from .features.agent.tools.web import (
     SearchWebTool,
 )
 from .features.chat.commands import (
-    AmbientChatHandler,
     CancelChatCommand,
     ChatCommand,
     ChatStatusCommand,
-    MentionChatHandler,
     ModelCommand,
     NewConversationCommand,
 )
@@ -124,7 +152,7 @@ from .features.chat.openai_compatible import OpenAICompatibleChatProvider
 from .features.chat.provider import ChatProvider, DisabledChatProvider
 from .features.chat.repository import SqlAlchemyConversationRepository
 from .features.chat.service import ChatService
-from .features.chat.tasks import ChatTaskSupervisor
+from .features.chat.tasks import ChatTaskSupervisor, OutboundChatTaskCanceller
 from .features.music.bilibili import BilibiliMusicProvider
 from .features.music.catalog import CompositeMusicCatalog, MusicProviderRegistry
 from .features.music.commands import MusicCommand
@@ -147,14 +175,29 @@ from .features.web.browser import BrowserSessionManager
 from .features.web.errors import BrowserError
 from .features.web.service import WebSearchService
 from .integrations.media.ytdlp_runner import YtDlpCapabilityProbe, YtDlpProcessRunner
+from .integrations.oopz.active_presentations import ActivePresentationRegistry
 from .integrations.oopz.agent_presenter import OopzAgentPresenterFactory
+from .integrations.oopz.channel_catalog import OopzAreaChannelCatalog
+from .integrations.oopz.chat_handlers import AmbientChatHandler, MentionChatHandler
 from .integrations.oopz.chat_invocation import OopzChatInvocationFactory
+from .integrations.oopz.command_requests import OopzCommandRequestFactory
+from .integrations.oopz.diagnostic_renderer import OopzAgentDiagnosticRenderer
 from .integrations.oopz.editable_messages import OopzEditableMessageGateway
 from .integrations.oopz.master_audio import OopzMasterPcmOutputFactory
+from .integrations.oopz.message_recall import (
+    OopzBotMessageRecallGateway,
+    OopzRecentBotMessageLookup,
+    OopzReferencedMessageParser,
+)
 from .integrations.oopz.message_renderer import OopzMessageRenderer
 from .integrations.oopz.music import OopzMusicVoiceGateway
+from .integrations.oopz.reaction_commands import (
+    OopzReactionCommandInvocationParser,
+    OopzReactionCommandResponder,
+)
 from .integrations.oopz.reactions import OopzReactionGateway
 from .integrations.oopz.skill_sharing import OopzSkillShareNotifier
+from .integrations.oopz.tracked_context import TrackedMessageContext
 from .integrations.oopz.voice_capabilities import OopzVoiceCapabilityGate
 from .integrations.oopz.voice_channel_session import OopzVoiceChannelSessionManager
 from .integrations.oopz.voice_conversation import (
@@ -184,11 +227,34 @@ logger = logging.getLogger(__name__)
 class BotApplication:
     """Owns OOPZ integration, application resources, and feature services."""
 
+    oopz_stop_timeout_seconds = 5.0
+    oopz_run_settle_seconds = 1.0
+
     def __init__(self, settings: AppSettings) -> None:
         self.settings = settings
         self.health = HealthRegistry()
+        self.lifecycle = ApplicationLifecycleCoordinator()
         self.database = Database(settings.database)
+        self.role_bindings = SqlAlchemyRoleBindingRepository(self.database.session_factory)
+        self.authorization = AuthorizationService(
+            self.role_bindings,
+            settings.rbac.bootstrap_owner_ids,
+        )
+        self.role_administration = RoleAdministrationService(
+            self.role_bindings,
+            self.authorization,
+        )
         self.bot = OopzBot(settings.oopz)
+        self.outbound_messages = SqlAlchemyOutboundMessageRepository(self.database.session_factory)
+        self.agent_diagnostics = SqlAlchemyAgentDiagnosticRepository(self.database.session_factory)
+        self.channel_initialization_repository = SqlAlchemyChannelInitializationRepository(
+            self.database.session_factory
+        )
+        self.area_channel_catalog = OopzAreaChannelCatalog(self.bot)
+        self.channel_initialization = ChannelInitializationService(
+            self.area_channel_catalog,
+            self.channel_initialization_repository,
+        )
         self.voice_capability_gate = OopzVoiceCapabilityGate()
         self.master_audio = OopzMasterPcmOutputFactory.from_settings(self.bot, settings.audio)
         self.voice_channel_sessions = OopzVoiceChannelSessionManager(
@@ -207,14 +273,30 @@ class BotApplication:
             master_factory=self.master_audio,
         )
         self.chat_invocations = OopzChatInvocationFactory(settings.oopz.person_uid)
-        self.editable_messages = OopzEditableMessageGateway(self.bot)
+        self.active_agent_presentations = ActivePresentationRegistry()
+        self.editable_messages = OopzEditableMessageGateway(
+            self.bot,
+            self.outbound_messages,
+        )
         self.agent_presenters = OopzAgentPresenterFactory(
             self.editable_messages,
             OopzMessageRenderer(),
             enabled=settings.agent.enabled and settings.agent.live_display,
             edit_interval_seconds=settings.agent.display_edit_interval_seconds,
+            active_presentations=self.active_agent_presentations,
         )
-        self.commands = CommandRouter(settings.command_prefix)
+        self.command_parser = CommandTextParser(settings.command_prefix)
+        self.command_tasks = CommandTaskSupervisor()
+        self.commands = CommandRouter(
+            settings.command_prefix,
+            self.authorization,
+            supervisor=self.command_tasks,
+        )
+        self.referenced_message_parser = OopzReferencedMessageParser()
+        self.command_requests = OopzCommandRequestFactory(
+            self.command_parser,
+            self.referenced_message_parser.parse,
+        )
         catalog_repository = SqlAlchemyProviderCatalogRepository(self.database.session_factory)
         self.agent_catalog = ReloadableProviderCatalog(catalog_repository)
         self.agent_catalog_admin = ProviderCatalogAdminService(
@@ -452,6 +534,12 @@ class BotApplication:
                 name for name in enabled_agent_tools if name not in SKILL_AUTHORING_AGENT_TOOLS
             )
         self.agent_tool_registry = ToolRegistry(agent_tools)
+        self.agent_diagnostic_renderer = OopzAgentDiagnosticRenderer(
+            {
+                descriptor.name: descriptor.display_name
+                for descriptor in self.agent_tool_registry.descriptors()
+            }
+        )
         self.agent_skill_availability = SkillAvailabilityService(
             max_available_skills=settings.agent.max_available_skills,
         )
@@ -464,14 +552,17 @@ class BotApplication:
             self.web_search is not None,
             self.browser is not None,
         )
+        self.agent_tool_authorization = AgentToolAuthorizationAdapter(self.authorization)
+        self.agent_tool_policy = ToolPolicy(self.agent_tool_authorization)
         self.agent_tool_availability = ToolAvailabilityService(
             self.agent_tool_registry,
             channel_settings,
             enabled_agent_tools,
+            self.agent_tool_policy,
         )
         self.agent_tool_executor = ToolExecutor(
             self.agent_tool_registry,
-            ToolPolicy(),
+            self.agent_tool_policy,
             SqlAlchemyToolExecutionRepository(self.database.session_factory),
         )
         self.direct_tools = DirectToolService(
@@ -479,6 +570,7 @@ class BotApplication:
             self.agent_tool_registry,
             self.agent_tool_availability,
             self.agent_selection,
+            self.agent_tool_policy,
         )
         self.agent_models = AgentModelRegistry(
             self.agent_catalog,
@@ -524,6 +616,31 @@ class BotApplication:
         )
         self._provider = self._create_chat_provider()
         self.chat_tasks = ChatTaskSupervisor()
+        self.recent_bot_messages = OopzRecentBotMessageLookup(self.bot)
+        self.referenced_messages = ReferencedMessageResolver(
+            self.outbound_messages,
+            self.recent_bot_messages,
+            settings.oopz.person_uid,
+        )
+        self.message_recall = MessageRecallService(
+            self.referenced_messages,
+            self.outbound_messages,
+            self.active_agent_presentations,
+            OutboundChatTaskCanceller(self.chat_tasks),
+            OopzBotMessageRecallGateway(self.bot),
+        )
+        self.recall_message_action = RecallMessageAction(self.message_recall)
+        self.debug_message_action = DebugMessageAction(
+            self.agent_diagnostics,
+            self.agent_diagnostic_renderer,
+        )
+        self.reaction_commands = ReactionCommandRouter(
+            self.authorization,
+            self.referenced_messages,
+            OopzReactionCommandResponder(self.editable_messages),
+        )
+        self.reaction_commands.register(RecallReactionCommand(self.recall_message_action))
+        self.reaction_commands.register(DebugReactionCommand(self.debug_message_action))
         self.legacy_chat = ChatService(
             settings.chat,
             self._provider,
@@ -536,6 +653,7 @@ class BotApplication:
             settings.oopz.person_uid,
             self.agent_presenters,
             self.chat_invocations,
+            command_prefix=settings.command_prefix,
         )
         self._ambient_handler = AmbientChatHandler(
             self.chat,
@@ -617,6 +735,7 @@ class BotApplication:
         self._register_commands()
         self.bot.on_ready(self._on_ready)
         self.bot.on_message(self._on_message)
+        self.bot.on("message.reaction")(self._on_message_reaction)
         self.health.mark("database", HealthState.PENDING)
         self.health.mark(
             "llm",
@@ -647,77 +766,133 @@ class BotApplication:
         return OpenAICompatibleChatProvider(self.settings.chat)
 
     def _register_commands(self) -> None:
-        self.commands.register(PingCommand())
-        self.commands.register(HelpCommand(self.commands))
-        self.commands.register(StatusCommand(self.health))
-        self.commands.register(
+        self._register_builtin_commands()
+        self._register_access_commands()
+        self._register_admin_commands()
+        self._register_chat_commands()
+        self._register_music_commands()
+        self._register_agent_commands()
+        self._register_voice_commands()
+
+    def _register_builtin_commands(self) -> None:
+        self.commands.register_definition(PingCommand().definition())
+        self.commands.register_definition(HelpCommand(self.commands).definition())
+        self.commands.register_definition(StatusCommand(self.health).definition())
+
+    def _register_access_commands(self) -> None:
+        self.commands.register_definition(WhoAmICommand().definition())
+        self.commands.register_definition(
+            RoleCommand(
+                self.authorization,
+                self.role_administration,
+            ).definition()
+        )
+
+    def _register_admin_commands(self) -> None:
+        self.commands.register_definition(InitCommand(self.channel_initialization).definition())
+        self.commands.register_definition(DebugCommand(self.debug_message_action).definition())
+        self.commands.register_definition(RecallCommand(self.recall_message_action).definition())
+        self.commands.register_definition(RebootCommand(self.lifecycle).definition())
+
+    def _register_chat_commands(self) -> None:
+        self.commands.register_definition(
             ChatCommand(
                 self.chat,
+                self.chat_tasks,
                 self.agent_presenters,
                 self.chat_invocations,
-            )
+                prefix=self.settings.command_prefix,
+            ).definition()
         )
-        self.commands.register(NewConversationCommand(self.chat, self.chat_tasks))
-        self.commands.register(
+        self.commands.register_definition(
+            NewConversationCommand(self.chat, self.chat_tasks).definition()
+        )
+        self.commands.register_definition(
             CancelChatCommand(
                 self.chat,
                 self.chat_tasks,
                 active_message_reports_cancel=(
                     self.settings.agent.enabled and self.settings.agent.live_display
                 ),
-            )
+            ).definition()
         )
         if self.settings.agent.enabled:
-            self.commands.register(
+            self.commands.register_definition(
                 AgentModelCommand(
                     self.agent_chat,
                     self.chat_tasks,
                     self.settings.command_prefix,
-                )
+                ).definition()
             )
         else:
-            self.commands.register(ModelCommand(self.legacy_chat, self.chat_tasks))
-        self.commands.register(ChatStatusCommand(self.chat))
+            self.commands.register_definition(
+                ModelCommand(
+                    self.legacy_chat,
+                    self.chat_tasks,
+                    self.settings.command_prefix,
+                ).definition()
+            )
+        self.commands.register_definition(ChatStatusCommand(self.chat).definition())
+
+    def _register_music_commands(self) -> None:
         if self.music is not None and self.music_playlists is not None:
-            self.commands.register(
+            self.commands.register_definition(
                 MusicCommand(
                     self.music,
                     self.music_playlists,
                     self.settings.command_prefix,
-                )
+                ).definition()
             )
+
+    def _register_agent_commands(self) -> None:
         if self.settings.agent.enabled:
-            self.commands.register(
+            self.commands.register_definition(
                 ProviderCommand(
                     self.agent_chat,
                     self.chat_tasks,
                     self.settings.command_prefix,
-                )
+                ).definition()
             )
-            self.commands.register(ToolsCommand(self.agent_chat))
-            self.commands.register(
+            self.commands.register_definition(ToolsCommand(self.agent_chat).definition())
+            self.commands.register_definition(
                 ToolCommand(
                     self.direct_tools,
                     self.settings.command_prefix,
-                    self.chat_invocations,
-                )
+                ).definition()
             )
-            self.commands.register(MemoryCommand(self.agent_chat, self.agent_memory))
+            self.commands.register_definition(
+                MemoryCommand(
+                    self.agent_memory,
+                    self.settings.command_prefix,
+                ).definition()
+            )
             if self.settings.agent.skills_enabled:
-                self.commands.register(SkillsCommand(self.agent_chat, self.agent_skill_library))
+                self.commands.register_definition(
+                    SkillsCommand(
+                        self.agent_chat,
+                        self.agent_skill_library,
+                    ).definition()
+                )
+
+    def _register_voice_commands(self) -> None:
         if self.settings.voice.enabled:
-            self.commands.register(
+            self.commands.register_definition(
                 VoiceCommand(
                     self.voice_conversations,
                     self.voice_configurations,
                     OopzVoiceCommandPresenter(self.editable_messages),
-                    self.settings.command_prefix,
-                )
+                ).definition()
             )
 
-    async def run(self) -> None:
+    async def run(self) -> ShutdownDisposition:
         """Start the database check before entering the long-running OOPZ client."""
         logger.info("Application startup started")
+        disposition = ShutdownDisposition.NORMAL
+        if not self.settings.rbac.bootstrap_owner_ids:
+            logger.warning(
+                "No RBAC bootstrap owner is configured; privileged recovery requires "
+                "a database role"
+            )
         try:
             if self.settings.voice.enabled:
                 self.voice_capability_gate.validate(self.bot.voice.capabilities)
@@ -821,9 +996,10 @@ class BotApplication:
             await self.delegated_task_scheduler.start()
             await self.delegated_task_text_fallback.start()
             logger.info("Starting OOPZ client")
-            await self.bot.run()
+            disposition = await self._run_oopz_until_lifecycle_request()
         finally:
             logger.info("Application shutdown started")
+            await self.command_tasks.close()
             await self.chat_tasks.close()
             await self.agent_summary_tasks.close()
             await self.voice_conversations.aclose()
@@ -842,6 +1018,64 @@ class BotApplication:
             await self._provider.aclose()
             await self.database.close()
             logger.info("Application shutdown completed")
+        return disposition
+
+    async def _run_oopz_until_lifecycle_request(self) -> ShutdownDisposition:
+        bot_task = asyncio.create_task(self.bot.run(), name="oopz-bot")
+        lifecycle_task = asyncio.create_task(
+            self.lifecycle.wait(),
+            name="application-lifecycle",
+        )
+        try:
+            done, _ = await asyncio.wait(
+                {bot_task, lifecycle_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if lifecycle_task in done:
+                disposition = lifecycle_task.result()
+                await self._stop_oopz_bounded()
+                await self._settle_oopz_task(bot_task)
+                return disposition
+            await bot_task
+            return ShutdownDisposition.NORMAL
+        finally:
+            pending = tuple(task for task in (bot_task, lifecycle_task) if not task.done())
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+
+    async def _stop_oopz_bounded(self) -> None:
+        try:
+            async with asyncio.timeout(self.oopz_stop_timeout_seconds):
+                await self.bot.stop()
+        except TimeoutError:
+            logger.error(
+                "Timed out stopping OOPZ client after %.1fs",
+                self.oopz_stop_timeout_seconds,
+            )
+        except Exception as exc:
+            logger.error("OOPZ client stop failed: error=%s", exception_kind(exc))
+
+    async def _settle_oopz_task(self, bot_task: asyncio.Task[object]) -> None:
+        if not bot_task.done():
+            done, _ = await asyncio.wait(
+                {bot_task},
+                timeout=self.oopz_run_settle_seconds,
+            )
+            if not done:
+                logger.warning("Cancelling OOPZ run task after bounded stop grace")
+                bot_task.cancel()
+                await asyncio.gather(bot_task, return_exceptions=True)
+                return
+        if bot_task.cancelled():
+            return
+        error = bot_task.exception()
+        if error is not None:
+            logger.warning(
+                "OOPZ run task ended with an error during planned shutdown: error=%s",
+                exception_kind(error),
+            )
 
     async def _on_ready(self, _: EventContext) -> None:
         self.health.mark("oopz", HealthState.HEALTHY, "websocket connected")
@@ -849,23 +1083,31 @@ class BotApplication:
 
     async def _on_message(self, message: OopzMessage, context: EventContext) -> None:
         """Route short commands inline and own slow LLM work in supervised tasks."""
+        context = TrackedMessageContext(context, self.outbound_messages)
         logger.debug(
             "Received OOPZ message: scope=%s conversation=%s has_text=%s",
             "private" if getattr(context.event, "is_private", False) else "channel",
             self._message_reference(message, context),
             bool(message.plain_text or message.text or message.content),
         )
-        command = self.commands.parse(message.plain_text or message.text or message.content)
-        if command is not None:
+        try:
+            command_request = self.command_requests.from_message(message, context)
+        except ValueError as exc:
+            logger.warning(
+                "Could not project OOPZ command request: conversation=%s error=%s",
+                self._message_reference(message, context),
+                exception_kind(exc),
+            )
+            return
+        if command_request is not None:
+            command_text = command_request.text
+            assert command_text is not None
             logger.info(
                 "Dispatching command: name=%s conversation=%s",
-                command.name,
+                command_text.name,
                 self._message_reference(message, context),
             )
-            if command.name == "chat":
-                await self._start_chat_task(context, self.commands.dispatch(message, context))
-                return
-            await self.commands.dispatch(message, context)
+            await self.commands.dispatch_request(command_request)
             return
         if self._mention_handler.matches(message):
             logger.info(
@@ -889,6 +1131,13 @@ class BotApplication:
                 self._message_reference(message, context),
             )
             await self._start_chat_task(context, self._ambient_handler.handle(message, context))
+
+    async def _on_message_reaction(self, context: EventContext, event: Any) -> None:
+        """Translate added reactions into curated, RBAC-protected commands."""
+        invocation = OopzReactionCommandInvocationParser.parse(context, event)
+        if invocation is None:
+            return
+        await self.reaction_commands.dispatch(invocation)
 
     async def _start_chat_task(
         self,

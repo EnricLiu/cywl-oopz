@@ -122,6 +122,9 @@ class ChatInvocationFactory(Protocol):
     def from_context(self, context: Any) -> ChatInvocation:
         """Return one normalized invocation."""
 
+    def from_request(self, request: Any) -> ChatInvocation:
+        """Return trusted metadata from a framework-neutral command request."""
+
 
 @dataclass(frozen=True, slots=True)
 class ConversationSession:
