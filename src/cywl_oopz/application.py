@@ -21,6 +21,9 @@ from .features.access.administration import RoleAdministrationService
 from .features.access.commands import RoleCommand, RoleCommandAccess, WhoAmICommand
 from .features.access.repository import SqlAlchemyRoleBindingRepository
 from .features.access.service import AuthorizationService
+from .features.admin.commands import InitCommand, InitCommandAccess
+from .features.admin.initialization import ChannelInitializationService
+from .features.admin.repository import SqlAlchemyChannelInitializationRepository
 from .features.agent.catalog import ProviderCatalogAdminService, ReloadableProviderCatalog
 from .features.agent.commands import (
     AgentModelCommand,
@@ -152,6 +155,7 @@ from .features.web.errors import BrowserError
 from .features.web.service import WebSearchService
 from .integrations.media.ytdlp_runner import YtDlpCapabilityProbe, YtDlpProcessRunner
 from .integrations.oopz.agent_presenter import OopzAgentPresenterFactory
+from .integrations.oopz.channel_catalog import OopzAreaChannelCatalog
 from .integrations.oopz.chat_invocation import OopzChatInvocationFactory
 from .integrations.oopz.editable_messages import OopzEditableMessageGateway
 from .integrations.oopz.master_audio import OopzMasterPcmOutputFactory
@@ -202,6 +206,14 @@ class BotApplication:
             self.authorization,
         )
         self.bot = OopzBot(settings.oopz)
+        self.channel_initialization_repository = SqlAlchemyChannelInitializationRepository(
+            self.database.session_factory
+        )
+        self.area_channel_catalog = OopzAreaChannelCatalog(self.bot)
+        self.channel_initialization = ChannelInitializationService(
+            self.area_channel_catalog,
+            self.channel_initialization_repository,
+        )
         self.voice_capability_gate = OopzVoiceCapabilityGate()
         self.master_audio = OopzMasterPcmOutputFactory.from_settings(self.bot, settings.audio)
         self.voice_channel_sessions = OopzVoiceChannelSessionManager(
@@ -667,6 +679,10 @@ class BotApplication:
         self.commands.register(
             RoleCommand(self.authorization, self.role_administration),
             access=RoleCommandAccess(),
+        )
+        self.commands.register(
+            InitCommand(self.channel_initialization),
+            access=InitCommandAccess(),
         )
         self.commands.register(
             ChatCommand(

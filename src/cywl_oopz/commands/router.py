@@ -48,6 +48,9 @@ class AccessRequirement:
 class CommandAccessPolicy(Protocol):
     """Resolve subcommand-aware dispatch and help visibility requirements."""
 
+    def is_available(self, invocation: OopzAccessInvocation) -> bool:
+        """Return whether this command has a usable path in the current context."""
+
     def requirement(
         self,
         command: ParsedCommand,
@@ -117,6 +120,8 @@ class CommandRouter:
                 continue
             if invocation is None:
                 invocation = OopzAccessInvocation.from_context(context)
+            if not access.is_available(invocation):
+                continue
             requirement = access.visibility_requirement(invocation)
             if requirement is None:
                 available.append(registration.command)

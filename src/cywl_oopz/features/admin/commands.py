@@ -1,0 +1,112 @@
+"""Privileged administration commands."""
+
+from __future__ import annotations
+
+import logging
+
+from oopz_sdk.events.context import EventContext
+
+from cywl_oopz.commands.router import AccessRequirement, ParsedCommand
+from cywl_oopz.core.errors import DatabaseError
+from cywl_oopz.core.observability import opaque_ref
+from cywl_oopz.features.access.models import AccessResource, AccessResourceKind, Permission
+from cywl_oopz.integrations.oopz.access import OopzAccessInvocation
+
+from .initialization import ChannelCatalogError, ChannelInitializationService
+from .models import AreaInitializationResult, ChannelKey
+
+logger = logging.getLogger(__name__)
+
+
+class InitCommandAccess:
+    """Authorize channel and area initialization against their exact scope."""
+
+    def is_available(self, invocation: OopzAccessInvocation) -> bool:
+        return invocation.resource.kind is AccessResourceKind.CHANNEL
+
+    def requirement(
+        self,
+        command: ParsedCommand,
+        invocation: OopzAccessInvocation,
+    ) -> AccessRequirement:
+        resource = invocation.resource
+        if (
+            command.arguments
+            and command.arguments[0].casefold() == "area"
+            and resource.kind is AccessResourceKind.CHANNEL
+        ):
+            resource = AccessResource.area(resource.area_id)
+        return AccessRequirement(Permission.CHANNEL_INITIALIZE, resource)
+
+    def visibility_requirement(
+        self,
+        invocation: OopzAccessInvocation,
+    ) -> AccessRequirement:
+        return AccessRequirement(Permission.CHANNEL_INITIALIZE, invocation.resource)
+
+
+class InitCommand:
+    """Create missing text/voice settings using database defaults."""
+
+    name = "init"
+    description = "初始化当前频道或整个 Area 的 Bot 配置。"
+
+    def __init__(self, service: ChannelInitializationService) -> None:
+        self._service = service
+
+    async def execute(self, command: ParsedCommand, context: EventContext) -> None:
+        invocation = OopzAccessInvocation.from_context(context)
+        if invocation.resource.kind is not AccessResourceKind.CHANNEL:
+            await context.reply("/init 只能在文字频道中使用。")
+            return
+        if len(command.arguments) > 1 or (
+            command.arguments and command.arguments[0].casefold() not in {"channel", "area"}
+        ):
+            await context.reply("用法：/init [channel|area]")
+            return
+
+        target = command.arguments[0].casefold() if command.arguments else "channel"
+        try:
+            if target == "area":
+                result = await self._service.initialize_area(invocation.resource.area_id)
+                await context.reply(self._area_result(result))
+                return
+            result = await self._service.initialize_channel(
+                ChannelKey(
+                    invocation.resource.area_id,
+                    invocation.resource.channel_id,
+                )
+            )
+        except ChannelCatalogError as exc:
+            logger.warning(
+                "Area initialization discovery unavailable: area=%s error=%s",
+                opaque_ref(invocation.resource.area_id),
+                type(exc).__name__,
+            )
+            await context.reply("无法读取 Area 频道列表，请稍后重试。")
+            return
+        except DatabaseError as exc:
+            logger.warning(
+                "Channel initialization persistence unavailable: resource=%s error=%s",
+                opaque_ref(
+                    invocation.resource.area_id,
+                    invocation.resource.channel_id,
+                ),
+                type(exc).__name__,
+            )
+            await context.reply("频道初始化服务暂时不可用，请稍后重试。")
+            return
+
+        if result.created:
+            await context.reply("✅ **频道已初始化**\n已使用默认配置创建，现有频道设置未改动。")
+        else:
+            await context.reply("频道已经初始化，现有配置未改动。")
+
+    @staticmethod
+    def _area_result(result: AreaInitializationResult) -> str:
+        return (
+            "✅ **Area 初始化完成**\n"
+            f"文字频道：新增 {result.text_created} · 已存在 {result.text_existing}\n"
+            f"语音频道：新增 {result.voice_created} · 已存在 {result.voice_existing}\n"
+            "现有配置均未改动。"
+        )

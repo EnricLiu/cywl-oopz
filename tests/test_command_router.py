@@ -51,6 +51,10 @@ class UnavailableRoleBindings:
 
 
 class GlobalRebootAccess:
+    def is_available(self, invocation):
+        del invocation
+        return True
+
     def requirement(self, command, invocation):
         del command, invocation
         return AccessRequirement(Permission.BOT_REBOOT, AccessResource.global_resource())

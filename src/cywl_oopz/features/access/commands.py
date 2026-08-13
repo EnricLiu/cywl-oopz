@@ -22,6 +22,10 @@ logger = logging.getLogger(__name__)
 class RoleCommandAccess:
     """Resolve the mixed public/view/manage paths of `/role`."""
 
+    def is_available(self, invocation: OopzAccessInvocation) -> bool:
+        del invocation
+        return True
+
     def requirement(
         self,
         command: ParsedCommand,
