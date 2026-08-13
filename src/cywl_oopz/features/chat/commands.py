@@ -26,6 +26,7 @@ from .models import ChatInvocation, ChatInvocationFactory, ConversationKey
 from .progress import (
     ConversationPresenterFactory,
     ConversationProgressSession,
+    DirectResponseTraceSink,
     NoopPresenterFactory,
     NoopProgressSession,
 )
@@ -123,13 +124,23 @@ class ChatCommandController:
             if presentation.owns_message:
                 await presentation.fail(message)
             else:
-                await context.reply(message)
+                sent = await context.reply(message)
+                await self._record_direct_delivery(
+                    presentation,
+                    sent,
+                    failure_message=message,
+                )
             return False
         else:
             if presentation.owns_message:
                 await presentation.complete(response)
             else:
-                await context.reply(response.content)
+                sent = await context.reply(response.content)
+                await self._record_direct_delivery(
+                    presentation,
+                    sent,
+                    response=response,
+                )
             return True
         finally:
             await asyncio.shield(presentation.aclose())
@@ -142,7 +153,34 @@ class ChatCommandController:
         if presentation.owns_message:
             await asyncio.shield(presentation.cancel())
         else:
-            await context.reply("已取消当前文字回复。")
+            sent = await context.reply("已取消当前文字回复。")
+            if isinstance(presentation, DirectResponseTraceSink):
+                try:
+                    await presentation.record_delivery(sent, cancelled=True)
+                except Exception as exc:
+                    logger.warning(
+                        "Cancelled Agent response tracking degraded: %s",
+                        type(exc).__name__,
+                    )
+
+    @staticmethod
+    async def _record_direct_delivery(
+        presentation: ConversationProgressSession,
+        message: object,
+        *,
+        response=None,
+        failure_message: str = "",
+    ) -> None:
+        if not isinstance(presentation, DirectResponseTraceSink):
+            return
+        try:
+            await presentation.record_delivery(
+                message,
+                response=response,
+                failure_message=failure_message,
+            )
+        except Exception as exc:
+            logger.warning("Direct Agent response tracking degraded: %s", type(exc).__name__)
 
     @staticmethod
     def _conversation_ref(context: EventContext) -> str:

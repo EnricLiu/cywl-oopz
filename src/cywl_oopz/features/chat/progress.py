@@ -5,7 +5,8 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
+from uuid import UUID
 
 from .models import ChatResponse
 
@@ -171,6 +172,29 @@ class ProgressSink(Protocol):
         """Observe one lifecycle event without controlling Agent success."""
 
 
+@runtime_checkable
+class RunTraceSink(Protocol):
+    """Optional durable run linkage implemented by tracked presentations."""
+
+    async def bind_run(self, run_id: UUID) -> None:
+        """Link a run as soon as its running record exists."""
+
+
+@runtime_checkable
+class DirectResponseTraceSink(Protocol):
+    """Optional trace hook for non-live replies sent by the controller."""
+
+    async def record_delivery(
+        self,
+        message: Any,
+        *,
+        response: ChatResponse | None = None,
+        failure_message: str = "",
+        cancelled: bool = False,
+    ) -> None:
+        """Bind one already-sent direct reply to the current run and snapshot."""
+
+
 class ConversationProgressSession(ProgressSink, Protocol):
     """Lifecycle owned by one user-visible conversational request."""
 
@@ -207,6 +231,9 @@ class NoopProgressSession:
 
     async def emit(self, event: ConversationProgressEvent) -> None:
         del event
+
+    async def bind_run(self, run_id: UUID) -> None:
+        del run_id
 
     async def complete(self, response: ChatResponse) -> None:
         del response

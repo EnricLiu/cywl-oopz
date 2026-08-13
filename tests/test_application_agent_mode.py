@@ -96,7 +96,7 @@ async def test_composition_root_routes_chat_and_provider_command_by_agent_flag(
     assert "tool" in {command.name for command in agent_application.commands.commands}
     assert "memory" in {command.name for command in agent_application.commands.commands}
     assert "skills" in {command.name for command in agent_application.commands.commands}
-    assert {"init", "role", "whoami"}.issubset(
+    assert {"debug", "init", "role", "whoami"}.issubset(
         {command.name for command in agent_application.commands.commands}
     )
     assert {

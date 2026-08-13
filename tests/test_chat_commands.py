@@ -44,8 +44,9 @@ class FakeContext:
     event: object
     replies: list[str] = field(default_factory=list)
 
-    async def reply(self, text: str) -> None:
+    async def reply(self, text: str):
         self.replies.append(text)
+        return SimpleNamespace(message_id=f"reply-{len(self.replies)}", timestamp="123")
 
 
 def context_for(message: FakeMessage, *, private: bool = False) -> FakeContext:
@@ -207,6 +208,24 @@ class OwnedPresentationFactory:
         return self.presentation
 
 
+class DirectPresentation(OwnedPresentation):
+    owns_message = False
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.deliveries: list[tuple[object, ChatResponse | None, str, bool]] = []
+
+    async def record_delivery(
+        self,
+        message: object,
+        *,
+        response: ChatResponse | None = None,
+        failure_message: str = "",
+        cancelled: bool = False,
+    ) -> None:
+        self.deliveries.append((message, response, failure_message, cancelled))
+
+
 class ProgressChatService:
     enabled = True
 
@@ -236,6 +255,31 @@ async def test_owned_presentation_replaces_the_normal_final_reply() -> None:
     assert [event.kind for event in presentation.events] == [ProgressKind.THINKING]
     assert presentation.completed is not None
     assert presentation.completed.content == "只有这一条最终回答"
+    assert presentation.closed is True
+
+
+@pytest.mark.asyncio
+async def test_direct_presentation_records_the_sent_final_reply() -> None:
+    presentation = DirectPresentation()
+    router = CommandRouter("/")
+    router.register(
+        ChatCommand(
+            ProgressChatService(),
+            OwnedPresentationFactory(presentation),
+        )
+    )
+    message = FakeMessage("/chat hello")
+    context = context_for(message)
+
+    await router.dispatch(message, context)
+
+    assert context.replies == ["只有这一条最终回答"]
+    assert len(presentation.deliveries) == 1
+    sent, response, failure, cancelled = presentation.deliveries[0]
+    assert sent.message_id == "reply-1"
+    assert response is not None and response.content == "只有这一条最终回答"
+    assert failure == ""
+    assert cancelled is False
     assert presentation.closed is True
 
 

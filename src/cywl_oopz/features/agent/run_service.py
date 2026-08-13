@@ -16,7 +16,7 @@ from cywl_oopz.core.errors import (
 )
 from cywl_oopz.core.health import HealthRegistry, HealthState
 from cywl_oopz.core.observability import exception_kind, opaque_ref
-from cywl_oopz.features.chat.progress import ProgressSink
+from cywl_oopz.features.chat.progress import ProgressSink, RunTraceSink
 
 from .models import (
     AgentIdentity,
@@ -104,6 +104,15 @@ class AgentRunService:
                 heartbeat_at=started_at,
             )
         )
+        if isinstance(progress, RunTraceSink):
+            try:
+                await progress.bind_run(run_id)
+            except Exception as exc:
+                logger.warning(
+                    "Could not bind Agent run to progress session: run=%s error=%s",
+                    opaque_ref(str(run_id)),
+                    exception_kind(exc),
+                )
         await self._messages.append(
             spec.thread.id,
             run_id,

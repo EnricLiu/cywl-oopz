@@ -21,8 +21,17 @@ from .features.access.administration import RoleAdministrationService
 from .features.access.commands import RoleCommand, RoleCommandAccess, WhoAmICommand
 from .features.access.repository import SqlAlchemyRoleBindingRepository
 from .features.access.service import AuthorizationService
-from .features.admin.commands import InitCommand, InitCommandAccess
+from .features.admin.commands import (
+    DebugCommand,
+    DebugCommandAccess,
+    InitCommand,
+    InitCommandAccess,
+)
 from .features.admin.initialization import ChannelInitializationService
+from .features.admin.outbound_repository import (
+    SqlAlchemyAgentDiagnosticRepository,
+    SqlAlchemyOutboundMessageRepository,
+)
 from .features.admin.repository import SqlAlchemyChannelInitializationRepository
 from .features.agent.catalog import ProviderCatalogAdminService, ReloadableProviderCatalog
 from .features.agent.commands import (
@@ -157,12 +166,14 @@ from .integrations.media.ytdlp_runner import YtDlpCapabilityProbe, YtDlpProcessR
 from .integrations.oopz.agent_presenter import OopzAgentPresenterFactory
 from .integrations.oopz.channel_catalog import OopzAreaChannelCatalog
 from .integrations.oopz.chat_invocation import OopzChatInvocationFactory
+from .integrations.oopz.diagnostic_renderer import OopzAgentDiagnosticRenderer
 from .integrations.oopz.editable_messages import OopzEditableMessageGateway
 from .integrations.oopz.master_audio import OopzMasterPcmOutputFactory
 from .integrations.oopz.message_renderer import OopzMessageRenderer
 from .integrations.oopz.music import OopzMusicVoiceGateway
 from .integrations.oopz.reactions import OopzReactionGateway
 from .integrations.oopz.skill_sharing import OopzSkillShareNotifier
+from .integrations.oopz.tracked_context import TrackedMessageContext
 from .integrations.oopz.voice_capabilities import OopzVoiceCapabilityGate
 from .integrations.oopz.voice_channel_session import OopzVoiceChannelSessionManager
 from .integrations.oopz.voice_conversation import (
@@ -206,6 +217,8 @@ class BotApplication:
             self.authorization,
         )
         self.bot = OopzBot(settings.oopz)
+        self.outbound_messages = SqlAlchemyOutboundMessageRepository(self.database.session_factory)
+        self.agent_diagnostics = SqlAlchemyAgentDiagnosticRepository(self.database.session_factory)
         self.channel_initialization_repository = SqlAlchemyChannelInitializationRepository(
             self.database.session_factory
         )
@@ -232,7 +245,10 @@ class BotApplication:
             master_factory=self.master_audio,
         )
         self.chat_invocations = OopzChatInvocationFactory(settings.oopz.person_uid)
-        self.editable_messages = OopzEditableMessageGateway(self.bot)
+        self.editable_messages = OopzEditableMessageGateway(
+            self.bot,
+            self.outbound_messages,
+        )
         self.agent_presenters = OopzAgentPresenterFactory(
             self.editable_messages,
             OopzMessageRenderer(),
@@ -477,6 +493,12 @@ class BotApplication:
                 name for name in enabled_agent_tools if name not in SKILL_AUTHORING_AGENT_TOOLS
             )
         self.agent_tool_registry = ToolRegistry(agent_tools)
+        self.agent_diagnostic_renderer = OopzAgentDiagnosticRenderer(
+            {
+                descriptor.name: descriptor.display_name
+                for descriptor in self.agent_tool_registry.descriptors()
+            }
+        )
         self.agent_skill_availability = SkillAvailabilityService(
             max_available_skills=settings.agent.max_available_skills,
         )
@@ -685,6 +707,10 @@ class BotApplication:
             access=InitCommandAccess(),
         )
         self.commands.register(
+            DebugCommand(self.agent_diagnostics, self.agent_diagnostic_renderer),
+            access=DebugCommandAccess(),
+        )
+        self.commands.register(
             ChatCommand(
                 self.chat,
                 self.agent_presenters,
@@ -888,6 +914,7 @@ class BotApplication:
 
     async def _on_message(self, message: OopzMessage, context: EventContext) -> None:
         """Route short commands inline and own slow LLM work in supervised tasks."""
+        context = TrackedMessageContext(context, self.outbound_messages)
         logger.debug(
             "Received OOPZ message: scope=%s conversation=%s has_text=%s",
             "private" if getattr(context.event, "is_private", False) else "channel",

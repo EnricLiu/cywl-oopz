@@ -60,6 +60,7 @@ def address(scope: str = "channel") -> MessageAddress:
         channel_id="channel",
         target_person_id="person" if scope == "private" else "",
         reference_message_id="source",
+        owner_person_id="person",
     )
 
 
