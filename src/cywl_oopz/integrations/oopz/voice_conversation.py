@@ -5,8 +5,8 @@ from __future__ import annotations
 import logging
 
 from oopz_sdk import OopzBot
-from oopz_sdk.events.context import EventContext
 
+from cywl_oopz.commands.models import CommandRequest
 from cywl_oopz.core.observability import opaque_ref
 from cywl_oopz.features.audio.models import (
     AudioChannelKey,
@@ -66,13 +66,13 @@ class OopzVoiceCommandPresenter:
         self._status_edit_interval = status_edit_interval_seconds
         self._active_display: VoiceSessionStatusSink | None = None
 
-    async def open_session(self, context: EventContext) -> VoiceSessionStatusSink:
+    async def open_session(self, request: CommandRequest) -> VoiceSessionStatusSink:
         if self._editable_messages is None:
             return NoopVoiceSessionStatusSink()
         try:
             display = OopzVoiceStatusMessage(
                 self._editable_messages,
-                MessageAddress.from_oopz_context(context),
+                MessageAddress.from_command_request(request),
                 edit_interval_seconds=self._status_edit_interval,
             )
             await display.open()
@@ -85,18 +85,20 @@ class OopzVoiceCommandPresenter:
             )
             return NoopVoiceSessionStatusSink()
 
-    async def started(self, context: EventContext, status: VoiceSessionStatus) -> None:
-        await context.reply(f"🎙️ **初音未来语音** · {self._label(status)}")
+    async def started(self, request: CommandRequest, status: VoiceSessionStatus) -> None:
+        await request.responder.reply(f"🎙️ **初音未来语音** · {self._label(status)}")
 
-    async def stopped(self, context: EventContext, status: VoiceSessionStatus) -> None:
+    async def stopped(self, request: CommandRequest, status: VoiceSessionStatus) -> None:
         if self._active_display is not None and self._active_display.owns_message:
             self._active_display = None
             return
-        await context.reply(f"🎵 **语音会话结束** · {self._duration(status.elapsed_seconds)}")
+        await request.responder.reply(
+            f"🎵 **语音会话结束** · {self._duration(status.elapsed_seconds)}"
+        )
 
-    async def status(self, context: EventContext, status: VoiceSessionStatus) -> None:
+    async def status(self, request: CommandRequest, status: VoiceSessionStatus) -> None:
         if not status.active:
-            await context.reply("🎙️ **初音未来语音** · 当前空闲")
+            await request.responder.reply("🎙️ **初音未来语音** · 当前空闲")
             return
         channel = "正在定位频道"
         if status.voice_channel is not None:
@@ -104,49 +106,39 @@ class OopzVoiceCommandPresenter:
                 f"频道 {opaque_ref(status.voice_channel.area_id, status.voice_channel.channel_id)}"
             )
         mixing = " · 与音乐混流中" if status.music_mixing else ""
-        await context.reply(
+        await request.responder.reply(
             f"🎙️ **初音未来语音** · {self._label(status)}\n"
             f"{self._duration(status.elapsed_seconds)} · {channel}{mixing}"
         )
 
-    async def error(self, context: EventContext, message: str) -> None:
-        await context.reply(f"⚠️ **语音** {message}")
+    async def error(self, request: CommandRequest, message: str) -> None:
+        await request.responder.reply(f"⚠️ **语音** {message}")
 
     async def models(
         self,
-        context: EventContext,
+        request: CommandRequest,
         models: tuple[SelectableVoiceModel, ...],
     ) -> None:
         if not models:
-            await context.reply("🎙️ **语音模型** · 暂无可选模型")
+            await request.responder.reply("🎙️ **语音模型** · 暂无可选模型")
             return
         lines = ["🎙️ **语音模型**"]
         lines.extend(
             f"{'✅' if model.selected else '▫️'} {model.selector} · {model.display_name}"
             for model in models
         )
-        await context.reply("\n".join(lines))
+        await request.responder.reply("\n".join(lines))
 
-    async def model_selected(self, context: EventContext, model: SelectableVoiceModel) -> None:
-        await context.reply(f"✅ **语音模型** {model.selector} · 下次会话生效")
+    async def model_selected(self, request: CommandRequest, model: SelectableVoiceModel) -> None:
+        await request.responder.reply(f"✅ **语音模型** {model.selector} · 下次会话生效")
 
     async def voice_selected(
         self,
-        context: EventContext,
+        request: CommandRequest,
         selection: VoiceUserSelection,
     ) -> None:
         voice = selection.voice_id or "模型默认音色"
-        await context.reply(f"🎵 **语音音色** {voice} · 下次会话生效")
-
-    async def usage(self, context: EventContext, prefix: str) -> None:
-        await context.reply(
-            "语音命令：\n"
-            f"{prefix}voice start · 开始语音对话\n"
-            f"{prefix}voice stop · 结束语音对话\n"
-            f"{prefix}voice status · 查看当前状态\n"
-            f"{prefix}voice model [provider/model] · 查看或选择模型\n"
-            f"{prefix}voice voice [音色] · 查看或选择音色"
-        )
+        await request.responder.reply(f"🎵 **语音音色** {voice} · 下次会话生效")
 
     @classmethod
     def _label(cls, status: VoiceSessionStatus) -> str:

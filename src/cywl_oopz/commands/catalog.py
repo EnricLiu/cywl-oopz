@@ -49,7 +49,7 @@ class CommandSpec:
 
     @classmethod
     def from_command(cls, command: Any) -> CommandSpec:
-        """Adapt legacy command attributes into an explicit complete spec."""
+        """Build explicit metadata from a typed handler's declarative attributes."""
         name = str(command.name)
         return cls(
             name=name,

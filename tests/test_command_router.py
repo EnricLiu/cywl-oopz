@@ -4,7 +4,15 @@ from types import SimpleNamespace
 import pytest
 
 from cywl_oopz.commands.builtin import HelpCommand, PingCommand
-from cywl_oopz.commands.router import AccessRequirement, CommandRouter, ParsedCommand
+from cywl_oopz.commands.catalog import CommandSpec
+from cywl_oopz.commands.definitions import (
+    AccessRequirement,
+    CommandDefinition,
+    PublicCommandAuthorization,
+)
+from cywl_oopz.commands.models import CommandRequest, CommandText
+from cywl_oopz.commands.parsing import CommandTextParser
+from cywl_oopz.commands.router import CommandRouter
 from cywl_oopz.core.errors import DatabaseError
 from cywl_oopz.features.access.models import (
     AccessResource,
@@ -14,6 +22,7 @@ from cywl_oopz.features.access.models import (
     RoleBindingScope,
 )
 from cywl_oopz.features.access.service import AuthorizationService
+from cywl_oopz.testing.commands import dispatch_command
 
 
 @dataclass
@@ -31,9 +40,22 @@ class EchoCommand:
     description = "Echo input."
 
     def __init__(self) -> None:
-        self.received: ParsedCommand | None = None
+        self.received: CommandText | None = None
 
-    async def execute(self, command: ParsedCommand, _context: object) -> None:
+    def definition(self, authorization=None) -> CommandDefinition[CommandText]:
+        return CommandDefinition(
+            CommandSpec.from_command(self),
+            self,
+            self,
+            authorization or PublicCommandAuthorization(),
+        )
+
+    def parse(self, request: CommandRequest) -> CommandText:
+        assert request.text is not None
+        return request.text
+
+    async def handle(self, request: CommandRequest, command: CommandText) -> None:
+        del request
         self.received = command
 
 
@@ -53,17 +75,17 @@ class UnavailableRoleBindings:
         raise DatabaseError("unavailable")
 
 
-class GlobalRebootAccess:
-    def is_available(self, invocation):
-        del invocation
+class GlobalRebootAuthorization:
+    def is_available(self, request):
+        del request
         return True
 
-    def requirement(self, command, invocation):
-        del command, invocation
+    def requirement(self, request, arguments):
+        del request, arguments
         return AccessRequirement(Permission.BOT_REBOOT, AccessResource.global_resource())
 
-    def visibility_requirement(self, invocation):
-        del invocation
+    def visibility_requirement(self, request):
+        del request
         return AccessRequirement(Permission.BOT_REBOOT, AccessResource.global_resource())
 
 
@@ -82,33 +104,37 @@ class FakeContext:
 
 
 def test_parse_requires_prefix() -> None:
-    router = CommandRouter("/")
+    parser = CommandTextParser("/")
 
-    assert router.parse("hello") is None
-    assert router.parse("/") is None
-    assert router.parse("/ECHO one two") == ParsedCommand("echo", ("one", "two"))
+    assert parser.parse("hello") is None
+    assert parser.parse("/") is None
+    parsed = parser.parse("/ECHO one two")
+    assert parsed is not None
+    assert parsed.name == "echo"
+    assert parsed.tokens == ("one", "two")
 
 
 def test_parse_preserves_raw_json_argument_spacing() -> None:
-    router = CommandRouter("/")
+    parser = CommandTextParser("/")
 
-    parsed = router.parse('/tool echo_debug {"value": "one  two"}')
+    parsed = parser.parse('/tool echo_debug {"value": "one  two"}')
 
     assert parsed is not None
     assert parsed.name == "tool"
-    assert parsed.raw_arguments == 'echo_debug {"value": "one  two"}'
+    assert parsed.raw_tail == 'echo_debug {"value": "one  two"}'
 
 
 @pytest.mark.asyncio
 async def test_dispatch_executes_registered_command() -> None:
     router = CommandRouter("/")
     command = EchoCommand()
-    router.register(command)
+    router.register_definition(command.definition())
 
-    consumed = await router.dispatch(FakeMessage("/echo hello"), object())
+    consumed = await dispatch_command(router, FakeMessage("/echo hello"), object())
 
     assert consumed is True
-    assert command.received == ParsedCommand("echo", ("hello",))
+    assert command.received is not None
+    assert command.received.tokens == ("hello",)
 
 
 @pytest.mark.asyncio
@@ -117,7 +143,7 @@ async def test_typed_ping_rejects_extra_arguments() -> None:
     router.register_definition(PingCommand().definition())
     context = FakeContext()
 
-    await router.dispatch(FakeMessage("/ping extra"), context)
+    await dispatch_command(router, FakeMessage("/ping extra"), context)
 
     assert context.replies == ["此命令不接受额外参数。\n用法：/ping"]
 
@@ -126,19 +152,17 @@ async def test_typed_ping_rejects_extra_arguments() -> None:
 async def test_dispatch_prefers_raw_text_before_plain_text_removes_mentions() -> None:
     router = CommandRouter("/")
     command = EchoCommand()
-    router.register(command)
+    router.register_definition(command.definition())
     message = FakeMessage(
         "/echo leftright",
         text="/echo left(met)target(met)right",
     )
 
-    consumed = await router.dispatch(message, object())
+    consumed = await dispatch_command(router, message, object())
 
     assert consumed is True
-    assert command.received == ParsedCommand(
-        "echo",
-        ("left(met)target(met)right",),
-    )
+    assert command.received is not None
+    assert command.received.tokens == ("left(met)target(met)right",)
 
 
 @pytest.mark.asyncio
@@ -158,10 +182,10 @@ async def test_restricted_dispatch_denies_without_matching_global_role() -> None
     router = CommandRouter("/", authorizer)
     command = EchoCommand()
     command.name = "reboot"
-    router.register(command, access=GlobalRebootAccess())
+    router.register_definition(command.definition(GlobalRebootAuthorization()))
     context = FakeContext()
 
-    consumed = await router.dispatch(FakeMessage("/reboot"), context)
+    consumed = await dispatch_command(router, FakeMessage("/reboot"), context)
 
     assert consumed is True
     assert command.received is None
@@ -172,15 +196,15 @@ async def test_restricted_dispatch_denies_without_matching_global_role() -> None
 async def test_help_filters_restricted_commands_with_same_policy() -> None:
     authorizer = AuthorizationService(FakeRoleBindings())
     router = CommandRouter("/", authorizer)
-    router.register(EchoCommand())
+    router.register_definition(EchoCommand().definition())
     reboot = EchoCommand()
     reboot.name = "reboot"
     reboot.description = "Restart."
-    router.register(reboot, access=GlobalRebootAccess())
+    router.register_definition(reboot.definition(GlobalRebootAuthorization()))
     router.register_definition(HelpCommand(router).definition())
     context = FakeContext()
 
-    await router.dispatch(FakeMessage("/help"), context)
+    await dispatch_command(router, FakeMessage("/help"), context)
 
     assert "/echo" in context.replies[0]
     assert "/help" in context.replies[0]
@@ -194,11 +218,11 @@ async def test_help_renders_dynamic_prefix_and_detailed_command_metadata() -> No
     echo.category = "测试"
     echo.usage = ("echo <内容>",)
     echo.examples = ("echo 你好",)
-    router.register(echo)
+    router.register_definition(echo.definition())
     router.register_definition(HelpCommand(router).definition())
     context = FakeContext()
 
-    await router.dispatch(FakeMessage("!help echo"), context)
+    await dispatch_command(router, FakeMessage("!help echo"), context)
 
     assert "**!echo**" in context.replies[0]
     assert "!echo <内容>" in context.replies[0]
@@ -209,12 +233,12 @@ async def test_help_renders_dynamic_prefix_and_detailed_command_metadata() -> No
 @pytest.mark.asyncio
 async def test_help_rejects_extra_arguments_with_dynamic_prefix() -> None:
     router = CommandRouter("!")
-    router.register(HelpCommand(router))
+    router.register_definition(HelpCommand(router).definition())
     context = FakeContext()
 
-    await router.dispatch(FakeMessage("!help one two"), context)
+    await dispatch_command(router, FakeMessage("!help one two"), context)
 
-    assert context.replies == ["用法：!help [命令]"]
+    assert context.replies == ["用法：\n!help\n!help <命令>"]
 
 
 @pytest.mark.asyncio
@@ -225,11 +249,11 @@ async def test_help_fresh_reads_role_changes_on_every_invocation() -> None:
     reboot = EchoCommand()
     reboot.name = "reboot"
     reboot.description = "Restart."
-    router.register(reboot, access=GlobalRebootAccess())
-    router.register(HelpCommand(router))
+    router.register_definition(reboot.definition(GlobalRebootAuthorization()))
+    router.register_definition(HelpCommand(router).definition())
 
     before = FakeContext()
-    await router.dispatch(FakeMessage("/help"), before)
+    await dispatch_command(router, FakeMessage("/help"), before)
     assert "/reboot" not in before.replies[0]
 
     bindings.records = (
@@ -240,12 +264,12 @@ async def test_help_fresh_reads_role_changes_on_every_invocation() -> None:
         ),
     )
     after_grant = FakeContext()
-    await router.dispatch(FakeMessage("/help"), after_grant)
+    await dispatch_command(router, FakeMessage("/help"), after_grant)
     assert "/reboot" in after_grant.replies[0]
 
     bindings.records = ()
     after_revoke = FakeContext()
-    await router.dispatch(FakeMessage("/help"), after_revoke)
+    await dispatch_command(router, FakeMessage("/help"), after_revoke)
     assert "/reboot" not in after_revoke.replies[0]
 
 
@@ -254,10 +278,10 @@ async def test_restricted_dispatch_fails_closed_when_role_store_is_unavailable()
     router = CommandRouter("/", AuthorizationService(UnavailableRoleBindings()))
     command = EchoCommand()
     command.name = "reboot"
-    router.register(command, access=GlobalRebootAccess())
+    router.register_definition(command.definition(GlobalRebootAuthorization()))
     context = FakeContext()
 
-    consumed = await router.dispatch(FakeMessage("/reboot"), context)
+    consumed = await dispatch_command(router, FakeMessage("/reboot"), context)
 
     assert consumed is True
     assert command.received is None

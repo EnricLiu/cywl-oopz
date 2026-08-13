@@ -25,7 +25,7 @@ from cywl_oopz.commands.models import (
     CommandTrigger,
     DispatchStatus,
 )
-from cywl_oopz.commands.router import CommandRouter, ParsedCommand
+from cywl_oopz.commands.router import CommandRouter
 
 
 @dataclass
@@ -79,22 +79,6 @@ class RaisingHandler:
         raise RuntimeError("secret internal failure")
 
 
-class LegacyBlockingCommand:
-    name = "legacy-slow"
-    description = "Legacy slow command."
-    category = "test"
-    usage = ("legacy-slow",)
-
-    def __init__(self) -> None:
-        self.started = asyncio.Event()
-        self.release = asyncio.Event()
-
-    async def execute(self, command: ParsedCommand, context: object) -> None:
-        del command, context
-        self.started.set()
-        await self.release.wait()
-
-
 def definition(
     name: str,
     handler: object,
@@ -135,35 +119,12 @@ async def test_background_command_returns_started_without_blocking_next_dispatch
     slow_request, _ = command_request("slow")
     fast_request, fast_responder = command_request("fast")
 
-    slow_outcome = await router.dispatch_request(slow_request, object())
-    fast_outcome = await router.dispatch_request(fast_request, object())
+    slow_outcome = await router.dispatch_request(slow_request)
+    fast_outcome = await router.dispatch_request(fast_request)
 
     assert slow_outcome.status is DispatchStatus.STARTED
     assert fast_outcome.status is DispatchStatus.COMPLETED
     assert fast_responder.replies == ["fast complete"]
-    await handler.started.wait()
-    handler.release.set()
-    await wait_for_idle(supervisor)
-    await supervisor.close()
-
-
-@pytest.mark.asyncio
-async def test_legacy_background_policy_is_supervised_during_migration() -> None:
-    supervisor = CommandTaskSupervisor(drain_timeout_seconds=0)
-    handler = LegacyBlockingCommand()
-    router = CommandRouter("/", supervisor=supervisor)
-    router.register(
-        handler,
-        execution=CommandExecutionPolicy(
-            ExecutionMode.BACKGROUND,
-            timeout_seconds=1.0,
-        ),
-    )
-    request, _ = command_request("legacy-slow")
-
-    outcome = await router.dispatch_request(request, object())
-
-    assert outcome.status is DispatchStatus.STARTED
     await handler.started.wait()
     handler.release.set()
     await wait_for_idle(supervisor)
@@ -184,7 +145,7 @@ async def test_command_timeout_is_mapped_to_one_safe_failure() -> None:
     )
     request, responder = command_request("slow")
 
-    outcome = await router.dispatch_request(request, object())
+    outcome = await router.dispatch_request(request)
 
     assert outcome.status is DispatchStatus.FAILED
     assert responder.replies == ["命令执行超时，请稍后重试。"]
@@ -197,7 +158,7 @@ async def test_unexpected_handler_error_is_consumed_and_not_exposed() -> None:
     router.register_definition(definition("broken", RaisingHandler(), mode=ExecutionMode.INLINE))
     request, responder = command_request("broken")
 
-    outcome = await router.dispatch_request(request, object())
+    outcome = await router.dispatch_request(request)
 
     assert outcome.status is DispatchStatus.FAILED
     assert responder.replies == ["命令执行失败，请稍后重试。"]

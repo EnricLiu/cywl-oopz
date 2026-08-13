@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -100,6 +101,6 @@ async def test_voice_status_command_mentions_active_music_mix() -> None:
         metrics={"audio_music_participant_active": 1},
     )
 
-    await OopzVoiceCommandPresenter().status(context, status)
+    await OopzVoiceCommandPresenter().status(SimpleNamespace(responder=context), status)
 
     assert "与音乐混流中" in context.replies[0]

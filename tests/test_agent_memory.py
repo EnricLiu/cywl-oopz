@@ -11,6 +11,7 @@ from cywl_oopz.commands.router import CommandRouter
 from cywl_oopz.features.agent.commands import MemoryCommand
 from cywl_oopz.features.agent.memory import MemoryItem, MemoryService
 from cywl_oopz.settings import AgentSettings
+from cywl_oopz.testing.commands import dispatch_command
 
 
 class InMemoryRepository:
@@ -162,7 +163,7 @@ async def test_memory_command_remember_list_off_and_forget_all() -> None:
     ):
         message = command_message(text)
         target_context.event.message = message
-        await router.dispatch(message, target_context)
+        await dispatch_command(router, message, target_context)
 
     assert "记忆 ID" in remember_context.replies[0]
     assert "喜欢 Lo-fi" in list_context.replies[0]
@@ -172,5 +173,5 @@ async def test_memory_command_remember_list_off_and_forget_all() -> None:
     disabled_context = FakeContext()
     message = command_message("/memory remember new")
     disabled_context.event.message = message
-    await router.dispatch(message, disabled_context)
+    await dispatch_command(router, message, disabled_context)
     assert disabled_context.replies == ["长期记忆当前已关闭；请先使用 /memory on。"]

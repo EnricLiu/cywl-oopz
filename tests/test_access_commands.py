@@ -22,6 +22,7 @@ from cywl_oopz.features.access.models import (
 )
 from cywl_oopz.features.access.service import AuthorizationService
 from cywl_oopz.integrations.oopz.command_requests import OopzCommandRequestFactory
+from cywl_oopz.testing.commands import dispatch_command
 
 
 @dataclass
@@ -133,7 +134,7 @@ async def test_whoami_reports_exact_message_sender_id() -> None:
     message = FakeMessage("/whoami", "person-42")
     context = FakeContext(message)
 
-    assert await router.dispatch(message, context)
+    assert await dispatch_command(router, message, context)
 
     assert context.replies == ["你的 OOPZ ID：person-42"]
 
@@ -144,7 +145,7 @@ async def test_bootstrap_owner_grants_area_admin_and_change_is_immediate() -> No
     grant = FakeMessage("/role grant admin area", "owner", mentions=("target",))
     grant_context = FakeContext(grant)
 
-    assert await router.dispatch(grant, grant_context)
+    assert await dispatch_command(router, grant, grant_context)
 
     assert grant_context.replies == ["已授予：admin · area"]
     assert repository.records == [
@@ -159,7 +160,7 @@ async def test_bootstrap_owner_grants_area_admin_and_change_is_immediate() -> No
 
     me = FakeMessage("/role me", "target")
     me_context = FakeContext(me)
-    assert await router.dispatch(me, me_context)
+    assert await dispatch_command(router, me, me_context)
     assert "当前角色：admin" in me_context.replies[0]
     assert "channel.initialize" in me_context.replies[0]
     assert "rbac.manage" not in me_context.replies[0]
@@ -177,7 +178,7 @@ async def test_role_grant_uses_mention_list_and_ignores_oopz_inline_marker() -> 
     )
     context = FakeContext(message)
 
-    assert await router.dispatch(message, context)
+    assert await dispatch_command(router, message, context)
 
     assert context.replies == ["已授予：admin · area"]
     assert repository.records == [
@@ -231,7 +232,7 @@ async def test_area_admin_cannot_grant_roles() -> None:
     )
     context = FakeContext(message)
 
-    assert await router.dispatch(message, context)
+    assert await dispatch_command(router, message, context)
 
     assert context.replies == ["你没有执行此操作的权限。"]
     assert len(repository.records) == 1
@@ -243,7 +244,7 @@ async def test_role_mutation_requires_one_real_mention() -> None:
     message = FakeMessage("/role grant admin area", "owner")
     context = FakeContext(message)
 
-    assert await router.dispatch(message, context)
+    assert await dispatch_command(router, message, context)
 
     assert context.replies == ["请在当前消息中准确 @ 一位目标用户。"]
     assert repository.records == []
@@ -259,7 +260,7 @@ async def test_bootstrap_owner_cannot_be_revoked_from_chat() -> None:
     )
     context = FakeContext(message)
 
-    assert await router.dispatch(message, context)
+    assert await dispatch_command(router, message, context)
 
     assert context.replies == ["Bootstrap owner 不能通过命令撤销，请修改本地环境配置。"]
     assert repository.records == []

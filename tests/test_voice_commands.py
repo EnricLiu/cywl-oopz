@@ -18,6 +18,7 @@ from cywl_oopz.integrations.voice.fake import (
     FakeVoiceSessionRuntimeFactory,
 )
 from cywl_oopz.settings import VoiceSettings
+from cywl_oopz.testing.commands import dispatch_command
 
 
 @dataclass
@@ -58,7 +59,9 @@ def command_fixture():
         FakeVoiceSessionRepository(),
     )
     router = CommandRouter("!")
-    router.register(VoiceCommand(service, configurations, OopzVoiceCommandPresenter(), "!"))
+    router.register_definition(
+        VoiceCommand(service, configurations, OopzVoiceCommandPresenter()).definition()
+    )
     return router, service
 
 
@@ -99,18 +102,18 @@ async def test_voice_command_start_status_and_stop_flow() -> None:
 
     start_message = FakeMessage("!voice start")
     start_context = context(start_message)
-    await router.dispatch(start_message, start_context)
+    await dispatch_command(router, start_message, start_context)
     assert "正在听" in start_context.replies[0]
 
     status_message = FakeMessage("!voice status")
     status_context = context(status_message)
-    await router.dispatch(status_message, status_context)
+    await dispatch_command(router, status_message, status_context)
     assert "正在听" in status_context.replies[0]
     assert "频道" in status_context.replies[0]
 
     stop_message = FakeMessage("!voice stop")
     stop_context = context(stop_message)
-    await router.dispatch(stop_message, stop_context)
+    await dispatch_command(router, stop_message, stop_context)
     assert "语音会话结束" in stop_context.replies[0]
     await service.aclose()
 
@@ -132,14 +135,14 @@ async def test_voice_command_uses_one_editable_message_for_start_to_stop() -> No
     gateway = FakeEditableGateway()
     presenter = OopzVoiceCommandPresenter(gateway, status_edit_interval_seconds=0.001)
     router = CommandRouter("!")
-    router.register(VoiceCommand(service, configurations, presenter, "!"))
+    router.register_definition(VoiceCommand(service, configurations, presenter).definition())
 
     start_context = context(FakeMessage("!voice start"))
-    await router.dispatch(start_context.event.message, start_context)
+    await dispatch_command(router, start_context.event.message, start_context)
     await eventually(lambda: any("正在听" in item for item in gateway.replaced))
 
     stop_context = context(FakeMessage("!voice stop"))
-    await router.dispatch(stop_context.event.message, stop_context)
+    await dispatch_command(router, stop_context.event.message, stop_context)
 
     assert len(gateway.created) == 1
     assert start_context.replies == []
@@ -166,10 +169,10 @@ async def test_voice_command_edits_start_placeholder_with_typed_failure() -> Non
     gateway = FakeEditableGateway()
     presenter = OopzVoiceCommandPresenter(gateway, status_edit_interval_seconds=0.001)
     router = CommandRouter("!")
-    router.register(VoiceCommand(service, configurations, presenter, "!"))
+    router.register_definition(VoiceCommand(service, configurations, presenter).definition())
 
     start_context = context(FakeMessage("!voice start"))
-    await router.dispatch(start_context.event.message, start_context)
+    await dispatch_command(router, start_context.event.message, start_context)
 
     assert len(gateway.created) == 1
     assert start_context.replies == []
@@ -182,12 +185,12 @@ async def test_voice_command_renders_usage_and_private_channel_error() -> None:
     router, service = command_fixture()
     invalid = FakeMessage("!voice wat")
     invalid_context = context(invalid)
-    await router.dispatch(invalid, invalid_context)
-    assert "!voice start" in invalid_context.replies[0]
+    await dispatch_command(router, invalid, invalid_context)
+    assert "!voice <start|stop|status>" in invalid_context.replies[0]
 
     private = FakeMessage("!voice start")
     private_context = context(private, private=True)
-    await router.dispatch(private, private_context)
+    await dispatch_command(router, private, private_context)
     assert "服务器文字频道" in private_context.replies[0]
     await service.aclose()
 
@@ -197,18 +200,18 @@ async def test_voice_command_lists_and_changes_next_session_model_and_voice() ->
     router, service = command_fixture()
 
     model_context = context(FakeMessage("!voice model"))
-    await router.dispatch(model_context.event.message, model_context)
+    await dispatch_command(router, model_context.event.message, model_context)
     assert "fake/realtime" in model_context.replies[0]
 
     select_context = context(FakeMessage("!voice model fake/realtime"))
-    await router.dispatch(select_context.event.message, select_context)
+    await dispatch_command(router, select_context.event.message, select_context)
     assert "下次会话生效" in select_context.replies[0]
 
     voice_context = context(FakeMessage("!voice voice Cherry"))
-    await router.dispatch(voice_context.event.message, voice_context)
+    await dispatch_command(router, voice_context.event.message, voice_context)
     assert "Cherry" in voice_context.replies[0]
 
     invalid_voice_context = context(FakeMessage("!voice voice " + "x" * 129))
-    await router.dispatch(invalid_voice_context.event.message, invalid_voice_context)
+    await dispatch_command(router, invalid_voice_context.event.message, invalid_voice_context)
     assert "最多 128" in invalid_voice_context.replies[0]
     await service.aclose()

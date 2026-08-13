@@ -5,9 +5,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from cywl_oopz.commands.models import CommandScope, DispatchStatus
+from cywl_oopz.commands.catalog import CommandSpec
+from cywl_oopz.commands.definitions import CommandDefinition, PublicCommandAuthorization
+from cywl_oopz.commands.models import CommandRequest, CommandScope, CommandText, DispatchStatus
 from cywl_oopz.commands.parsing import CommandTextParser
-from cywl_oopz.commands.router import CommandRouter, ParsedCommand
+from cywl_oopz.commands.router import CommandRouter
 from cywl_oopz.integrations.oopz.command_requests import OopzCommandRequestFactory
 
 
@@ -59,9 +61,22 @@ class EchoCommand:
     description = "Echo input."
 
     def __init__(self) -> None:
-        self.received: ParsedCommand | None = None
+        self.received: CommandText | None = None
 
-    async def execute(self, command: ParsedCommand, _context: object) -> None:
+    def definition(self) -> CommandDefinition[CommandText]:
+        return CommandDefinition(
+            CommandSpec("echo", "Echo input.", "测试", ("echo <内容>",)),
+            self,
+            self,
+            PublicCommandAuthorization(),
+        )
+
+    def parse(self, request: CommandRequest) -> CommandText:
+        assert request.text is not None
+        return request.text
+
+    async def handle(self, request: CommandRequest, command: CommandText) -> None:
+        del request
         self.received = command
 
 
@@ -140,35 +155,35 @@ def test_oopz_factory_ignores_non_command_before_validating_metadata() -> None:
 @pytest.mark.asyncio
 async def test_dispatch_request_uses_the_factory_parse_exactly_once() -> None:
     parser = CountingCommandTextParser("/")
-    router = CommandRouter("/", parser=parser)
+    router = CommandRouter("/")
     command = EchoCommand()
-    router.register(command)
+    router.register_definition(command.definition())
     message = FakeMessage("/echo hello  world")
     context = FakeContext(message)
     request = OopzCommandRequestFactory(parser).from_message(message, context)
 
     assert request is not None
-    outcome = await router.dispatch_request(request, context)
+    outcome = await router.dispatch_request(request)
 
     assert parser.calls == 1
     assert outcome.status is DispatchStatus.COMPLETED
     assert outcome.command_name == "echo"
     assert outcome.consumed is True
     assert command.received is not None
-    assert command.received.arguments == ("hello", "world")
-    assert command.received.raw_arguments == "hello  world"
+    assert command.received.tokens == ("hello", "world")
+    assert command.received.raw_tail == "hello  world"
 
 
 @pytest.mark.asyncio
 async def test_unknown_prefixed_request_is_explicitly_consumed() -> None:
     parser = CommandTextParser("/")
-    router = CommandRouter("/", parser=parser)
+    router = CommandRouter("/")
     message = FakeMessage("/missing")
     context = FakeContext(message)
     request = OopzCommandRequestFactory(parser).from_message(message, context)
 
     assert request is not None
-    outcome = await router.dispatch_request(request, context)
+    outcome = await router.dispatch_request(request)
 
     assert outcome.status is DispatchStatus.UNKNOWN
     assert outcome.command_name == "missing"

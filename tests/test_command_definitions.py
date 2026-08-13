@@ -131,7 +131,7 @@ async def test_typed_definition_parses_once_and_shares_the_same_arguments() -> N
     )
     command_request, _ = request(("value",))
 
-    outcome = await router.dispatch_request(command_request, object())
+    outcome = await router.dispatch_request(command_request)
 
     assert outcome.status is DispatchStatus.COMPLETED
     assert parser.calls == 1
@@ -156,7 +156,7 @@ async def test_usage_error_stops_before_authorization_and_handler() -> None:
     )
     command_request, responder = request(())
 
-    outcome = await router.dispatch_request(command_request, object())
+    outcome = await router.dispatch_request(command_request)
 
     assert outcome.status is DispatchStatus.COMPLETED
     assert authorization.arguments == []
@@ -178,7 +178,7 @@ async def test_no_arguments_parser_rejects_before_state_change() -> None:
     )
     command_request, responder = request(("unexpected",))
 
-    await router.dispatch_request(command_request, object())
+    await router.dispatch_request(command_request)
 
     assert handler.calls == 0
     assert responder.replies == ["此命令不接受额外参数。\n用法：/typed"]

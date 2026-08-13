@@ -24,6 +24,7 @@ from cywl_oopz.features.admin.models import (
 from cywl_oopz.integrations.oopz.diagnostic_renderer import OopzAgentDiagnosticRenderer
 from cywl_oopz.integrations.oopz.message_renderer import oopz_units
 from cywl_oopz.integrations.oopz.tracked_context import TrackedMessageContext
+from cywl_oopz.testing.commands import dispatch_command
 
 RUN_ID = UUID("10000000-0000-0000-0000-000000000001")
 THREAD_ID = UUID("10000000-0000-0000-0000-000000000002")
@@ -259,7 +260,7 @@ async def test_debug_requires_permission_and_exact_reference_address() -> None:
     message = FakeMessage("/debug --verbose")
     context = FakeCommandContext(message)
 
-    assert await router.dispatch(message, context)
+    assert await dispatch_command(router, message, context)
 
     assert context.replies
     assert repository.calls == [
@@ -280,7 +281,7 @@ async def test_debug_rejects_unprivileged_user_before_reading_diagnostic() -> No
     message = FakeMessage("/debug")
     context = FakeCommandContext(message)
 
-    assert await router.dispatch(message, context)
+    assert await dispatch_command(router, message, context)
 
     assert context.replies == ["你没有执行此操作的权限。"]
     assert repository.calls == []

@@ -32,6 +32,7 @@ from cywl_oopz.integrations.oopz.message_recall import (
     OopzRecentBotMessageLookup,
     OopzReferencedMessageParser,
 )
+from cywl_oopz.testing.commands import dispatch_command
 
 ADDRESS = OopzMessageAddress(OopzMessageScope.CHANNEL, "area", "channel")
 
@@ -444,7 +445,7 @@ async def test_recall_command_requires_permission_and_confirms_with_reaction() -
     message = CommandMessage()
     context = CommandContext(message)
 
-    assert await recall_router(use_case).dispatch(message, context)
+    assert await dispatch_command(recall_router(use_case), message, context)
 
     assert context.reactions == ["✅"]
     assert context.replies == []
@@ -452,8 +453,8 @@ async def test_recall_command_requires_permission_and_confirms_with_reaction() -
 
     denied = RecallUseCase()
     denied_context = CommandContext(CommandMessage())
-    await recall_router(denied, allowed=False).dispatch(
-        denied_context.event.message, denied_context
+    await dispatch_command(
+        recall_router(denied, allowed=False), denied_context.event.message, denied_context
     )
     assert denied.calls == []
     assert denied_context.replies == ["你没有执行此操作的权限。"]
@@ -465,7 +466,7 @@ async def test_recall_command_stays_silent_when_confirmation_reaction_fails() ->
     message = CommandMessage()
     context = CommandContext(message, reaction_fails=True)
 
-    await recall_router(use_case).dispatch(message, context)
+    await dispatch_command(recall_router(use_case), message, context)
 
     assert context.reactions == []
     assert context.replies == []
@@ -477,7 +478,7 @@ async def test_recall_command_reports_idempotency_and_rejects_raw_message_id() -
     already_message = CommandMessage()
     already_context = CommandContext(already_message)
 
-    await recall_router(already).dispatch(already_message, already_context)
+    await dispatch_command(recall_router(already), already_message, already_context)
 
     assert already_context.reactions == []
     assert already_context.replies == ["这条回复已经撤回。"]
@@ -485,7 +486,7 @@ async def test_recall_command_reports_idempotency_and_rejects_raw_message_id() -
     invalid = RecallUseCase()
     invalid_message = CommandMessage("/recall bot-message")
     invalid_context = CommandContext(invalid_message)
-    await recall_router(invalid).dispatch(invalid_message, invalid_context)
+    await dispatch_command(recall_router(invalid), invalid_message, invalid_context)
 
     assert invalid.calls == []
     assert invalid_context.replies == ["用法：/recall（请引用一条 CYWL 回复）"]

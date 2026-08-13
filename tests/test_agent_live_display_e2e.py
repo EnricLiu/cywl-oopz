@@ -10,6 +10,7 @@ import asyncio
 import os
 from contextlib import suppress
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 from oopz_sdk.events.context import EventContext
@@ -17,7 +18,7 @@ from oopz_sdk.models import Message, MessageEvent
 from sqlalchemy import delete, select
 
 from cywl_oopz.application import BotApplication
-from cywl_oopz.commands.router import ParsedCommand
+from cywl_oopz.commands.router import CommandRouter
 from cywl_oopz.core.errors import ProviderTimeoutError
 from cywl_oopz.features.chat.commands import CancelChatCommand, ChatCommand
 from cywl_oopz.features.chat.models import ChatResponse, ConversationKey
@@ -32,6 +33,7 @@ from cywl_oopz.integrations.oopz.editable_messages import (
 from cywl_oopz.integrations.oopz.message_renderer import OopzMessageRenderer, oopz_units
 from cywl_oopz.settings import AgentMode, AppSettings
 from cywl_oopz.storage.models import ChannelSettingsRecord
+from cywl_oopz.testing.commands import dispatch_command
 
 
 def _live_enabled() -> bool:
@@ -143,12 +145,33 @@ class LiveAgentDisplayHarness:
 
     async def run_with(self, service: object, prompt: str) -> None:
         assert self.context is not None
-        await ChatCommand(
-            service,  # type: ignore[arg-type]
-            self.presenters,
-        ).execute(
-            ParsedCommand("chat", tuple(prompt.split())),
-            self.context,
+        tasks = ChatTaskSupervisor()
+        router = CommandRouter("/")
+        router.register_definition(
+            ChatCommand(
+                service,  # type: ignore[arg-type]
+                tasks,
+                self.presenters,
+            ).definition()
+        )
+        await dispatch_command(router, self.command_message(f"/chat {prompt}"), self.context)
+        await tasks.close()
+
+    def command_message(self, text: str) -> object:
+        assert self.context is not None
+        source = self.context.event.message
+        return SimpleNamespace(
+            text=text,
+            content=text,
+            plain_text=text,
+            sender_id=str(source.sender_id),
+            area=str(source.area),
+            channel=str(source.channel),
+            message_id=str(source.message_id),
+            client_message_id=str(getattr(source, "client_message_id", "")),
+            timestamp=str(source.timestamp),
+            reference_message_id="",
+            mention_list=(),
         )
 
     async def displayed_messages(self) -> list[Message]:
@@ -552,21 +575,28 @@ async def test_live_cancel_replaces_the_original_without_a_second_reply() -> Non
         await harness.start()
         assert harness.context is not None
         assert harness.key is not None
-        operation = ChatCommand(
-            WaitingService(),
-            harness.presenters,
-        ).execute(
-            ParsedCommand("chat", ("等待",)),
-            harness.context,
+        router = CommandRouter("/")
+        router.register_definition(
+            ChatCommand(
+                WaitingService(),
+                supervisor,
+                harness.presenters,
+            ).definition()
         )
-        assert supervisor.start(harness.key, operation) is True
+        router.register_definition(
+            CancelChatCommand(
+                WaitingService(),
+                supervisor,
+                active_message_reports_cancel=True,
+            ).definition()
+        )
+        operation = asyncio.create_task(
+            dispatch_command(router, harness.command_message("/chat 等待"), harness.context)
+        )
         await asyncio.wait_for(started.wait(), timeout=2)
 
-        await CancelChatCommand(
-            WaitingService(),
-            supervisor,
-            active_message_reports_cancel=True,
-        ).execute(ParsedCommand("cancel", ()), harness.context)
+        await dispatch_command(router, harness.command_message("/cancel"), harness.context)
+        await asyncio.gather(operation, return_exceptions=True)
 
         displayed = await harness.displayed_messages()
         assert len(harness.gateway.created) == 1

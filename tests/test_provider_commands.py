@@ -33,6 +33,7 @@ from cywl_oopz.features.agent.skills.models import (
 from cywl_oopz.features.agent.tools.models import ToolEffect
 from cywl_oopz.features.agent.tools.policy import AvailableTool
 from cywl_oopz.features.chat.tasks import ChatTaskSupervisor
+from cywl_oopz.testing.commands import dispatch_command
 
 
 class FakeProviderService:
@@ -146,7 +147,7 @@ async def execute(command, name: str, arguments: tuple[str, ...], context: FakeC
         mention_list=(),
     )
     context.event.message = message
-    await router.dispatch(message, context)
+    await dispatch_command(router, message, context)
 
 
 @pytest.mark.asyncio

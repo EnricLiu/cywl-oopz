@@ -11,6 +11,7 @@ from oopz_sdk.auth.headers import build_oopz_headers
 from oopz_sdk.exceptions import OopzApiError
 from oopz_sdk.utils.payload import coerce_bool
 
+from cywl_oopz.commands.models import CommandRequest, CommandScope
 from cywl_oopz.core.observability import opaque_ref
 from cywl_oopz.features.admin.models import (
     OopzMessageAddress,
@@ -60,6 +61,21 @@ class MessageAddress:
             target_person_id=(str(getattr(message, "sender_id", "")).strip() if is_private else ""),
             reference_message_id=str(getattr(message, "message_id", "")).strip(),
             owner_person_id=str(getattr(message, "sender_id", "")).strip(),
+        )
+
+    @classmethod
+    def from_command_request(cls, request: CommandRequest) -> MessageAddress:
+        """Project one framework-neutral request into the OOPZ gateway model."""
+        private = request.location.scope is CommandScope.PRIVATE
+        return cls(
+            scope="private" if private else "channel",
+            area_id="" if private else request.location.area_id,
+            channel_id=request.location.channel_id,
+            target_person_id=(
+                request.location.target_person_id or request.actor.person_id if private else ""
+            ),
+            reference_message_id=request.source.message_id,
+            owner_person_id=request.actor.person_id,
         )
 
 

@@ -83,8 +83,9 @@ class MemoryCommand:
         "memory forget <ID|all>",
     )
 
-    def __init__(self, memory: MemoryService) -> None:
+    def __init__(self, memory: MemoryService, prefix: str = "/") -> None:
         self._memory = memory
+        self._prefix = prefix
         self._errors = AgentCommandErrorPresenter()
 
     def definition(self) -> CommandDefinition[MemoryArguments]:
@@ -114,7 +115,8 @@ class MemoryCommand:
                 message = (
                     "长期记忆已开启。"
                     if arguments.enabled
-                    else "长期记忆已关闭；已有内容仍保留，可使用 /memory forget all 删除。"
+                    else "长期记忆已关闭；已有内容仍保留，可使用 "
+                    f"{self._prefix}memory forget all 删除。"
                 )
                 await request.responder.reply(message)
             elif arguments.action is MemoryAction.REMEMBER:
@@ -128,7 +130,7 @@ class MemoryCommand:
                 deleted = await self._memory.forget(person_id, arguments.item_id)
                 await request.responder.reply("已删除该记忆。" if deleted else "没有找到该记忆。")
         except MemoryDisabledError:
-            await request.responder.reply("长期记忆当前已关闭；请先使用 /memory on。")
+            await request.responder.reply(f"长期记忆当前已关闭；请先使用 {self._prefix}memory on。")
         except MemoryCapacityError:
             await request.responder.reply("长期记忆条目已满；请先删除不需要的内容。")
         except MemoryItemTooLongError:

@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from oopz_sdk.events.context import EventContext
-
 from cywl_oopz.core.health import HealthRegistry, HealthState
 
 from .catalog import CommandSpec
@@ -19,8 +17,7 @@ from .definitions import (
     PublicCommandAuthorization,
 )
 from .models import CommandRequest
-from .responses import CommandMessage, CommandMessageBudget, MessageOverflowPolicy
-from .router import CommandRouter, ParsedCommand
+from .router import CommandRouter
 
 
 class PingCommand:
@@ -43,9 +40,6 @@ class PingCommand:
         del arguments
         await request.responder.reply("pong")
 
-    async def execute(self, _: ParsedCommand, context: EventContext) -> None:
-        await context.reply("pong")
-
 
 class HelpCommand:
     """Render the commands currently registered in the router."""
@@ -56,13 +50,8 @@ class HelpCommand:
     usage = ("help", "help <命令>")
     examples = ("help music", "help role")
 
-    def __init__(
-        self,
-        router: CommandRouter,
-        budget: CommandMessageBudget | None = None,
-    ) -> None:
+    def __init__(self, router: CommandRouter) -> None:
         self._router = router
-        self._budget = budget or CommandMessageBudget()
 
     def definition(self) -> CommandDefinition[HelpArguments]:
         return CommandDefinition(
@@ -89,23 +78,6 @@ class HelpCommand:
             await request.responder.reply(self._detail(spec))
             return
         await request.responder.reply(self._overview(specs))
-
-    async def execute(self, command: ParsedCommand, context: EventContext) -> None:
-        if len(command.arguments) > 1:
-            await context.reply(f"用法：{self._router.prefix}help [命令]")
-            return
-        specs = await self._router.available_specs(context)
-        if command.arguments:
-            requested = command.arguments[0]
-            spec = next((item for item in specs if item.matches(requested)), None)
-            if spec is None:
-                await context.reply(
-                    f"没有找到命令：{requested}\n输入 {self._router.prefix}help 查看可用命令。"
-                )
-                return
-            await self._reply_pages(context, self._detail(spec))
-            return
-        await self._reply_pages(context, self._overview(specs))
 
     def _overview(self, specs: tuple[CommandSpec, ...]) -> str:
         grouped: dict[str, list[CommandSpec]] = {}
@@ -135,11 +107,6 @@ class HelpCommand:
             lines.extend(("", "**示例**"))
             lines.extend(f"{self._router.prefix}{example}" for example in spec.examples)
         return "\n".join(lines)
-
-    async def _reply_pages(self, context: EventContext, text: str) -> None:
-        message = CommandMessage(text, MessageOverflowPolicy.PAGINATE)
-        for page in self._budget.pages(message):
-            await context.reply(page)
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,9 +144,6 @@ class StatusCommand:
     async def handle(self, request: CommandRequest, arguments: NoArguments) -> None:
         del arguments
         await request.responder.reply(self._render())
-
-    async def execute(self, _: ParsedCommand, context: EventContext) -> None:
-        await context.reply(self._render())
 
     def _render(self) -> str:
         icons = {

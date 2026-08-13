@@ -14,6 +14,7 @@ from cywl_oopz.features.access.service import AuthorizationService
 from cywl_oopz.features.admin.commands import RebootCommand
 from cywl_oopz.features.admin.lifecycle import ApplicationLifecycleCoordinator
 from cywl_oopz.features.admin.models import ShutdownDisposition
+from cywl_oopz.testing.commands import dispatch_command
 
 
 @pytest.mark.asyncio
@@ -105,8 +106,8 @@ async def test_reboot_requires_global_permission_and_merges_duplicates() -> None
     second_message = CommandMessage()
     second = CommandContext(second_message)
 
-    assert await router.dispatch(first_message, first)
-    assert await router.dispatch(second_message, second)
+    assert await dispatch_command(router, first_message, first)
+    assert await dispatch_command(router, second_message, second)
 
     assert first.replies == ["🔄 **正在重启…**"]
     assert second.replies == ["重启已经在进行中。"]
@@ -121,7 +122,7 @@ async def test_reboot_requires_global_permission_and_merges_duplicates() -> None
     denied_router = reboot_router(denied_lifecycle, area_admin)
     denied_message = CommandMessage()
     denied = CommandContext(denied_message)
-    await denied_router.dispatch(denied_message, denied)
+    await dispatch_command(denied_router, denied_message, denied)
 
     assert denied.replies == ["你没有执行此操作的权限。"]
     assert denied_lifecycle.restart_requested is False
@@ -137,7 +138,7 @@ async def test_reboot_rejects_arguments_before_requesting_restart() -> None:
     message = CommandMessage("/reboot now")
     context = CommandContext(message)
 
-    await router.dispatch(message, context)
+    await dispatch_command(router, message, context)
 
     assert context.replies == ["此命令不接受额外参数。\n用法：/reboot"]
     assert lifecycle.restart_requested is False

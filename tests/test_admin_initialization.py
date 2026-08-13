@@ -26,6 +26,7 @@ from cywl_oopz.features.admin.models import (
     ChannelKey,
 )
 from cywl_oopz.integrations.oopz.channel_catalog import OopzAreaChannelCatalog
+from cywl_oopz.testing.commands import dispatch_command
 
 
 @dataclass
@@ -134,12 +135,12 @@ async def test_channel_admin_initializes_once_without_overwriting_existing_confi
     router = make_router(roles, repository, catalog)
 
     first = FakeContext(FakeMessage("/init"))
-    assert await router.dispatch(first.event.message, first)
+    assert await dispatch_command(router, first.event.message, first)
     assert "频道已初始化" in first.replies[0]
 
     repository.text_configuration[key] = "custom"
     second = FakeContext(FakeMessage("/init channel"))
-    assert await router.dispatch(second.event.message, second)
+    assert await dispatch_command(router, second.event.message, second)
     assert second.replies == ["频道已经初始化，现有配置未改动。"]
     assert repository.text_configuration[key] == "custom"
 
@@ -162,7 +163,7 @@ async def test_channel_scoped_admin_cannot_initialize_an_area() -> None:
     router = make_router(roles, repository, catalog)
     context = FakeContext(FakeMessage("/init area"))
 
-    assert await router.dispatch(context.event.message, context)
+    assert await dispatch_command(router, context.event.message, context)
 
     assert context.replies == ["你没有执行此操作的权限。"]
     assert catalog.calls == []
@@ -193,7 +194,7 @@ async def test_area_admin_initializes_visible_text_and_voice_channels() -> None:
     router = make_router(roles, repository, catalog)
     context = FakeContext(FakeMessage("/init area"))
 
-    assert await router.dispatch(context.event.message, context)
+    assert await dispatch_command(router, context.event.message, context)
 
     assert "文字频道：新增 1 · 已存在 1" in context.replies[0]
     assert "语音频道：新增 1 · 已存在 1" in context.replies[0]
@@ -206,14 +207,14 @@ async def test_init_is_hidden_and_rejected_in_private_conversations() -> None:
     repository = InMemoryInitializationRepository()
     catalog = FakeCatalog(AreaChannelCatalog("area"))
     router = make_router(roles, repository, catalog, bootstrap=frozenset({"owner"}))
-    router.register(HelpCommand(router))
+    router.register_definition(HelpCommand(router).definition())
     help_context = FakeContext(FakeMessage("/help", "owner"), private=True)
 
-    assert await router.dispatch(help_context.event.message, help_context)
+    assert await dispatch_command(router, help_context.event.message, help_context)
     assert "/init" not in help_context.replies[0]
 
     init_context = FakeContext(FakeMessage("/init", "owner"), private=True)
-    assert await router.dispatch(init_context.event.message, init_context)
+    assert await dispatch_command(router, init_context.event.message, init_context)
     assert init_context.replies == ["此命令只能在文字频道中使用。"]
 
 

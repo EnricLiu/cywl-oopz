@@ -41,6 +41,7 @@ from cywl_oopz.features.music.models import (
     RepeatPolicy,
     VoiceChannelKey,
 )
+from cywl_oopz.testing.commands import dispatch_command
 
 
 @dataclass
@@ -301,7 +302,7 @@ def fixture() -> tuple[CommandRouter, StubMusic, StubPlaylists]:
 async def dispatch(router: CommandRouter, text: str) -> FakeContext:
     message = FakeMessage(text)
     target = context(message)
-    assert await router.dispatch(message, target) is True
+    assert await dispatch_command(router, message, target) is True
     return target
 
 
