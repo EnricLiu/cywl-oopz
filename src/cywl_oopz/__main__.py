@@ -8,9 +8,12 @@ import dotenv
 
 from .application import BotApplication
 from .core.errors import ConfigurationError
+from .features.admin.models import ShutdownDisposition
 from .settings import AppSettings
 
 logger = logging.getLogger(__name__)
+
+RESTART_EXIT_CODE = 75
 
 
 def main() -> None:
@@ -35,7 +38,9 @@ def main() -> None:
     except ConfigurationError as exc:
         logger.error("Configuration error: %s", type(exc).__name__)
         raise SystemExit(2) from exc
-    asyncio.run(application.run())
+    disposition = asyncio.run(application.run())
+    if disposition is ShutdownDisposition.RESTART:
+        raise SystemExit(RESTART_EXIT_CODE)
 
 
 if __name__ == "__main__":

@@ -14,6 +14,7 @@ from cywl_oopz.features.access.models import AccessResource, AccessResourceKind,
 from cywl_oopz.integrations.oopz.access import OopzAccessInvocation
 
 from .initialization import ChannelCatalogError, ChannelInitializationService
+from .lifecycle import ApplicationLifecycleCoordinator
 from .models import (
     AreaInitializationResult,
     ChannelKey,
@@ -310,3 +311,49 @@ def _message_address(context: EventContext) -> OopzMessageAddress:
         channel_id=str(getattr(message, "channel", "")),
         target_person_id=(str(getattr(message, "sender_id", "")) if private else ""),
     )
+
+
+class RebootCommandAccess:
+    """Require a global reboot permission regardless of invocation channel."""
+
+    def is_available(self, invocation: OopzAccessInvocation) -> bool:
+        del invocation
+        return True
+
+    def requirement(
+        self,
+        command: ParsedCommand,
+        invocation: OopzAccessInvocation,
+    ) -> AccessRequirement:
+        del command, invocation
+        return AccessRequirement(Permission.BOT_REBOOT, AccessResource.global_resource())
+
+    def visibility_requirement(
+        self,
+        invocation: OopzAccessInvocation,
+    ) -> AccessRequirement:
+        del invocation
+        return AccessRequirement(Permission.BOT_REBOOT, AccessResource.global_resource())
+
+
+class RebootCommand:
+    """Request graceful application exit for an external supervisor to restart."""
+
+    name = "reboot"
+    description = "优雅退出并请求外部进程管理器重启 Bot。"
+
+    def __init__(self, lifecycle: ApplicationLifecycleCoordinator) -> None:
+        self._lifecycle = lifecycle
+
+    async def execute(self, command: ParsedCommand, context: EventContext) -> None:
+        if command.arguments:
+            await context.reply("用法：/reboot")
+            return
+        actor_ref = opaque_ref(str(getattr(context.event.message, "sender_id", "")))
+
+        async def confirm() -> object:
+            return await context.reply("🔄 **正在重启…**")
+
+        accepted = await self._lifecycle.request_restart(actor_ref, confirm)
+        if not accepted:
+            await context.reply("重启已经在进行中。")

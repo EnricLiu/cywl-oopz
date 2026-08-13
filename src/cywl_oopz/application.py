@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Coroutine
 from datetime import UTC, datetime, timedelta
@@ -26,10 +27,14 @@ from .features.admin.commands import (
     DebugCommandAccess,
     InitCommand,
     InitCommandAccess,
+    RebootCommand,
+    RebootCommandAccess,
     RecallCommand,
     RecallCommandAccess,
 )
 from .features.admin.initialization import ChannelInitializationService
+from .features.admin.lifecycle import ApplicationLifecycleCoordinator
+from .features.admin.models import ShutdownDisposition
 from .features.admin.outbound_repository import (
     SqlAlchemyAgentDiagnosticRepository,
     SqlAlchemyOutboundMessageRepository,
@@ -213,9 +218,13 @@ logger = logging.getLogger(__name__)
 class BotApplication:
     """Owns OOPZ integration, application resources, and feature services."""
 
+    oopz_stop_timeout_seconds = 5.0
+    oopz_run_settle_seconds = 1.0
+
     def __init__(self, settings: AppSettings) -> None:
         self.settings = settings
         self.health = HealthRegistry()
+        self.lifecycle = ApplicationLifecycleCoordinator()
         self.database = Database(settings.database)
         self.role_bindings = SqlAlchemyRoleBindingRepository(self.database.session_factory)
         self.authorization = AuthorizationService(
@@ -741,6 +750,10 @@ class BotApplication:
             access=RecallCommandAccess(),
         )
         self.commands.register(
+            RebootCommand(self.lifecycle),
+            access=RebootCommandAccess(),
+        )
+        self.commands.register(
             ChatCommand(
                 self.chat,
                 self.agent_presenters,
@@ -805,9 +818,10 @@ class BotApplication:
                 )
             )
 
-    async def run(self) -> None:
+    async def run(self) -> ShutdownDisposition:
         """Start the database check before entering the long-running OOPZ client."""
         logger.info("Application startup started")
+        disposition = ShutdownDisposition.NORMAL
         if not self.settings.rbac.bootstrap_owner_ids:
             logger.warning(
                 "No RBAC bootstrap owner is configured; privileged recovery requires "
@@ -916,7 +930,7 @@ class BotApplication:
             await self.delegated_task_scheduler.start()
             await self.delegated_task_text_fallback.start()
             logger.info("Starting OOPZ client")
-            await self.bot.run()
+            disposition = await self._run_oopz_until_lifecycle_request()
         finally:
             logger.info("Application shutdown started")
             await self.chat_tasks.close()
@@ -937,6 +951,64 @@ class BotApplication:
             await self._provider.aclose()
             await self.database.close()
             logger.info("Application shutdown completed")
+        return disposition
+
+    async def _run_oopz_until_lifecycle_request(self) -> ShutdownDisposition:
+        bot_task = asyncio.create_task(self.bot.run(), name="oopz-bot")
+        lifecycle_task = asyncio.create_task(
+            self.lifecycle.wait(),
+            name="application-lifecycle",
+        )
+        try:
+            done, _ = await asyncio.wait(
+                {bot_task, lifecycle_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if lifecycle_task in done:
+                disposition = lifecycle_task.result()
+                await self._stop_oopz_bounded()
+                await self._settle_oopz_task(bot_task)
+                return disposition
+            await bot_task
+            return ShutdownDisposition.NORMAL
+        finally:
+            pending = tuple(task for task in (bot_task, lifecycle_task) if not task.done())
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+
+    async def _stop_oopz_bounded(self) -> None:
+        try:
+            async with asyncio.timeout(self.oopz_stop_timeout_seconds):
+                await self.bot.stop()
+        except TimeoutError:
+            logger.error(
+                "Timed out stopping OOPZ client after %.1fs",
+                self.oopz_stop_timeout_seconds,
+            )
+        except Exception as exc:
+            logger.error("OOPZ client stop failed: error=%s", exception_kind(exc))
+
+    async def _settle_oopz_task(self, bot_task: asyncio.Task[object]) -> None:
+        if not bot_task.done():
+            done, _ = await asyncio.wait(
+                {bot_task},
+                timeout=self.oopz_run_settle_seconds,
+            )
+            if not done:
+                logger.warning("Cancelling OOPZ run task after bounded stop grace")
+                bot_task.cancel()
+                await asyncio.gather(bot_task, return_exceptions=True)
+                return
+        if bot_task.cancelled():
+            return
+        error = bot_task.exception()
+        if error is not None:
+            logger.warning(
+                "OOPZ run task ended with an error during planned shutdown: error=%s",
+                exception_kind(error),
+            )
 
     async def _on_ready(self, _: EventContext) -> None:
         self.health.mark("oopz", HealthState.HEALTHY, "websocket connected")

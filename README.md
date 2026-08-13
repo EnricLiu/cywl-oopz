@@ -119,6 +119,14 @@ server is needed.
    python main.py
    ```
 
+### Process supervision and `/reboot`
+
+`/reboot` performs a graceful application shutdown and exits with status `75`;
+it does not spawn or replace its own process. Run CYWL under a supervisor if the
+command should bring the bot back automatically. For example, a systemd service
+can use `Restart=on-failure` and `RestartSec=2`. Docker/Compose deployments can
+use `restart: unless-stopped`. A normal OOPZ disconnect exits with status `0`.
+
 `.env.example` is the complete, authoritative list of runtime options and
 defaults. It is safe to commit only as a template; `.env` is ignored and must
 remain local.
@@ -166,6 +174,11 @@ features; `/help` always displays the commands registered in the running bot.
 | `/tool <name> [JSON]` | Agent mode | Inspect a tool schema or invoke an authorized tool directly. |
 | `/memory …` | Agent mode | View, save, disable, or delete the caller's long-term memory. |
 | `/skills` | Agent mode with skills enabled | List skills available to the caller. |
+| `/whoami`, `/role …` | RBAC-dependent | Inspect the caller identity and manage scoped roles. |
+| `/init [channel\|area]` | Authorized admins | Initialize missing channel settings without overwriting existing values. |
+| `/debug [-v\|--verbose]` | Authorized admins | Expand a referenced Agent response into bounded diagnostic pages. |
+| `/recall` | Authorized moderators/admins | Recall a referenced CYWL-owned message. |
+| `/reboot` | Global owner/admin | Gracefully exit with status 75 for an external supervisor to restart. |
 | `/music …` | Music enabled | Search or play by keyword/URL, inspect sources and queues, set modes, and manage area playlists. Use `--source youtube\|bilibili\|netease` before a text query to override the default. |
 | `/voice start\|stop\|status\|models\|model\|voice` | Voice enabled | Control experimental realtime voice conversation. |
 

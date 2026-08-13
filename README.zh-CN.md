@@ -106,6 +106,13 @@ agent-browser install
    python main.py
    ```
 
+### 进程托管与 `/reboot`
+
+`/reboot` 会执行完整的应用级优雅停机，并以状态码 `75` 退出；它不会在进程内启动或替换自身。
+若希望命令执行后 Bot 自动上线，需要用外部 supervisor 托管 CYWL。例如 systemd 可配置
+`Restart=on-failure` 与 `RestartSec=2`，Docker/Compose 可使用 `restart: unless-stopped`。
+OOPZ 正常断开时退出码为 `0`。
+
 `.env.example` 是完整且权威的运行时选项与默认值清单。它可安全地作为模板提交；
 `.env` 已被忽略，必须仅保存在本地。
 
@@ -148,6 +155,11 @@ Agent 工具权限取决于应用级白名单（`CYWL_AGENT_ENABLED_TOOLS`）、
 | `/tool <名称> [JSON]` | Agent 模式 | 查看工具 Schema，或直接调用获授权的工具。 |
 | `/memory …` | Agent 模式 | 查看、保存、停用或删除调用者的长期记忆。 |
 | `/skills` | Agent 模式且已启用技能 | 列出调用者可用的技能。 |
+| `/whoami`、`/role …` | 取决于 RBAC | 查看调用者身份，并管理有作用域的角色。 |
+| `/init [channel\|area]` | 获授权管理员 | 初始化缺失的频道配置，不覆盖已有值。 |
+| `/debug [-v\|--verbose]` | 获授权管理员 | 将引用的 Agent 回复展开为有界诊断分页。 |
+| `/recall` | 获授权版主/管理员 | 撤回引用的一条 CYWL 自有消息。 |
+| `/reboot` | 全局 owner/admin | 优雅退出并返回状态码 75，由外部 supervisor 重启。 |
 | `/music …` | 已启用音乐 | 按关键词或 URL 搜索/点歌，查看来源和队列，设置模式并管理 area 歌单。文字查询可在内容前用 `--source youtube\|bilibili\|netease` 覆盖默认来源。 |
 | `/voice start\|stop\|status\|models\|model\|voice` | 已启用语音 | 控制实验性实时语音对话。 |
 

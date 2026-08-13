@@ -234,3 +234,8 @@ class ReferencedMessageCandidate:
 class MessageRecallOutcome(StrEnum):
     RECALLED = "recalled"
     ALREADY_RECALLED = "already_recalled"
+
+
+class ShutdownDisposition(StrEnum):
+    NORMAL = "normal"
+    RESTART = "restart"
