@@ -76,6 +76,8 @@ class WhoAmICommand:
 
     name = "whoami"
     description = "查看权限系统使用的本人 OOPZ ID。"
+    category = "权限与管理"
+    usage = ("whoami",)
 
     async def execute(self, command: ParsedCommand, context: EventContext) -> None:
         if command.arguments:
@@ -90,6 +92,14 @@ class RoleCommand:
 
     name = "role"
     description = "查看或管理 Bot 角色权限。"
+    category = "权限与管理"
+    usage = (
+        "role me",
+        "role list [@用户]",
+        "role grant @用户 <角色> <global|area|channel>",
+        "role revoke @用户 <角色> <global|area|channel>",
+    )
+    examples = ("role me", "role grant @用户 admin area")
     max_visible_bindings = 30
 
     def __init__(

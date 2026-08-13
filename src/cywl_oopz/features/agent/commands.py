@@ -163,6 +163,8 @@ class AgentModelCommand(ChatCommandController):
 
     name = "model"
     description = "查看当前 Provider 的模型，或切换当前对话模型。"
+    category = "对话"
+    usage = ("model [list|help|模型编号或名称]",)
 
     def __init__(
         self,
@@ -215,6 +217,12 @@ class ProviderCommand(ChatCommandController):
 
     name = "provider"
     description = "查看、列出或切换 Agent Provider/模型。"
+    category = "Agent"
+    usage = (
+        "provider [list|help]",
+        "provider [use] <Provider> [模型]",
+        "provider default <Provider> [模型]",
+    )
 
     def __init__(
         self,
@@ -303,6 +311,8 @@ class ToolsCommand(ChatCommandController):
 
     name = "tools"
     description = "查看当前 Agent 实际可用的工具。"
+    category = "Agent"
+    usage = ("tools",)
 
     def __init__(self, service: AgentConversationService) -> None:
         super().__init__(service)
@@ -333,6 +343,8 @@ class SkillsCommand(ChatCommandController):
 
     name = "skills"
     description = "查看当前 Agent 可按需加载的技能。"
+    category = "Agent"
+    usage = ("skills [owned|shared|invitations]",)
     max_reply_characters = 1900
 
     def __init__(
@@ -455,6 +467,8 @@ class ToolCommand:
 
     name = "tool"
     description = "直接执行 Agent 工具，或查看指定工具的 JSON Schema。"
+    category = "Agent"
+    usage = ("tool <tool-id> <JSON对象|--help>",)
     max_reply_characters = 1900
 
     def __init__(
@@ -575,6 +589,12 @@ class MemoryCommand(ChatCommandController):
 
     name = "memory"
     description = "查看、保存、关闭或删除自己的长期记忆。"
+    category = "Agent"
+    usage = (
+        "memory [status|list|on|off]",
+        "memory remember <内容>",
+        "memory forget <ID|all>",
+    )
 
     def __init__(
         self,

@@ -174,6 +174,36 @@ async def test_help_filters_restricted_commands_with_same_policy() -> None:
 
 
 @pytest.mark.asyncio
+async def test_help_renders_dynamic_prefix_and_detailed_command_metadata() -> None:
+    router = CommandRouter("!")
+    echo = EchoCommand()
+    echo.category = "测试"
+    echo.usage = ("echo <内容>",)
+    echo.examples = ("echo 你好",)
+    router.register(echo)
+    router.register(HelpCommand(router))
+    context = FakeContext()
+
+    await router.dispatch(FakeMessage("!help echo"), context)
+
+    assert "**!echo**" in context.replies[0]
+    assert "!echo <内容>" in context.replies[0]
+    assert "!echo 你好" in context.replies[0]
+    assert "/echo" not in context.replies[0]
+
+
+@pytest.mark.asyncio
+async def test_help_rejects_extra_arguments_with_dynamic_prefix() -> None:
+    router = CommandRouter("!")
+    router.register(HelpCommand(router))
+    context = FakeContext()
+
+    await router.dispatch(FakeMessage("!help one two"), context)
+
+    assert context.replies == ["用法：!help [命令]"]
+
+
+@pytest.mark.asyncio
 async def test_help_fresh_reads_role_changes_on_every_invocation() -> None:
     bindings = FakeRoleBindings()
     authorizer = AuthorizationService(bindings)

@@ -263,6 +263,14 @@ class MusicCommand:
 
     name = "music"
     description = "点歌并管理播放队列、播放模式和共享歌单。"
+    category = "音乐"
+    usage = (
+        "music <关键词或 URL>",
+        "music <play|pause|resume|skip|stop|leave|now|queue|clear>",
+        "music mode <顺序|随机|单曲|列表|不循环>",
+        "music playlist <list|show|create|rename|delete|add|remove|clear|load|import> ...",
+    )
+    examples = ("music 初音未来", "music mode 随机", "music playlist list")
 
     _ORDER_ALIASES = {
         "sequential": PlaybackOrder.SEQUENTIAL,

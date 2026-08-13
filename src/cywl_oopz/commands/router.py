@@ -15,6 +15,7 @@ from cywl_oopz.features.access.models import AccessPrincipal, AccessResource, Pe
 from cywl_oopz.features.access.service import AuthorizationService
 from cywl_oopz.integrations.oopz.access import OopzAccessInvocation
 
+from .catalog import CommandCatalog, CommandSpec
 from .models import (
     CommandRequest,
     CommandScope,
@@ -84,6 +85,7 @@ class CommandAccessPolicy(Protocol):
 class RegisteredCommand:
     """A command and its explicit optional authorization policy."""
 
+    spec: CommandSpec
     command: Command
     access: CommandAccessPolicy | None = None
 
@@ -103,38 +105,61 @@ class CommandRouter:
             raise ValueError("Command router and parser prefixes must match")
         self.prefix = self._parser.prefix
         self._authorizer = authorizer
-        self._commands: dict[str, RegisteredCommand] = {}
+        self._catalog: CommandCatalog[RegisteredCommand] = CommandCatalog()
 
     @property
     def commands(self) -> tuple[Command, ...]:
         """Registered commands in stable, alphabetical order."""
-        return tuple(self._commands[name].command for name in sorted(self._commands))
+        return tuple(registration.command for registration in self._catalog.entries)
+
+    @property
+    def specs(self) -> tuple[CommandSpec, ...]:
+        """Registered root metadata in stable, alphabetical order."""
+        return tuple(registration.spec for registration in self._catalog.entries)
 
     def register(
         self,
         command: Command,
         *,
         access: CommandAccessPolicy | None = None,
+        spec: CommandSpec | None = None,
     ) -> None:
         """Register a unique command object."""
-        name = command.name.casefold()
-        if not name:
-            raise ValueError("Command name must not be empty")
-        if name in self._commands:
-            raise ValueError(f"Command already registered: {command.name}")
+        resolved_spec = spec or CommandSpec.from_command(command)
+        if resolved_spec.name != command.name.strip().casefold():
+            raise ValueError("Command spec name must match the implementation name")
         if access is not None and self._authorizer is None:
             raise ValueError("Restricted commands require a CommandRouter authorizer")
-        self._commands[name] = RegisteredCommand(command, access)
+        self._catalog.register(
+            resolved_spec,
+            RegisteredCommand(resolved_spec, command, access),
+        )
 
     async def available_commands(self, context: EventContext) -> tuple[Command, ...]:
         """Return commands visible to this caller, preserving stable name order."""
+        return tuple(
+            registration.command for registration in await self._available_registrations(context)
+        )
+
+    async def available_specs(self, context: EventContext) -> tuple[CommandSpec, ...]:
+        """Return user-facing metadata visible to this caller and context."""
+        return tuple(
+            registration.spec
+            for registration in await self._available_registrations(context)
+            if not registration.spec.hidden
+        )
+
+    async def _available_registrations(
+        self,
+        context: EventContext,
+    ) -> tuple[RegisteredCommand, ...]:
         invocation: OopzAccessInvocation | None = None
-        available: list[Command] = []
-        for name in sorted(self._commands):
-            registration = self._commands[name]
+        available: list[RegisteredCommand] = []
+        for registration in self._catalog.entries:
+            name = registration.spec.name
             access = registration.access
             if access is None:
-                available.append(registration.command)
+                available.append(registration)
                 continue
             if invocation is None:
                 invocation = OopzAccessInvocation.from_context(context)
@@ -142,7 +167,7 @@ class CommandRouter:
                 continue
             requirement = access.visibility_requirement(invocation)
             if requirement is None:
-                available.append(registration.command)
+                available.append(registration)
                 continue
             assert self._authorizer is not None
             try:
@@ -159,7 +184,7 @@ class CommandRouter:
                 )
                 continue
             if allowed:
-                available.append(registration.command)
+                available.append(registration)
         return tuple(available)
 
     async def dispatch(self, message: OopzMessage, context: EventContext) -> bool:
@@ -168,9 +193,10 @@ class CommandRouter:
         if command is None:
             return False
 
-        registration = self._commands.get(command.name)
+        registration = self._catalog.get(command.name)
         if registration is None:
             return False
+        command = self._canonical(command, registration.spec)
 
         invocation = (
             OopzAccessInvocation.from_context(context) if registration.access is not None else None
@@ -193,14 +219,16 @@ class CommandRouter:
         text = request.text
         if text is None:
             return DispatchOutcome(DispatchStatus.NOT_A_COMMAND)
-        registration = self._commands.get(text.name)
+        registration = self._catalog.get(text.name)
         if registration is None:
             return DispatchOutcome(DispatchStatus.UNKNOWN, text.name)
+
+        command = self._canonical(ParsedCommand.from_text(text), registration.spec)
 
         invocation = self._access_invocation(request) if registration.access is not None else None
         return await self._execute(
             registration,
-            ParsedCommand.from_text(text),
+            command,
             invocation,
             request.responder,
             legacy_context,
@@ -275,6 +303,12 @@ class CommandRouter:
             )
         )
         return OopzAccessInvocation(AccessPrincipal(request.actor.person_id), resource)
+
+    @staticmethod
+    def _canonical(command: ParsedCommand, spec: CommandSpec) -> ParsedCommand:
+        if command.name == spec.name:
+            return command
+        return ParsedCommand(spec.name, command.arguments, command.raw_arguments)
 
     @staticmethod
     def _resource_ref(resource: AccessResource) -> str:

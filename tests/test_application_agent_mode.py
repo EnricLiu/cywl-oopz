@@ -134,6 +134,10 @@ async def test_composition_root_routes_chat_and_provider_command_by_agent_flag(
     assert "skills" not in {command.name for command in legacy_application.commands.commands}
 
     for application in (agent_application, legacy_application):
+        assert all(spec.category != "其他" for spec in application.commands.specs)
+        assert all(spec.usage for spec in application.commands.specs)
+
+    for application in (agent_application, legacy_application):
         if application.music is not None:
             await application.music.aclose()
         await application.agent_engine.aclose()

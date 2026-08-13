@@ -193,6 +193,8 @@ class ChatCommand(ChatCommandController):
 
     name = "chat"
     description = "向 LLM 发起或继续文字对话。"
+    category = "对话"
+    usage = ("chat <内容>",)
 
     async def execute(self, command: ParsedCommand, context: EventContext) -> None:
         prompt = " ".join(command.arguments)
@@ -274,6 +276,8 @@ class NewConversationCommand(ChatCommandController):
 
     name = "new"
     description = "清空当前文字对话的上下文。"
+    category = "对话"
+    usage = ("new",)
 
     def __init__(
         self,
@@ -299,6 +303,8 @@ class CancelChatCommand(ChatCommandController):
 
     name = "cancel"
     description = "取消当前正在生成的文字回复。"
+    category = "对话"
+    usage = ("cancel",)
 
     def __init__(
         self,
@@ -329,6 +335,8 @@ class ModelCommand(ChatCommandController):
 
     name = "model"
     description = "查看或切换允许使用的模型。"
+    category = "对话"
+    usage = ("model [模型名称]",)
 
     def __init__(self, service: ChatUseCase, tasks: ChatTaskSupervisor) -> None:
         super().__init__(service)
@@ -362,6 +370,8 @@ class ChatStatusCommand(ChatCommandController):
 
     name = "chat-status"
     description = "查看文字对话状态，不显示聊天内容。"
+    category = "对话"
+    usage = ("chat-status",)
 
     async def execute(self, _: ParsedCommand, context: EventContext) -> None:
         try:

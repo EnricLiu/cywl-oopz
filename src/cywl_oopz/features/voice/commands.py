@@ -68,6 +68,12 @@ class VoiceCommand:
 
     name = "voice"
     description = "启动、停止或查看实验性实时语音对话。"
+    category = "语音"
+    usage = (
+        "voice <start|stop|status>",
+        "voice model [模型别名]",
+        "voice voice [音色]",
+    )
 
     def __init__(
         self,

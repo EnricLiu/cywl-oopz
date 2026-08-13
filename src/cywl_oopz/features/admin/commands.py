@@ -64,6 +64,8 @@ class InitCommand:
 
     name = "init"
     description = "初始化当前频道或整个 Area 的 Bot 配置。"
+    category = "权限与管理"
+    usage = ("init [channel|area]",)
 
     def __init__(self, service: ChannelInitializationService) -> None:
         self._service = service
@@ -153,6 +155,8 @@ class DebugCommand:
 
     name = "debug"
     description = "展开引用的 Agent 回复及工具调用详情。"
+    category = "权限与管理"
+    usage = ("debug [-v|--verbose]（请引用 Agent 回复）",)
     timeout_seconds = 10.0
 
     def __init__(
@@ -235,6 +239,8 @@ class RecallCommand:
 
     name = "recall"
     description = "撤回引用的一条 CYWL 回复。"
+    category = "权限与管理"
+    usage = ("recall（请引用 CYWL 回复）",)
     timeout_seconds = 10.0
 
     def __init__(
@@ -340,6 +346,8 @@ class RebootCommand:
 
     name = "reboot"
     description = "优雅退出并请求外部进程管理器重启 Bot。"
+    category = "权限与管理"
+    usage = ("reboot",)
 
     def __init__(self, lifecycle: ApplicationLifecycleCoordinator) -> None:
         self._lifecycle = lifecycle
