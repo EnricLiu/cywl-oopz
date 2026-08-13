@@ -31,12 +31,20 @@ MODEL_ID = UUID("10000000-0000-0000-0000-000000000002")
 class FakeOopzBot:
     def __init__(self, config) -> None:
         self.config = config
+        self.event_handlers: dict[str, object] = {}
 
     def on_ready(self, handler) -> None:
         self.ready_handler = handler
 
     def on_message(self, handler) -> None:
         self.message_handler = handler
+
+    def on(self, event_name: str):
+        def register(handler):
+            self.event_handlers[event_name] = handler
+            return handler
+
+        return register
 
     async def run(self) -> None:
         self.did_run = True
@@ -101,6 +109,7 @@ async def test_composition_root_routes_chat_and_provider_command_by_agent_flag(
     assert {"debug", "init", "reboot", "recall", "role", "whoami"}.issubset(
         {command.name for command in agent_application.commands.commands}
     )
+    assert "message.reaction" in agent_application.bot.event_handlers
     assert {
         "load_agent_skill",
         "read_agent_skill_resource",

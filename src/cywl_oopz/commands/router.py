@@ -146,7 +146,7 @@ class CommandRouter:
 
     async def dispatch(self, message: OopzMessage, context: EventContext) -> bool:
         """Execute a matching command and report whether the message was consumed."""
-        command = self.parse(message.plain_text or message.text or message.content)
+        command = self.parse_message(message)
         if command is None:
             return False
 
@@ -187,6 +187,15 @@ class CommandRouter:
 
         await registration.command.execute(command, context)
         return True
+
+    def parse_message(self, message: OopzMessage) -> ParsedCommand | None:
+        """Parse raw OOPZ text before its mention segments are removed from plain text."""
+        text = str(
+            getattr(message, "text", "")
+            or getattr(message, "content", "")
+            or getattr(message, "plain_text", "")
+        )
+        return self.parse(text)
 
     def parse(self, text: str) -> ParsedCommand | None:
         """Parse one prefix command without interpreting non-command chat messages."""

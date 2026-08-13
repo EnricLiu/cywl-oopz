@@ -460,14 +460,15 @@ async def test_recall_command_requires_permission_and_confirms_with_reaction() -
 
 
 @pytest.mark.asyncio
-async def test_recall_command_falls_back_to_short_confirmation_reply() -> None:
+async def test_recall_command_stays_silent_when_confirmation_reaction_fails() -> None:
     use_case = RecallUseCase()
     message = CommandMessage()
     context = CommandContext(message, reaction_fails=True)
 
     await recall_router(use_case).dispatch(message, context)
 
-    assert context.replies == ["已撤回引用的回复。"]
+    assert context.reactions == []
+    assert context.replies == []
 
 
 @pytest.mark.asyncio

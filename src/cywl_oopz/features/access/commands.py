@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 from oopz_sdk.events.context import EventContext
 
@@ -19,6 +20,18 @@ from .service import AuthorizationService
 logger = logging.getLogger(__name__)
 
 
+class _RoleCommandSyntax:
+    """Normalize OOPZ's redundant inline mention markers in `/role` arguments."""
+
+    _mention_argument = re.compile(r"\(met\)[^\s()]+\(met\)", re.IGNORECASE)
+
+    @classmethod
+    def arguments(cls, command: ParsedCommand) -> tuple[str, ...]:
+        """Return semantic arguments; mentioned people still come from `mention_list`."""
+        source = command.raw_arguments or " ".join(command.arguments)
+        return tuple(cls._mention_argument.sub(" ", source).split())
+
+
 class RoleCommandAccess:
     """Resolve the mixed public/view/manage paths of `/role`."""
 
@@ -31,16 +44,17 @@ class RoleCommandAccess:
         command: ParsedCommand,
         invocation: OopzAccessInvocation,
     ) -> AccessRequirement | None:
-        if not command.arguments or command.arguments[0].casefold() == "me":
+        arguments = _RoleCommandSyntax.arguments(command)
+        if not arguments or arguments[0].casefold() == "me":
             return None
-        operation = command.arguments[0].casefold()
+        operation = arguments[0].casefold()
         if operation == "list":
             return AccessRequirement(Permission.RBAC_VIEW, invocation.resource)
         if operation in {"grant", "revoke"}:
             resource = invocation.resource
-            if len(command.arguments) >= 3:
+            if len(arguments) >= 3:
                 try:
-                    scope = RoleBindingScope(command.arguments[2].casefold())
+                    scope = RoleBindingScope(arguments[2].casefold())
                     resource = RoleAdministrationService.resource_for_scope(
                         scope, invocation.resource
                     )
@@ -87,7 +101,8 @@ class RoleCommand:
         self._administration = administration
 
     async def execute(self, command: ParsedCommand, context: EventContext) -> None:
-        operation = command.arguments[0].casefold() if command.arguments else ""
+        arguments = _RoleCommandSyntax.arguments(command)
+        operation = arguments[0].casefold() if arguments else ""
         try:
             if operation == "me":
                 await self._me(command, context)
@@ -105,7 +120,7 @@ class RoleCommand:
             await context.reply(self._input_error(exc))
 
     async def _me(self, command: ParsedCommand, context: EventContext) -> None:
-        if len(command.arguments) != 1 or self._mentioned_people(context):
+        if len(_RoleCommandSyntax.arguments(command)) != 1 or self._mentioned_people(context):
             raise ValueError("invalid_role_me")
         invocation = OopzAccessInvocation.from_context(context)
         roles = await self._authorizer.effective_roles(invocation.principal, invocation.resource)
@@ -131,7 +146,7 @@ class RoleCommand:
         )
 
     async def _list(self, command: ParsedCommand, context: EventContext) -> None:
-        if len(command.arguments) != 1:
+        if len(_RoleCommandSyntax.arguments(command)) != 1:
             raise ValueError("invalid_role_list")
         mentions = self._mentioned_people(context)
         if len(mentions) > 1:
@@ -159,14 +174,15 @@ class RoleCommand:
         command: ParsedCommand,
         context: EventContext,
     ) -> None:
-        if len(command.arguments) != 3:
+        arguments = _RoleCommandSyntax.arguments(command)
+        if len(arguments) != 3:
             raise ValueError("invalid_role_mutation")
         mentions = self._mentioned_people(context)
         if len(mentions) != 1:
             raise ValueError("role_target_required")
         try:
-            role = AccessRole(command.arguments[1].casefold())
-            scope = RoleBindingScope(command.arguments[2].casefold())
+            role = AccessRole(arguments[1].casefold())
+            scope = RoleBindingScope(arguments[2].casefold())
         except ValueError as exc:
             raise ValueError("invalid_role_or_scope") from exc
         invocation = OopzAccessInvocation.from_context(context)

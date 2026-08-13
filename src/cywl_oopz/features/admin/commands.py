@@ -298,7 +298,6 @@ class RecallCommand:
                 opaque_ref(reference_id),
                 type(exc).__name__,
             )
-            await context.reply("已撤回引用的回复。")
 
 
 def _message_address(context: EventContext) -> OopzMessageAddress:

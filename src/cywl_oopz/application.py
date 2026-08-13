@@ -40,6 +40,11 @@ from .features.admin.outbound_repository import (
     SqlAlchemyAgentDiagnosticRepository,
     SqlAlchemyOutboundMessageRepository,
 )
+from .features.admin.reaction_commands import (
+    DebugReactionCommand,
+    ReactionCommandRouter,
+    RecallReactionCommand,
+)
 from .features.admin.recall import MessageRecallService
 from .features.admin.references import ReferencedMessageResolver
 from .features.admin.repository import SqlAlchemyChannelInitializationRepository
@@ -187,6 +192,10 @@ from .integrations.oopz.message_recall import (
 )
 from .integrations.oopz.message_renderer import OopzMessageRenderer
 from .integrations.oopz.music import OopzMusicVoiceGateway
+from .integrations.oopz.reaction_commands import (
+    OopzReactionCommandInvocationParser,
+    OopzReactionCommandResponder,
+)
 from .integrations.oopz.reactions import OopzReactionGateway
 from .integrations.oopz.skill_sharing import OopzSkillShareNotifier
 from .integrations.oopz.tracked_context import TrackedMessageContext
@@ -611,6 +620,18 @@ class BotApplication:
             OopzBotMessageRecallGateway(self.bot),
         )
         self.referenced_message_parser = OopzReferencedMessageParser()
+        self.reaction_commands = ReactionCommandRouter(
+            self.authorization,
+            self.referenced_messages,
+            OopzReactionCommandResponder(self.editable_messages),
+        )
+        self.reaction_commands.register(RecallReactionCommand(self.message_recall))
+        self.reaction_commands.register(
+            DebugReactionCommand(
+                self.agent_diagnostics,
+                self.agent_diagnostic_renderer,
+            )
+        )
         self.legacy_chat = ChatService(
             settings.chat,
             self._provider,
@@ -704,6 +725,7 @@ class BotApplication:
         self._register_commands()
         self.bot.on_ready(self._on_ready)
         self.bot.on_message(self._on_message)
+        self.bot.on("message.reaction")(self._on_message_reaction)
         self.health.mark("database", HealthState.PENDING)
         self.health.mark(
             "llm",
@@ -1028,7 +1050,7 @@ class BotApplication:
             self._message_reference(message, context),
             bool(message.plain_text or message.text or message.content),
         )
-        command = self.commands.parse(message.plain_text or message.text or message.content)
+        command = self.commands.parse_message(message)
         if command is not None:
             logger.info(
                 "Dispatching command: name=%s conversation=%s",
@@ -1062,6 +1084,13 @@ class BotApplication:
                 self._message_reference(message, context),
             )
             await self._start_chat_task(context, self._ambient_handler.handle(message, context))
+
+    async def _on_message_reaction(self, context: EventContext, event: Any) -> None:
+        """Translate added reactions into curated, RBAC-protected commands."""
+        invocation = OopzReactionCommandInvocationParser.parse(context, event)
+        if invocation is None:
+            return
+        await self.reaction_commands.dispatch(invocation)
 
     async def _start_chat_task(
         self,

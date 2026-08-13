@@ -109,6 +109,25 @@ async def test_dispatch_executes_registered_command() -> None:
 
 
 @pytest.mark.asyncio
+async def test_dispatch_prefers_raw_text_before_plain_text_removes_mentions() -> None:
+    router = CommandRouter("/")
+    command = EchoCommand()
+    router.register(command)
+    message = FakeMessage(
+        "/echo leftright",
+        text="/echo left(met)target(met)right",
+    )
+
+    consumed = await router.dispatch(message, object())
+
+    assert consumed is True
+    assert command.received == ParsedCommand(
+        "echo",
+        ("left(met)target(met)right",),
+    )
+
+
+@pytest.mark.asyncio
 async def test_restricted_dispatch_denies_without_matching_global_role() -> None:
     authorizer = AuthorizationService(
         FakeRoleBindings(

@@ -5,15 +5,19 @@ from types import SimpleNamespace
 
 import pytest
 
-from cywl_oopz.commands.router import CommandRouter
+from cywl_oopz.commands.router import CommandRouter, ParsedCommand
 from cywl_oopz.features.access.administration import RoleAdministrationService
 from cywl_oopz.features.access.commands import RoleCommand, RoleCommandAccess, WhoAmICommand
 from cywl_oopz.features.access.models import (
+    AccessPrincipal,
+    AccessResource,
+    AccessResourceKind,
     AccessRole,
     RoleBinding,
     RoleBindingScope,
 )
 from cywl_oopz.features.access.service import AuthorizationService
+from cywl_oopz.integrations.oopz.access import OopzAccessInvocation
 
 
 @dataclass
@@ -88,8 +92,9 @@ class FakeMessage:
         person_id: str,
         *,
         mentions: tuple[str, ...] = (),
+        plain_text: str | None = None,
     ) -> None:
-        self.plain_text = text
+        self.plain_text = text if plain_text is None else plain_text
         self.text = text
         self.content = text
         self.sender_id = person_id
@@ -157,6 +162,51 @@ async def test_bootstrap_owner_grants_area_admin_and_change_is_immediate() -> No
     assert "当前角色：admin" in me_context.replies[0]
     assert "channel.initialize" in me_context.replies[0]
     assert "rbac.manage" not in me_context.replies[0]
+
+
+@pytest.mark.asyncio
+async def test_role_grant_uses_mention_list_and_ignores_oopz_inline_marker() -> None:
+    router, repository = router_and_repository()
+    target = "96610cfa481f11ef887a2ab75f6d1b3b"
+    message = FakeMessage(
+        f"/role grant(met){target}(met)admin area",
+        "owner",
+        mentions=(target,),
+        plain_text="/role grantadmin area",
+    )
+    context = FakeContext(message)
+
+    assert await router.dispatch(message, context)
+
+    assert context.replies == ["已授予：admin · area"]
+    assert repository.records == [
+        RoleBinding(
+            subject_person_id=target,
+            role=AccessRole.ADMIN,
+            scope=RoleBindingScope.AREA,
+            area_id="area",
+            granted_by_person_id="owner",
+        )
+    ]
+
+
+def test_role_grant_access_scope_ignores_oopz_inline_mention_marker() -> None:
+    target = "96610cfa481f11ef887a2ab75f6d1b3b"
+    command = ParsedCommand(
+        "role",
+        (f"grant(met){target}(met)admin", "area"),
+        f"grant(met){target}(met)admin area",
+    )
+    invocation = OopzAccessInvocation(
+        AccessPrincipal("owner"),
+        AccessResource.channel("area", "channel"),
+    )
+
+    requirement = RoleCommandAccess().requirement(command, invocation)
+
+    assert requirement is not None
+    assert requirement.resource.kind is AccessResourceKind.AREA
+    assert requirement.resource.area_id == "area"
 
 
 @pytest.mark.asyncio
