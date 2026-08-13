@@ -13,6 +13,7 @@ from oopz_sdk.events.context import EventContext
 from oopz_sdk.models import Message as OopzMessage
 
 from .commands.builtin import HelpCommand, PingCommand, StatusCommand
+from .commands.parsing import CommandTextParser
 from .commands.router import CommandRouter
 from .core.errors import ConfigurationError, DatabaseError
 from .core.health import HealthRegistry, HealthState
@@ -182,6 +183,7 @@ from .integrations.oopz.active_presentations import ActivePresentationRegistry
 from .integrations.oopz.agent_presenter import OopzAgentPresenterFactory
 from .integrations.oopz.channel_catalog import OopzAreaChannelCatalog
 from .integrations.oopz.chat_invocation import OopzChatInvocationFactory
+from .integrations.oopz.command_requests import OopzCommandRequestFactory
 from .integrations.oopz.diagnostic_renderer import OopzAgentDiagnosticRenderer
 from .integrations.oopz.editable_messages import OopzEditableMessageGateway
 from .integrations.oopz.master_audio import OopzMasterPcmOutputFactory
@@ -286,7 +288,13 @@ class BotApplication:
             edit_interval_seconds=settings.agent.display_edit_interval_seconds,
             active_presentations=self.active_agent_presentations,
         )
-        self.commands = CommandRouter(settings.command_prefix, self.authorization)
+        self.command_parser = CommandTextParser(settings.command_prefix)
+        self.commands = CommandRouter(
+            settings.command_prefix,
+            self.authorization,
+            parser=self.command_parser,
+        )
+        self.command_requests = OopzCommandRequestFactory(self.command_parser)
         catalog_repository = SqlAlchemyProviderCatalogRepository(self.database.session_factory)
         self.agent_catalog = ReloadableProviderCatalog(catalog_repository)
         self.agent_catalog_admin = ProviderCatalogAdminService(
@@ -1050,17 +1058,28 @@ class BotApplication:
             self._message_reference(message, context),
             bool(message.plain_text or message.text or message.content),
         )
-        command = self.commands.parse_message(message)
-        if command is not None:
+        try:
+            command_request = self.command_requests.from_message(message, context)
+        except ValueError as exc:
+            logger.warning(
+                "Could not project OOPZ command request: conversation=%s error=%s",
+                self._message_reference(message, context),
+                exception_kind(exc),
+            )
+            return
+        if command_request is not None:
+            command_text = command_request.text
+            assert command_text is not None
             logger.info(
                 "Dispatching command: name=%s conversation=%s",
-                command.name,
+                command_text.name,
                 self._message_reference(message, context),
             )
-            if command.name == "chat":
-                await self._start_chat_task(context, self.commands.dispatch(message, context))
+            operation = self.commands.dispatch_request(command_request, context)
+            if command_text.name == "chat":
+                await self._start_chat_task(context, operation)
                 return
-            await self.commands.dispatch(message, context)
+            await operation
             return
         if self._mention_handler.matches(message):
             logger.info(

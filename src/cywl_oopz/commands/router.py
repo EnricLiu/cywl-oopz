@@ -4,16 +4,26 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Any, Protocol
 
 from oopz_sdk.events.context import EventContext
 from oopz_sdk.models import Message as OopzMessage
 
 from cywl_oopz.core.errors import AuthorizationError, DatabaseError
 from cywl_oopz.core.observability import opaque_ref
-from cywl_oopz.features.access.models import AccessResource, Permission
+from cywl_oopz.features.access.models import AccessPrincipal, AccessResource, Permission
 from cywl_oopz.features.access.service import AuthorizationService
 from cywl_oopz.integrations.oopz.access import OopzAccessInvocation
+
+from .models import (
+    CommandRequest,
+    CommandScope,
+    CommandText,
+    DispatchOutcome,
+    DispatchStatus,
+)
+from .parsing import CommandTextParser
+from .responses import CommandResponder
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +35,11 @@ class ParsedCommand:
     name: str
     arguments: tuple[str, ...]
     raw_arguments: str = field(default="", compare=False)
+
+    @classmethod
+    def from_text(cls, text: CommandText) -> ParsedCommand:
+        """Project new root text into the temporary legacy command contract."""
+        return cls(text.name, text.tokens, text.raw_tail)
 
 
 class Command(Protocol):
@@ -80,10 +95,13 @@ class CommandRouter:
         self,
         prefix: str,
         authorizer: AuthorizationService | None = None,
+        *,
+        parser: CommandTextParser | None = None,
     ) -> None:
-        if not prefix:
-            raise ValueError("Command prefix must not be empty")
-        self.prefix = prefix
+        self._parser = parser or CommandTextParser(prefix)
+        if self._parser.prefix != prefix:
+            raise ValueError("Command router and parser prefixes must match")
+        self.prefix = self._parser.prefix
         self._authorizer = authorizer
         self._commands: dict[str, RegisteredCommand] = {}
 
@@ -145,7 +163,7 @@ class CommandRouter:
         return tuple(available)
 
     async def dispatch(self, message: OopzMessage, context: EventContext) -> bool:
-        """Execute a matching command and report whether the message was consumed."""
+        """Compatibility entry point for legacy feature tests and integrations."""
         command = self.parse_message(message)
         if command is None:
             return False
@@ -154,9 +172,53 @@ class CommandRouter:
         if registration is None:
             return False
 
+        invocation = (
+            OopzAccessInvocation.from_context(context) if registration.access is not None else None
+        )
+        outcome = await self._execute(
+            registration,
+            command,
+            invocation,
+            context,
+            context,
+        )
+        return outcome.status not in {DispatchStatus.NOT_A_COMMAND, DispatchStatus.UNKNOWN}
+
+    async def dispatch_request(
+        self,
+        request: CommandRequest,
+        legacy_context: Any,
+    ) -> DispatchOutcome:
+        """Dispatch one already-parsed request without reading the SDK message again."""
+        text = request.text
+        if text is None:
+            return DispatchOutcome(DispatchStatus.NOT_A_COMMAND)
+        registration = self._commands.get(text.name)
+        if registration is None:
+            return DispatchOutcome(DispatchStatus.UNKNOWN, text.name)
+
+        invocation = self._access_invocation(request) if registration.access is not None else None
+        return await self._execute(
+            registration,
+            ParsedCommand.from_text(text),
+            invocation,
+            request.responder,
+            legacy_context,
+        )
+
+    async def _execute(
+        self,
+        registration: RegisteredCommand,
+        command: ParsedCommand,
+        invocation: OopzAccessInvocation | None,
+        responder: CommandResponder,
+        legacy_context: Any,
+    ) -> DispatchOutcome:
+        """Authorize and invoke the legacy command behind the new request boundary."""
+
         access = registration.access
         if access is not None:
-            invocation = OopzAccessInvocation.from_context(context)
+            assert invocation is not None
             requirement = access.requirement(command, invocation)
             if requirement is not None:
                 assert self._authorizer is not None
@@ -174,19 +236,19 @@ class CommandRouter:
                         requirement.permission.value,
                         self._resource_ref(requirement.resource),
                     )
-                    await context.reply("你没有执行此操作的权限。")
-                    return True
+                    await responder.reply("你没有执行此操作的权限。")
+                    return DispatchOutcome(DispatchStatus.DENIED, command.name)
                 except DatabaseError as exc:
                     logger.warning(
                         "Command authorization unavailable: command=%s error=%s",
                         command.name,
                         type(exc).__name__,
                     )
-                    await context.reply("权限服务暂时不可用，请稍后重试。")
-                    return True
+                    await responder.reply("权限服务暂时不可用，请稍后重试。")
+                    return DispatchOutcome(DispatchStatus.FAILED, command.name)
 
-        await registration.command.execute(command, context)
-        return True
+        await registration.command.execute(command, legacy_context)
+        return DispatchOutcome(DispatchStatus.COMPLETED, command.name)
 
     def parse_message(self, message: OopzMessage) -> ParsedCommand | None:
         """Parse raw OOPZ text before its mention segments are removed from plain text."""
@@ -198,21 +260,21 @@ class CommandRouter:
         return self.parse(text)
 
     def parse(self, text: str) -> ParsedCommand | None:
-        """Parse one prefix command without interpreting non-command chat messages."""
-        content = text.strip()
-        if not content.startswith(self.prefix):
-            return None
+        """Compatibility projection over the project-owned root parser."""
+        parsed = self._parser.parse(text)
+        return ParsedCommand.from_text(parsed) if parsed is not None else None
 
-        command_line = content[len(self.prefix) :].lstrip()
-        parts = command_line.split(maxsplit=1)
-        if not parts:
-            return None
-        raw_arguments = parts[1] if len(parts) == 2 else ""
-        return ParsedCommand(
-            name=parts[0].casefold(),
-            arguments=tuple(raw_arguments.split()),
-            raw_arguments=raw_arguments,
+    @staticmethod
+    def _access_invocation(request: CommandRequest) -> OopzAccessInvocation:
+        resource = (
+            AccessResource.private()
+            if request.location.scope is CommandScope.PRIVATE
+            else AccessResource.channel(
+                request.location.area_id,
+                request.location.channel_id,
+            )
         )
+        return OopzAccessInvocation(AccessPrincipal(request.actor.person_id), resource)
 
     @staticmethod
     def _resource_ref(resource: AccessResource) -> str:
