@@ -13,6 +13,7 @@ from cywl_oopz.features.access.models import (
     RoleBindingScope,
 )
 from cywl_oopz.features.access.service import AuthorizationService
+from cywl_oopz.features.admin.actions import DebugMessageAction, RecallMessageAction
 from cywl_oopz.features.admin.models import (
     MessageRecallOutcome,
     OopzMessageAddress,
@@ -162,11 +163,32 @@ async def test_recall_reaction_checks_permission_and_recalls_exact_message() -> 
         TargetResolver(),  # type: ignore[arg-type]
         responder,
     )
-    router.register(RecallReactionCommand(recall))  # type: ignore[arg-type]
+    router.register(
+        RecallReactionCommand(RecallMessageAction(recall))  # type: ignore[arg-type]
+    )
 
     consumed = await router.dispatch(invocation("🫥"))
 
     assert consumed is True
+    assert recall.calls == [("bot-message", ADDRESS)]
+    assert responder.messages == []
+
+
+@pytest.mark.asyncio
+async def test_recall_reaction_treats_already_recalled_as_silent_idempotent_success() -> None:
+    recall = RecallService(MessageRecallOutcome.ALREADY_RECALLED)
+    responder = RecordingResponder()
+    router = ReactionCommandRouter(
+        authorizer(AccessRole.MODERATOR),
+        TargetResolver(),  # type: ignore[arg-type]
+        responder,
+    )
+    router.register(
+        RecallReactionCommand(RecallMessageAction(recall))  # type: ignore[arg-type]
+    )
+
+    assert await router.dispatch(invocation("🫥")) is True
+
     assert recall.calls == [("bot-message", ADDRESS)]
     assert responder.messages == []
 
@@ -182,7 +204,11 @@ async def test_debug_reaction_renders_bounded_normal_diagnostics() -> None:
         TargetResolver(),  # type: ignore[arg-type]
         responder,
     )
-    router.register(DebugReactionCommand(repository, renderer))  # type: ignore[arg-type]
+    router.register(
+        DebugReactionCommand(
+            DebugMessageAction(repository, renderer)  # type: ignore[arg-type]
+        )
+    )
 
     consumed = await router.dispatch(invocation("🤯"))
 
@@ -204,7 +230,9 @@ async def test_reaction_command_denial_happens_before_action() -> None:
         TargetResolver(),  # type: ignore[arg-type]
         responder,
     )
-    router.register(RecallReactionCommand(recall))  # type: ignore[arg-type]
+    router.register(
+        RecallReactionCommand(RecallMessageAction(recall))  # type: ignore[arg-type]
+    )
 
     consumed = await router.dispatch(invocation("🫥"))
 
@@ -237,8 +265,14 @@ async def test_reaction_on_non_bot_message_is_silent(emoji: str) -> None:
         TargetResolver(tracked=False),  # type: ignore[arg-type]
         responder,
     )
-    router.register(RecallReactionCommand(recall))  # type: ignore[arg-type]
-    router.register(DebugReactionCommand(repository, DiagnosticRenderer()))  # type: ignore[arg-type]
+    router.register(
+        RecallReactionCommand(RecallMessageAction(recall))  # type: ignore[arg-type]
+    )
+    router.register(
+        DebugReactionCommand(
+            DebugMessageAction(repository, DiagnosticRenderer())  # type: ignore[arg-type]
+        )
+    )
 
     assert await router.dispatch(invocation(emoji)) is True
 
@@ -256,7 +290,11 @@ async def test_tracked_non_agent_message_debug_reaction_is_silent() -> None:
         TargetResolver(),  # type: ignore[arg-type]
         responder,
     )
-    router.register(DebugReactionCommand(repository, DiagnosticRenderer()))  # type: ignore[arg-type]
+    router.register(
+        DebugReactionCommand(
+            DebugMessageAction(repository, DiagnosticRenderer())  # type: ignore[arg-type]
+        )
+    )
 
     assert await router.dispatch(invocation("🤯")) is True
 

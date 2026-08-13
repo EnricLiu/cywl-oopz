@@ -12,12 +12,16 @@ from cywl_oopz.core.observability import exception_kind, opaque_ref
 from cywl_oopz.features.access.models import AccessPrincipal, AccessResource, Permission
 from cywl_oopz.features.access.service import AuthorizationService
 
-from .models import MessageRecallOutcome, OopzMessageAddress
-from .ports import AgentDiagnosticRenderer, AgentDiagnosticRepository
+from .actions import (
+    DebugActionStatus,
+    DebugMessageAction,
+    MessageActionTarget,
+    RecallActionStatus,
+    RecallMessageAction,
+)
+from .models import OopzMessageAddress
 from .recall import (
     BotMessageRecallTransportError,
-    MessageRecallService,
-    ReferencedBotMessageNotFoundError,
 )
 from .references import ReferencedMessageResolver
 
@@ -192,43 +196,32 @@ class RecallReactionCommand:
 
     emoji = "🫥"
     permission = Permission.BOT_MESSAGE_RECALL
-    timeout_seconds = 10.0
 
-    def __init__(self, service: MessageRecallService) -> None:
-        self._service = service
+    def __init__(self, action: RecallMessageAction) -> None:
+        self._action = action
 
     async def execute(
         self,
         invocation: ReactionCommandInvocation,
     ) -> ReactionCommandResult:
-        try:
-            async with asyncio.timeout(self.timeout_seconds):
-                outcome = await self._service.recall(
-                    invocation.message_id,
-                    invocation.address,
-                )
-        except ReferencedBotMessageNotFoundError:
-            logger.debug(
-                "Reaction recall target disappeared: message=%s",
-                opaque_ref(invocation.message_id),
-            )
+        outcome = await self._action.execute(
+            MessageActionTarget(invocation.message_id, invocation.address)
+        )
+        if outcome in {
+            RecallActionStatus.RECALLED,
+            RecallActionStatus.ALREADY_RECALLED,
+            RecallActionStatus.NOT_APPLICABLE,
+        }:
             return ReactionCommandResult()
-        except (BotMessageRecallTransportError, TimeoutError) as exc:
+        if outcome is RecallActionStatus.UNAVAILABLE:
             raise ReactionCommandFailure(
                 "撤回失败，请稍后重试。",
                 code="recall_unavailable",
-            ) from exc
-        except DatabaseError as exc:
-            raise ReactionCommandFailure(
-                "撤回服务暂时不可用，请稍后重试。",
-                code="recall_persistence_unavailable",
-            ) from exc
-        if outcome is MessageRecallOutcome.ALREADY_RECALLED:
-            raise ReactionCommandFailure(
-                "这条回复已经撤回。",
-                code="already_recalled",
             )
-        return ReactionCommandResult()
+        raise ReactionCommandFailure(
+            "撤回服务暂时不可用，请稍后重试。",
+            code="recall_persistence_unavailable",
+        )
 
 
 class DebugReactionCommand:
@@ -236,35 +229,23 @@ class DebugReactionCommand:
 
     emoji = "🤯"
     permission = Permission.AGENT_RESPONSE_DEBUG
-    timeout_seconds = 10.0
 
-    def __init__(
-        self,
-        repository: AgentDiagnosticRepository,
-        renderer: AgentDiagnosticRenderer,
-    ) -> None:
-        self._repository = repository
-        self._renderer = renderer
+    def __init__(self, action: DebugMessageAction) -> None:
+        self._action = action
 
     async def execute(
         self,
         invocation: ReactionCommandInvocation,
     ) -> ReactionCommandResult:
-        try:
-            async with asyncio.timeout(self.timeout_seconds):
-                diagnostic = await self._repository.get_by_outbound_message(
-                    invocation.message_id,
-                    invocation.address,
-                )
-        except (DatabaseError, TimeoutError) as exc:
+        result = await self._action.execute(
+            MessageActionTarget(invocation.message_id, invocation.address),
+            verbose=False,
+        )
+        if result.status is DebugActionStatus.UNAVAILABLE:
             raise ReactionCommandFailure(
                 "诊断服务暂时不可用，请稍后重试。",
                 code="diagnostic_unavailable",
-            ) from exc
-        if diagnostic is None:
-            logger.debug(
-                "Ignored debug reaction without Agent diagnostic: message=%s",
-                opaque_ref(invocation.message_id),
             )
+        if result.status is DebugActionStatus.NOT_APPLICABLE:
             return ReactionCommandResult()
-        return ReactionCommandResult(self._renderer.render(diagnostic, verbose=False))
+        return ReactionCommandResult(result.pages)

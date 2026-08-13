@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from dataclasses import dataclass
 from enum import StrEnum
@@ -22,21 +21,21 @@ from cywl_oopz.core.errors import DatabaseError
 from cywl_oopz.core.observability import opaque_ref
 from cywl_oopz.features.access.models import AccessResource, Permission
 
+from .actions import (
+    DebugActionStatus,
+    DebugMessageAction,
+    MessageActionTarget,
+    RecallActionStatus,
+    RecallMessageAction,
+)
 from .initialization import ChannelCatalogError, ChannelInitializationService
 from .lifecycle import ApplicationLifecycleCoordinator
 from .models import (
     AreaInitializationResult,
     ChannelKey,
-    MessageRecallOutcome,
     OopzMessageAddress,
     OopzMessageScope,
     ReferencedMessageCandidate,
-)
-from .ports import AgentDiagnosticRenderer, AgentDiagnosticRepository
-from .recall import (
-    BotMessageRecallTransportError,
-    MessageRecallService,
-    ReferencedBotMessageNotFoundError,
 )
 
 logger = logging.getLogger(__name__)
@@ -224,15 +223,9 @@ class DebugCommand:
     description = "展开引用的 Agent 回复及工具调用详情。"
     category = "权限与管理"
     usage = ("debug [-v|--verbose]（请引用 Agent 回复）",)
-    timeout_seconds = 10.0
 
-    def __init__(
-        self,
-        repository: AgentDiagnosticRepository,
-        renderer: AgentDiagnosticRenderer,
-    ) -> None:
-        self._repository = repository
-        self._renderer = renderer
+    def __init__(self, action: DebugMessageAction) -> None:
+        self._action = action
 
     def definition(self) -> CommandDefinition[DebugArguments]:
         return CommandDefinition(
@@ -244,31 +237,25 @@ class DebugCommand:
         )
 
     async def handle(self, request: CommandRequest, arguments: DebugArguments) -> None:
-        try:
-            address = _request_message_address(request)
-            async with asyncio.timeout(self.timeout_seconds):
-                diagnostic = await self._repository.get_by_outbound_message(
-                    arguments.reference_message_id,
-                    address,
-                )
-        except (DatabaseError, TimeoutError) as exc:
-            logger.warning(
-                "Agent diagnostic lookup unavailable: message=%s error=%s",
-                opaque_ref(arguments.reference_message_id),
-                type(exc).__name__,
-            )
+        result = await self._action.execute(
+            MessageActionTarget(
+                arguments.reference_message_id,
+                _request_message_address(request),
+            ),
+            verbose=arguments.verbose,
+        )
+        if result.status is DebugActionStatus.UNAVAILABLE:
             await request.responder.reply("诊断服务暂时不可用，请稍后重试。")
             return
-        if diagnostic is None:
+        if result.status is DebugActionStatus.NOT_APPLICABLE:
             await request.responder.reply("引用的消息没有可用的 Agent 运行详情。")
             return
-        pages = self._renderer.render(diagnostic, verbose=arguments.verbose)
-        for page in pages:
+        for page in result.pages:
             await request.responder.reply(page)
         logger.info(
             "Agent diagnostic rendered: message=%s pages=%s verbose=%s",
             opaque_ref(arguments.reference_message_id),
-            len(pages),
+            len(result.pages),
             arguments.verbose,
         )
 
@@ -320,13 +307,9 @@ class RecallCommand:
     description = "撤回引用的一条 CYWL 回复。"
     category = "权限与管理"
     usage = ("recall（请引用一条 CYWL 回复）",)
-    timeout_seconds = 10.0
 
-    def __init__(
-        self,
-        service: MessageRecallService,
-    ) -> None:
-        self._service = service
+    def __init__(self, action: RecallMessageAction) -> None:
+        self._action = action
 
     def definition(self) -> CommandDefinition[RecallArguments]:
         return CommandDefinition(
@@ -338,33 +321,23 @@ class RecallCommand:
         )
 
     async def handle(self, request: CommandRequest, arguments: RecallArguments) -> None:
-        try:
-            async with asyncio.timeout(self.timeout_seconds):
-                outcome = await self._service.recall(
-                    arguments.reference_message_id,
-                    _request_message_address(request),
-                    arguments.embedded,
-                )
-        except ReferencedBotMessageNotFoundError:
+        outcome = await self._action.execute(
+            MessageActionTarget(
+                arguments.reference_message_id,
+                _request_message_address(request),
+                arguments.embedded,
+            )
+        )
+        if outcome is RecallActionStatus.NOT_APPLICABLE:
             await request.responder.reply("引用的消息不是可撤回的 CYWL 回复。")
             return
-        except (BotMessageRecallTransportError, TimeoutError) as exc:
-            logger.warning(
-                "Bot message recall unavailable: message=%s error=%s",
-                opaque_ref(arguments.reference_message_id),
-                type(exc).__name__,
-            )
+        if outcome is RecallActionStatus.UNAVAILABLE:
             await request.responder.reply("撤回失败，请稍后重试。")
             return
-        except DatabaseError as exc:
-            logger.warning(
-                "Bot message recall persistence unavailable: message=%s error=%s",
-                opaque_ref(arguments.reference_message_id),
-                type(exc).__name__,
-            )
+        if outcome is RecallActionStatus.PERSISTENCE_UNAVAILABLE:
             await request.responder.reply("撤回服务暂时不可用，请稍后重试。")
             return
-        if outcome is MessageRecallOutcome.ALREADY_RECALLED:
+        if outcome is RecallActionStatus.ALREADY_RECALLED:
             await request.responder.reply("这条回复已经撤回。")
             return
         await self._confirm_responder(request, arguments.reference_message_id)

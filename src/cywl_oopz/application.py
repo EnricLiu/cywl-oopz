@@ -26,6 +26,7 @@ from .features.access.agent_tools import AgentToolAuthorizationAdapter
 from .features.access.commands import RoleCommand, WhoAmICommand
 from .features.access.repository import SqlAlchemyRoleBindingRepository
 from .features.access.service import AuthorizationService
+from .features.admin.actions import DebugMessageAction, RecallMessageAction
 from .features.admin.commands import (
     DebugCommand,
     InitCommand,
@@ -631,18 +632,18 @@ class BotApplication:
             OutboundChatTaskCanceller(self.chat_tasks),
             OopzBotMessageRecallGateway(self.bot),
         )
+        self.recall_message_action = RecallMessageAction(self.message_recall)
+        self.debug_message_action = DebugMessageAction(
+            self.agent_diagnostics,
+            self.agent_diagnostic_renderer,
+        )
         self.reaction_commands = ReactionCommandRouter(
             self.authorization,
             self.referenced_messages,
             OopzReactionCommandResponder(self.editable_messages),
         )
-        self.reaction_commands.register(RecallReactionCommand(self.message_recall))
-        self.reaction_commands.register(
-            DebugReactionCommand(
-                self.agent_diagnostics,
-                self.agent_diagnostic_renderer,
-            )
-        )
+        self.reaction_commands.register(RecallReactionCommand(self.recall_message_action))
+        self.reaction_commands.register(DebugReactionCommand(self.debug_message_action))
         self.legacy_chat = ChatService(
             settings.chat,
             self._provider,
@@ -786,13 +787,8 @@ class BotApplication:
             ).definition()
         )
         self.commands.register_definition(InitCommand(self.channel_initialization).definition())
-        self.commands.register_definition(
-            DebugCommand(
-                self.agent_diagnostics,
-                self.agent_diagnostic_renderer,
-            ).definition()
-        )
-        self.commands.register_definition(RecallCommand(self.message_recall).definition())
+        self.commands.register_definition(DebugCommand(self.debug_message_action).definition())
+        self.commands.register_definition(RecallCommand(self.recall_message_action).definition())
         self.commands.register_definition(RebootCommand(self.lifecycle).definition())
         self.commands.register(
             ChatCommand(
