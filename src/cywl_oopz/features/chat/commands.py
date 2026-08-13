@@ -12,6 +12,8 @@ from oopz_sdk.models import Message as OopzMessage
 from cywl_oopz.commands.catalog import CommandSpec
 from cywl_oopz.commands.definitions import (
     CommandDefinition,
+    CommandExecutionPolicy,
+    ExecutionMode,
     NoArguments,
     NoArgumentsParser,
     PublicCommandAuthorization,
@@ -324,6 +326,7 @@ class NewConversationCommand(ChatCommandController):
             NoArgumentsParser(),
             self,
             PublicCommandAuthorization(),
+            CommandExecutionPolicy(ExecutionMode.BACKGROUND, timeout_seconds=15.0),
         )
 
     async def handle(self, request: CommandRequest, arguments: NoArguments) -> None:
@@ -373,6 +376,7 @@ class CancelChatCommand(ChatCommandController):
             NoArgumentsParser(),
             self,
             PublicCommandAuthorization(),
+            CommandExecutionPolicy(ExecutionMode.BACKGROUND, timeout_seconds=10.0),
         )
 
     async def handle(self, request: CommandRequest, arguments: NoArguments) -> None:
@@ -450,6 +454,7 @@ class ChatStatusCommand(ChatCommandController):
             NoArgumentsParser(),
             self,
             PublicCommandAuthorization(),
+            CommandExecutionPolicy(ExecutionMode.BACKGROUND, timeout_seconds=10.0),
         )
 
     async def handle(self, request: CommandRequest, arguments: NoArguments) -> None:

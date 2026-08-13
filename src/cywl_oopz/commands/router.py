@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
+from collections.abc import Coroutine
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -10,13 +13,20 @@ from oopz_sdk.events.context import EventContext
 from oopz_sdk.models import Message as OopzMessage
 
 from cywl_oopz.core.errors import AuthorizationError, DatabaseError
-from cywl_oopz.core.observability import opaque_ref
+from cywl_oopz.core.observability import exception_kind, opaque_ref
 from cywl_oopz.features.access.models import AccessPrincipal, AccessResource
 from cywl_oopz.features.access.service import AuthorizationService
 from cywl_oopz.integrations.oopz.access import OopzAccessInvocation
 
 from .catalog import CommandCatalog, CommandSpec
-from .definitions import AccessRequirement, CommandDefinition, CommandUsageError
+from .definitions import (
+    AccessRequirement,
+    CommandDefinition,
+    CommandExecutionPolicy,
+    CommandUsageError,
+    ExecutionMode,
+)
+from .execution import CommandTaskSupervisor
 from .models import (
     CommandRequest,
     CommandScope,
@@ -82,6 +92,7 @@ class RegisteredCommand:
     command: Command | None = None
     access: CommandAccessPolicy | None = None
     definition: CommandDefinition[Any] | None = None
+    execution: CommandExecutionPolicy = field(default_factory=CommandExecutionPolicy)
 
     def __post_init__(self) -> None:
         if (self.command is None) == (self.definition is None):
@@ -104,12 +115,14 @@ class CommandRouter:
         authorizer: AuthorizationService | None = None,
         *,
         parser: CommandTextParser | None = None,
+        supervisor: CommandTaskSupervisor | None = None,
     ) -> None:
         self._parser = parser or CommandTextParser(prefix)
         if self._parser.prefix != prefix:
             raise ValueError("Command router and parser prefixes must match")
         self.prefix = self._parser.prefix
         self._authorizer = authorizer
+        self._supervisor = supervisor
         self._catalog: CommandCatalog[RegisteredCommand] = CommandCatalog()
 
     @property
@@ -128,6 +141,7 @@ class CommandRouter:
         *,
         access: CommandAccessPolicy | None = None,
         spec: CommandSpec | None = None,
+        execution: CommandExecutionPolicy | None = None,
     ) -> None:
         """Register one legacy command behind the compatibility adapter."""
         resolved_spec = spec or CommandSpec.from_command(command)
@@ -137,7 +151,12 @@ class CommandRouter:
             raise ValueError("Restricted commands require a CommandRouter authorizer")
         self._catalog.register(
             resolved_spec,
-            RegisteredCommand(resolved_spec, command=command, access=access),
+            RegisteredCommand(
+                resolved_spec,
+                command=command,
+                access=access,
+                execution=execution or CommandExecutionPolicy(),
+            ),
         )
 
     def register_definition(self, definition: CommandDefinition[Any]) -> None:
@@ -271,12 +290,17 @@ class CommandRouter:
 
         command = self._canonical(ParsedCommand.from_text(text), registration.spec)
         invocation = self._access_invocation(request) if registration.access is not None else None
-        return await self._execute_legacy(
-            registration,
-            command,
-            invocation,
-            request.responder,
-            legacy_context,
+        return await self._schedule_or_run(
+            command.name,
+            registration.execution,
+            request,
+            self._run_legacy(
+                registration,
+                command,
+                invocation,
+                request,
+                legacy_context,
+            ),
         )
 
     async def _execute_definition(
@@ -290,6 +314,116 @@ class CommandRouter:
             await request.responder.reply(exc.render(definition.spec, self.prefix))
             return DispatchOutcome(DispatchStatus.COMPLETED, definition.spec.name)
 
+        return await self._schedule_or_run(
+            definition.spec.name,
+            definition.execution,
+            request,
+            self._run_definition(definition, request, arguments),
+        )
+
+    async def _schedule_or_run(
+        self,
+        command_name: str,
+        execution: CommandExecutionPolicy,
+        request: CommandRequest,
+        operation: Coroutine[Any, Any, DispatchOutcome],
+    ) -> DispatchOutcome:
+        if execution.mode is ExecutionMode.BACKGROUND and self._supervisor is not None:
+            request_ref = self._request_ref(request)
+            if self._supervisor.start(command_name, request_ref, operation):
+                return DispatchOutcome(DispatchStatus.STARTED, command_name)
+            await self._safe_reply(
+                request.responder,
+                "Bot 正在关闭，暂不接受新的命令。",
+                command_name,
+            )
+            return DispatchOutcome(DispatchStatus.IGNORED, command_name)
+        return await operation
+
+    async def _run_definition(
+        self,
+        definition: CommandDefinition[Any],
+        request: CommandRequest,
+        arguments: Any,
+    ) -> DispatchOutcome:
+        started_at = time.monotonic()
+        command_name = definition.spec.name
+        request_ref = self._request_ref(request)
+        outcome: DispatchOutcome | None = None
+        logger.debug(
+            "Command execution started: command=%s trigger=%s request=%s",
+            command_name,
+            request.trigger.value,
+            request_ref,
+        )
+        try:
+            if definition.execution.timeout_seconds is None:
+                outcome = await self._authorize_and_handle(definition, request, arguments)
+            else:
+                async with asyncio.timeout(definition.execution.timeout_seconds):
+                    outcome = await self._authorize_and_handle(definition, request, arguments)
+            return outcome
+        except TimeoutError as exc:
+            timeout_seconds = definition.execution.timeout_seconds
+            if timeout_seconds is None:
+                logger.exception(
+                    "Command execution failed unexpectedly: command=%s request=%s error=%s",
+                    command_name,
+                    request_ref,
+                    exception_kind(exc),
+                )
+                user_message = "命令执行失败，请稍后重试。"
+            else:
+                logger.warning(
+                    "Command execution timed out: command=%s request=%s timeout_seconds=%.1f",
+                    command_name,
+                    request_ref,
+                    timeout_seconds,
+                )
+                user_message = "命令执行超时，请稍后重试。"
+            await self._safe_reply(
+                request.responder,
+                user_message,
+                command_name,
+            )
+            outcome = DispatchOutcome(DispatchStatus.FAILED, command_name)
+            return outcome
+        except asyncio.CancelledError:
+            logger.info(
+                "Command execution cancelled: command=%s request=%s",
+                command_name,
+                request_ref,
+            )
+            raise
+        except Exception as exc:
+            logger.exception(
+                "Command execution failed unexpectedly: command=%s request=%s error=%s",
+                command_name,
+                request_ref,
+                exception_kind(exc),
+            )
+            await self._safe_reply(
+                request.responder,
+                "命令执行失败，请稍后重试。",
+                command_name,
+            )
+            outcome = DispatchOutcome(DispatchStatus.FAILED, command_name)
+            return outcome
+        finally:
+            logger.info(
+                "Command execution finished: command=%s request=%s outcome=%s duration_ms=%s",
+                command_name,
+                request_ref,
+                outcome.status.value if outcome is not None else "cancelled",
+                round((time.monotonic() - started_at) * 1000),
+            )
+
+    async def _authorize_and_handle(
+        self,
+        definition: CommandDefinition[Any],
+        request: CommandRequest,
+        arguments: Any,
+    ) -> DispatchOutcome:
         requirement = definition.authorization.requirement(request, arguments)
         if requirement is not None:
             outcome = await self._require(
@@ -322,8 +456,89 @@ class CommandRouter:
                     return outcome
 
         assert registration.command is not None
-        await registration.command.execute(command, legacy_context)
+        try:
+            await registration.command.execute(command, legacy_context)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception(
+                "Legacy command failed unexpectedly: command=%s error=%s",
+                command.name,
+                exception_kind(exc),
+            )
+            await self._safe_reply(
+                responder,
+                "命令执行失败，请稍后重试。",
+                command.name,
+            )
+            return DispatchOutcome(DispatchStatus.FAILED, command.name)
         return DispatchOutcome(DispatchStatus.COMPLETED, command.name)
+
+    async def _run_legacy(
+        self,
+        registration: RegisteredCommand,
+        command: ParsedCommand,
+        invocation: OopzAccessInvocation | None,
+        request: CommandRequest,
+        legacy_context: Any,
+    ) -> DispatchOutcome:
+        started_at = time.monotonic()
+        request_ref = self._request_ref(request)
+        outcome: DispatchOutcome | None = None
+        logger.debug(
+            "Legacy command execution started: command=%s request=%s",
+            command.name,
+            request_ref,
+        )
+        try:
+            if registration.execution.timeout_seconds is None:
+                outcome = await self._execute_legacy(
+                    registration,
+                    command,
+                    invocation,
+                    request.responder,
+                    legacy_context,
+                )
+            else:
+                async with asyncio.timeout(registration.execution.timeout_seconds):
+                    outcome = await self._execute_legacy(
+                        registration,
+                        command,
+                        invocation,
+                        request.responder,
+                        legacy_context,
+                    )
+            return outcome
+        except TimeoutError:
+            logger.warning(
+                "Legacy command execution timed out: command=%s request=%s timeout_seconds=%.1f",
+                command.name,
+                request_ref,
+                registration.execution.timeout_seconds,
+            )
+            await self._safe_reply(
+                request.responder,
+                "命令执行超时，请稍后重试。",
+                command.name,
+            )
+            outcome = DispatchOutcome(DispatchStatus.FAILED, command.name)
+            return outcome
+        except asyncio.CancelledError:
+            logger.info(
+                "Legacy command execution cancelled: command=%s request=%s",
+                command.name,
+                request_ref,
+            )
+            raise
+        finally:
+            logger.info(
+                "Legacy command execution finished: command=%s request=%s outcome=%s "
+                "duration_ms=%s",
+                command.name,
+                request_ref,
+                outcome.status.value if outcome is not None else "cancelled",
+                round((time.monotonic() - started_at) * 1000),
+            )
 
     async def _require(
         self,
@@ -395,3 +610,29 @@ class CommandRouter:
     @staticmethod
     def _resource_ref(resource: AccessResource) -> str:
         return opaque_ref(resource.kind.value, resource.area_id, resource.channel_id)
+
+    @staticmethod
+    def _request_ref(request: CommandRequest) -> str:
+        return opaque_ref(
+            request.trigger.value,
+            request.source.message_id,
+            request.actor.person_id,
+            request.location.scope.value,
+            request.location.area_id,
+            request.location.channel_id,
+        )
+
+    @staticmethod
+    async def _safe_reply(
+        responder: CommandResponder,
+        message: str,
+        command_name: str,
+    ) -> None:
+        try:
+            await responder.reply(message)
+        except Exception as exc:
+            logger.warning(
+                "Could not deliver command failure response: command=%s error=%s",
+                command_name,
+                exception_kind(exc),
+            )

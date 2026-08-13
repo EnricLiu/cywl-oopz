@@ -11,7 +11,9 @@ from cywl_oopz.commands.catalog import CommandSpec
 from cywl_oopz.commands.definitions import (
     AccessRequirement,
     CommandDefinition,
+    CommandExecutionPolicy,
     CommandUsageError,
+    ExecutionMode,
     NoArguments,
     NoArgumentsParser,
     PublicCommandAuthorization,
@@ -193,6 +195,7 @@ class RoleCommand:
             RoleArgumentsParser(),
             self,
             RoleCommandAuthorization(),
+            CommandExecutionPolicy(ExecutionMode.BACKGROUND, timeout_seconds=15.0),
         )
 
     async def handle(self, request: CommandRequest, arguments: RoleArguments) -> None:

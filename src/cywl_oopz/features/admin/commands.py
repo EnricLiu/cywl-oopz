@@ -11,7 +11,9 @@ from cywl_oopz.commands.catalog import CommandSpec
 from cywl_oopz.commands.definitions import (
     AccessRequirement,
     CommandDefinition,
+    CommandExecutionPolicy,
     CommandUsageError,
+    ExecutionMode,
     NoArguments,
     NoArgumentsParser,
 )
@@ -121,6 +123,7 @@ class InitCommand:
             InitArgumentsParser(),
             self,
             InitCommandAuthorization(),
+            CommandExecutionPolicy(ExecutionMode.BACKGROUND, timeout_seconds=30.0),
         )
 
     async def handle(self, request: CommandRequest, arguments: InitArguments) -> None:
@@ -237,6 +240,7 @@ class DebugCommand:
             DebugArgumentsParser(),
             self,
             DebugCommandAuthorization(),
+            CommandExecutionPolicy(ExecutionMode.BACKGROUND, timeout_seconds=12.0),
         )
 
     async def handle(self, request: CommandRequest, arguments: DebugArguments) -> None:
@@ -330,6 +334,7 @@ class RecallCommand:
             RecallArgumentsParser(),
             self,
             RecallCommandAuthorization(),
+            CommandExecutionPolicy(ExecutionMode.BACKGROUND, timeout_seconds=12.0),
         )
 
     async def handle(self, request: CommandRequest, arguments: RecallArguments) -> None:
@@ -432,6 +437,7 @@ class RebootCommand:
             NoArgumentsParser(),
             self,
             RebootCommandAuthorization(),
+            CommandExecutionPolicy(ExecutionMode.BACKGROUND, timeout_seconds=10.0),
         )
 
     async def handle(self, request: CommandRequest, arguments: NoArguments) -> None:

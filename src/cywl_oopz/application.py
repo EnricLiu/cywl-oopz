@@ -13,6 +13,8 @@ from oopz_sdk.events.context import EventContext
 from oopz_sdk.models import Message as OopzMessage
 
 from .commands.builtin import HelpCommand, PingCommand, StatusCommand
+from .commands.definitions import CommandExecutionPolicy, ExecutionMode
+from .commands.execution import CommandTaskSupervisor
 from .commands.parsing import CommandTextParser
 from .commands.router import CommandRouter
 from .core.errors import ConfigurationError, DatabaseError
@@ -285,10 +287,12 @@ class BotApplication:
             active_presentations=self.active_agent_presentations,
         )
         self.command_parser = CommandTextParser(settings.command_prefix)
+        self.command_tasks = CommandTaskSupervisor()
         self.commands = CommandRouter(
             settings.command_prefix,
             self.authorization,
             parser=self.command_parser,
+            supervisor=self.command_tasks,
         )
         self.referenced_message_parser = OopzReferencedMessageParser()
         self.command_requests = OopzCommandRequestFactory(
@@ -763,6 +767,14 @@ class BotApplication:
         return OpenAICompatibleChatProvider(self.settings.chat)
 
     def _register_commands(self) -> None:
+        background_database = CommandExecutionPolicy(
+            ExecutionMode.BACKGROUND,
+            timeout_seconds=30.0,
+        )
+        background_tool = CommandExecutionPolicy(
+            ExecutionMode.BACKGROUND,
+            timeout_seconds=90.0,
+        )
         self.commands.register_definition(PingCommand().definition())
         self.commands.register_definition(HelpCommand(self.commands).definition())
         self.commands.register_definition(StatusCommand(self.health).definition())
@@ -807,10 +819,14 @@ class BotApplication:
                     self.agent_chat,
                     self.chat_tasks,
                     self.settings.command_prefix,
-                )
+                ),
+                execution=background_database,
             )
         else:
-            self.commands.register(ModelCommand(self.legacy_chat, self.chat_tasks))
+            self.commands.register(
+                ModelCommand(self.legacy_chat, self.chat_tasks),
+                execution=background_database,
+            )
         self.commands.register_definition(ChatStatusCommand(self.chat).definition())
         if self.music is not None and self.music_playlists is not None:
             self.commands.register(
@@ -818,7 +834,11 @@ class BotApplication:
                     self.music,
                     self.music_playlists,
                     self.settings.command_prefix,
-                )
+                ),
+                execution=CommandExecutionPolicy(
+                    ExecutionMode.BACKGROUND,
+                    timeout_seconds=120.0,
+                ),
             )
         if self.settings.agent.enabled:
             self.commands.register(
@@ -826,19 +846,30 @@ class BotApplication:
                     self.agent_chat,
                     self.chat_tasks,
                     self.settings.command_prefix,
-                )
+                ),
+                execution=background_database,
             )
-            self.commands.register(ToolsCommand(self.agent_chat))
+            self.commands.register(
+                ToolsCommand(self.agent_chat),
+                execution=background_database,
+            )
             self.commands.register(
                 ToolCommand(
                     self.direct_tools,
                     self.settings.command_prefix,
                     self.chat_invocations,
-                )
+                ),
+                execution=background_tool,
             )
-            self.commands.register(MemoryCommand(self.agent_chat, self.agent_memory))
+            self.commands.register(
+                MemoryCommand(self.agent_chat, self.agent_memory),
+                execution=background_database,
+            )
             if self.settings.agent.skills_enabled:
-                self.commands.register(SkillsCommand(self.agent_chat, self.agent_skill_library))
+                self.commands.register(
+                    SkillsCommand(self.agent_chat, self.agent_skill_library),
+                    execution=background_database,
+                )
         if self.settings.voice.enabled:
             self.commands.register(
                 VoiceCommand(
@@ -846,7 +877,11 @@ class BotApplication:
                     self.voice_configurations,
                     OopzVoiceCommandPresenter(self.editable_messages),
                     self.settings.command_prefix,
-                )
+                ),
+                execution=CommandExecutionPolicy(
+                    ExecutionMode.BACKGROUND,
+                    timeout_seconds=45.0,
+                ),
             )
 
     async def run(self) -> ShutdownDisposition:
@@ -964,6 +999,7 @@ class BotApplication:
             disposition = await self._run_oopz_until_lifecycle_request()
         finally:
             logger.info("Application shutdown started")
+            await self.command_tasks.close()
             await self.chat_tasks.close()
             await self.agent_summary_tasks.close()
             await self.voice_conversations.aclose()

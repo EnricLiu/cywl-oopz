@@ -11,7 +11,9 @@ from cywl_oopz.core.health import HealthRegistry, HealthState
 from .catalog import CommandSpec
 from .definitions import (
     CommandDefinition,
+    CommandExecutionPolicy,
     CommandUsageError,
+    ExecutionMode,
     NoArguments,
     NoArgumentsParser,
     PublicCommandAuthorization,
@@ -68,6 +70,7 @@ class HelpCommand:
             HelpArgumentsParser(),
             self,
             PublicCommandAuthorization(),
+            CommandExecutionPolicy(ExecutionMode.BACKGROUND, timeout_seconds=10.0),
         )
 
     async def handle(self, request: CommandRequest, arguments: HelpArguments) -> None:
