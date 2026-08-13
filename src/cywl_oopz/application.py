@@ -825,16 +825,12 @@ class BotApplication:
             )
         self.commands.register_definition(ChatStatusCommand(self.chat).definition())
         if self.music is not None and self.music_playlists is not None:
-            self.commands.register(
+            self.commands.register_definition(
                 MusicCommand(
                     self.music,
                     self.music_playlists,
                     self.settings.command_prefix,
-                ),
-                execution=CommandExecutionPolicy(
-                    ExecutionMode.BACKGROUND,
-                    timeout_seconds=120.0,
-                ),
+                ).definition()
             )
         if self.settings.agent.enabled:
             self.commands.register(
