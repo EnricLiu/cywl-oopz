@@ -71,12 +71,13 @@ class DirectToolService:
         registry: ToolRegistry,
         availability: ToolAvailabilityService,
         selection: ProviderSelectionService,
+        policy: ToolPolicy | None = None,
     ) -> None:
         self._settings = settings
         self._registry = registry
         self._availability = availability
         self._selection = selection
-        self._policy = ToolPolicy()
+        self._policy = policy or ToolPolicy()
 
     def describe(self, tool_name: str) -> dict[str, object] | None:
         """Return stable metadata and validation schemas for one registered tool."""
@@ -148,6 +149,11 @@ class DirectToolService:
             "display_name": descriptor.display_name,
             "description": descriptor.description,
             "effect": descriptor.effect.value,
+            "required_permission": (
+                descriptor.required_permission.value
+                if descriptor.required_permission is not None
+                else None
+            ),
             "version": descriptor.version,
             "timeout_seconds": descriptor.timeout_seconds,
             "max_retries": descriptor.max_retries,

@@ -19,6 +19,7 @@ from .core.health import HealthRegistry, HealthState
 from .core.observability import exception_kind, opaque_ref
 from .core.tasks import TaskSupervisor
 from .features.access.administration import RoleAdministrationService
+from .features.access.agent_tools import AgentToolAuthorizationAdapter
 from .features.access.commands import RoleCommand, RoleCommandAccess, WhoAmICommand
 from .features.access.repository import SqlAlchemyRoleBindingRepository
 from .features.access.service import AuthorizationService
@@ -532,14 +533,17 @@ class BotApplication:
             self.web_search is not None,
             self.browser is not None,
         )
+        self.agent_tool_authorization = AgentToolAuthorizationAdapter(self.authorization)
+        self.agent_tool_policy = ToolPolicy(self.agent_tool_authorization)
         self.agent_tool_availability = ToolAvailabilityService(
             self.agent_tool_registry,
             channel_settings,
             enabled_agent_tools,
+            self.agent_tool_policy,
         )
         self.agent_tool_executor = ToolExecutor(
             self.agent_tool_registry,
-            ToolPolicy(),
+            self.agent_tool_policy,
             SqlAlchemyToolExecutionRepository(self.database.session_factory),
         )
         self.direct_tools = DirectToolService(
@@ -547,6 +551,7 @@ class BotApplication:
             self.agent_tool_registry,
             self.agent_tool_availability,
             self.agent_selection,
+            self.agent_tool_policy,
         )
         self.agent_models = AgentModelRegistry(
             self.agent_catalog,

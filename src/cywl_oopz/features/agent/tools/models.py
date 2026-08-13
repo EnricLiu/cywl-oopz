@@ -13,6 +13,7 @@ from uuid import UUID
 from pydantic import BaseModel
 
 from cywl_oopz.core.lifecycle import ToolEffect, ToolExecutionStatus
+from cywl_oopz.features.access.models import Permission
 from cywl_oopz.features.agent.models import AgentIdentity, AgentRunLimits
 
 if TYPE_CHECKING:
@@ -81,6 +82,7 @@ class ToolDescriptor:
     input_model: type[BaseModel]
     output_model: type[BaseModel]
     effect: ToolEffect
+    required_permission: Permission | None = None
     version: str = "1"
     timeout_seconds: float = 10.0
     max_retries: int = 0

@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 import pytest
 
 from cywl_oopz.core.errors import AuthorizationError
+from cywl_oopz.features.access.agent_tools import AgentToolAuthorizationAdapter
 from cywl_oopz.features.access.models import (
     AccessPrincipal,
     AccessResource,
@@ -15,6 +16,8 @@ from cywl_oopz.features.access.models import (
 )
 from cywl_oopz.features.access.policy import RolePermissionPolicy, ScopeMatcher
 from cywl_oopz.features.access.service import AuthorizationService
+from cywl_oopz.features.agent.models import AgentIdentity
+from cywl_oopz.features.chat.models import ConversationKey
 
 
 @dataclass
@@ -197,3 +200,55 @@ async def test_bootstrap_owner_is_global_without_authorization_repository_read()
     )
     # `/role me` also reads database bindings so it can show both assignment sources.
     assert repository.reads == 1
+
+
+@pytest.mark.asyncio
+async def test_agent_tool_authorization_maps_scope_and_reads_fresh_bindings() -> None:
+    repository = InMemoryRoleBindings(
+        [
+            binding(
+                AccessRole.ADMIN,
+                RoleBindingScope.CHANNEL,
+                area_id="area",
+                channel_id="channel",
+            )
+        ]
+    )
+    adapter = AgentToolAuthorizationAdapter(AuthorizationService(repository))
+    identity = AgentIdentity(
+        "person",
+        ConversationKey("channel", "area", "channel", "person"),
+    )
+
+    assert await adapter.allows(identity, Permission.CHANNEL_INITIALIZE)
+    repository.records.clear()
+    assert not await adapter.allows(identity, Permission.CHANNEL_INITIALIZE)
+    assert repository.reads == 2
+
+
+@pytest.mark.asyncio
+async def test_agent_tool_authorization_maps_private_and_delegated_contexts() -> None:
+    repository = InMemoryRoleBindings(
+        [
+            binding(AccessRole.ADMIN, RoleBindingScope.GLOBAL),
+            binding(
+                AccessRole.ADMIN,
+                RoleBindingScope.CHANNEL,
+                area_id="area",
+                channel_id="text-channel",
+            ),
+        ]
+    )
+    adapter = AgentToolAuthorizationAdapter(AuthorizationService(repository))
+    private = AgentIdentity(
+        "person",
+        ConversationKey("private", "", "", "person"),
+    )
+    delegated = AgentIdentity(
+        "person",
+        ConversationKey("delegated_task", "area", "task-id", "person"),
+        transport_channel_id="text-channel",
+    )
+
+    assert await adapter.allows(private, Permission.CHANNEL_INITIALIZE)
+    assert await adapter.allows(delegated, Permission.CHANNEL_INITIALIZE)
