@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from oopz_sdk.events.context import EventContext
 
 from cywl_oopz.core.health import HealthRegistry, HealthState
 
 from .catalog import CommandSpec
+from .definitions import CommandDefinition, CommandUsageError, PublicCommandAuthorization
+from .models import CommandRequest
 from .responses import CommandMessage, CommandMessageBudget, MessageOverflowPolicy
 from .router import CommandRouter, ParsedCommand
 
@@ -39,6 +43,31 @@ class HelpCommand:
     ) -> None:
         self._router = router
         self._budget = budget or CommandMessageBudget()
+
+    def definition(self) -> CommandDefinition[HelpArguments]:
+        return CommandDefinition(
+            CommandSpec.from_command(self),
+            HelpArgumentsParser(),
+            self,
+            PublicCommandAuthorization(),
+        )
+
+    async def handle(self, request: CommandRequest, arguments: HelpArguments) -> None:
+        specs = await self._router.available_specs_for(request)
+        if arguments.command_name:
+            spec = next(
+                (item for item in specs if item.matches(arguments.command_name)),
+                None,
+            )
+            if spec is None:
+                await request.responder.reply(
+                    f"没有找到命令：{arguments.command_name}\n"
+                    f"输入 {self._router.prefix}help 查看可用命令。"
+                )
+                return
+            await request.responder.reply(self._detail(spec))
+            return
+        await request.responder.reply(self._overview(specs))
 
     async def execute(self, command: ParsedCommand, context: EventContext) -> None:
         if len(command.arguments) > 1:
@@ -90,6 +119,19 @@ class HelpCommand:
         message = CommandMessage(text, MessageOverflowPolicy.PAGINATE)
         for page in self._budget.pages(message):
             await context.reply(page)
+
+
+@dataclass(frozen=True, slots=True)
+class HelpArguments:
+    command_name: str = ""
+
+
+class HelpArgumentsParser:
+    def parse(self, request: CommandRequest) -> HelpArguments:
+        assert request.text is not None
+        if len(request.text.tokens) > 1:
+            raise CommandUsageError("")
+        return HelpArguments(request.text.tokens[0] if request.text.tokens else "")
 
 
 class StatusCommand:

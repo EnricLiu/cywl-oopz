@@ -12,6 +12,7 @@ from cywl_oopz.commands.models import (
     CommandScope,
     CommandSource,
     CommandTarget,
+    CommandText,
     CommandTrigger,
 )
 from cywl_oopz.commands.parsing import CommandTextParser
@@ -30,6 +31,25 @@ class OopzCommandRequestFactory:
         text = self._parser.parse(self._raw_text(message))
         if text is None:
             return None
+        return self._project(message, context, text)
+
+    def for_visibility(self, context: Any) -> CommandRequest:
+        """Build a compatibility discovery request without re-parsing source text."""
+        message = getattr(getattr(context, "event", None), "message", None)
+        if message is None:
+            raise ValueError("Command discovery requires an OOPZ message event")
+        return self._project(
+            message,
+            context,
+            CommandText(f"{self._parser.prefix}help", "help", "", ()),
+        )
+
+    def _project(
+        self,
+        message: Any,
+        context: Any,
+        text: CommandText,
+    ) -> CommandRequest:
 
         event = getattr(context, "event", None)
         is_private = bool(getattr(event, "is_private", False))

@@ -21,6 +21,9 @@ class FakeMessage:
     plain_text: str
     text: str = ""
     content: str = ""
+    sender_id: str = "person"
+    area: str = "area"
+    channel: str = "channel"
 
 
 class EchoCommand:
@@ -163,7 +166,7 @@ async def test_help_filters_restricted_commands_with_same_policy() -> None:
     reboot.name = "reboot"
     reboot.description = "Restart."
     router.register(reboot, access=GlobalRebootAccess())
-    router.register(HelpCommand(router))
+    router.register_definition(HelpCommand(router).definition())
     context = FakeContext()
 
     await router.dispatch(FakeMessage("/help"), context)
@@ -181,7 +184,7 @@ async def test_help_renders_dynamic_prefix_and_detailed_command_metadata() -> No
     echo.usage = ("echo <内容>",)
     echo.examples = ("echo 你好",)
     router.register(echo)
-    router.register(HelpCommand(router))
+    router.register_definition(HelpCommand(router).definition())
     context = FakeContext()
 
     await router.dispatch(FakeMessage("!help echo"), context)

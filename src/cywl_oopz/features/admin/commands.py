@@ -4,10 +4,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
+from enum import StrEnum
 
 from oopz_sdk.events.context import EventContext
 
-from cywl_oopz.commands.router import AccessRequirement, ParsedCommand
+from cywl_oopz.commands.catalog import CommandSpec
+from cywl_oopz.commands.definitions import (
+    AccessRequirement,
+    CommandDefinition,
+    CommandUsageError,
+)
+from cywl_oopz.commands.models import CommandRequest, CommandScope
+from cywl_oopz.commands.router import ParsedCommand
 from cywl_oopz.core.errors import DatabaseError
 from cywl_oopz.core.observability import opaque_ref
 from cywl_oopz.features.access.models import AccessResource, AccessResourceKind, Permission
@@ -59,6 +68,70 @@ class InitCommandAccess:
         return AccessRequirement(Permission.CHANNEL_INITIALIZE, invocation.resource)
 
 
+class InitTarget(StrEnum):
+    CHANNEL = "channel"
+    AREA = "area"
+
+
+@dataclass(frozen=True, slots=True)
+class InitArguments:
+    target: InitTarget
+
+
+class InitArgumentsParser:
+    """Parse and validate init scope before authorization runs."""
+
+    def parse(self, request: CommandRequest) -> InitArguments:
+        if request.location.scope is not CommandScope.CHANNEL:
+            raise CommandUsageError(
+                "此命令只能在文字频道中使用。",
+                include_usage=False,
+            )
+        assert request.text is not None
+        if len(request.text.tokens) > 1:
+            raise CommandUsageError("")
+        try:
+            target = (
+                InitTarget(request.text.tokens[0].casefold())
+                if request.text.tokens
+                else InitTarget.CHANNEL
+            )
+        except ValueError as exc:
+            raise CommandUsageError("") from exc
+        return InitArguments(target)
+
+
+class InitCommandAuthorization:
+    """Resolve init permission from the already-parsed target."""
+
+    def is_available(self, request: CommandRequest) -> bool:
+        return request.location.scope is CommandScope.CHANNEL
+
+    def requirement(
+        self,
+        request: CommandRequest,
+        arguments: InitArguments,
+    ) -> AccessRequirement:
+        resource = (
+            AccessResource.area(request.location.area_id)
+            if arguments.target is InitTarget.AREA
+            else AccessResource.channel(
+                request.location.area_id,
+                request.location.channel_id,
+            )
+        )
+        return AccessRequirement(Permission.CHANNEL_INITIALIZE, resource)
+
+    def visibility_requirement(self, request: CommandRequest) -> AccessRequirement:
+        return AccessRequirement(
+            Permission.CHANNEL_INITIALIZE,
+            AccessResource.channel(
+                request.location.area_id,
+                request.location.channel_id,
+            ),
+        )
+
+
 class InitCommand:
     """Create missing text/voice settings using database defaults."""
 
@@ -69,6 +142,50 @@ class InitCommand:
 
     def __init__(self, service: ChannelInitializationService) -> None:
         self._service = service
+
+    def definition(self) -> CommandDefinition[InitArguments]:
+        return CommandDefinition(
+            CommandSpec.from_command(self),
+            InitArgumentsParser(),
+            self,
+            InitCommandAuthorization(),
+        )
+
+    async def handle(self, request: CommandRequest, arguments: InitArguments) -> None:
+        try:
+            if arguments.target is InitTarget.AREA:
+                result = await self._service.initialize_area(request.location.area_id)
+                await request.responder.reply(self._area_result(result))
+                return
+            result = await self._service.initialize_channel(
+                ChannelKey(
+                    request.location.area_id,
+                    request.location.channel_id,
+                )
+            )
+        except ChannelCatalogError as exc:
+            logger.warning(
+                "Area initialization discovery unavailable: area=%s error=%s",
+                opaque_ref(request.location.area_id),
+                type(exc).__name__,
+            )
+            await request.responder.reply("无法读取 Area 频道列表，请稍后重试。")
+            return
+        except DatabaseError as exc:
+            logger.warning(
+                "Channel initialization persistence unavailable: resource=%s error=%s",
+                opaque_ref(request.location.area_id, request.location.channel_id),
+                type(exc).__name__,
+            )
+            await request.responder.reply("频道初始化服务暂时不可用，请稍后重试。")
+            return
+
+        if result.created:
+            await request.responder.reply(
+                "✅ **频道已初始化**\n已使用默认配置创建，现有频道设置未改动。"
+            )
+        else:
+            await request.responder.reply("频道已经初始化，现有配置未改动。")
 
     async def execute(self, command: ParsedCommand, context: EventContext) -> None:
         invocation = OopzAccessInvocation.from_context(context)

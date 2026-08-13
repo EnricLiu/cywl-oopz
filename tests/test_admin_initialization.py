@@ -14,7 +14,7 @@ from cywl_oopz.features.access.models import (
     RoleBindingScope,
 )
 from cywl_oopz.features.access.service import AuthorizationService
-from cywl_oopz.features.admin.commands import InitCommand, InitCommandAccess
+from cywl_oopz.features.admin.commands import InitCommand
 from cywl_oopz.features.admin.initialization import (
     ChannelCatalogError,
     ChannelInitializationService,
@@ -109,9 +109,8 @@ def make_router(
 ) -> CommandRouter:
     authorizer = AuthorizationService(roles, bootstrap)
     router = CommandRouter("/", authorizer)
-    router.register(
-        InitCommand(ChannelInitializationService(catalog, repository)),
-        access=InitCommandAccess(),
+    router.register_definition(
+        InitCommand(ChannelInitializationService(catalog, repository)).definition()
     )
     return router
 
@@ -215,7 +214,7 @@ async def test_init_is_hidden_and_rejected_in_private_conversations() -> None:
 
     init_context = FakeContext(FakeMessage("/init", "owner"), private=True)
     assert await router.dispatch(init_context.event.message, init_context)
-    assert init_context.replies == ["/init 只能在文字频道中使用。"]
+    assert init_context.replies == ["此命令只能在文字频道中使用。"]
 
 
 @pytest.mark.asyncio

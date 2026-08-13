@@ -28,7 +28,6 @@ from .features.admin.commands import (
     DebugCommand,
     DebugCommandAccess,
     InitCommand,
-    InitCommandAccess,
     RebootCommand,
     RebootCommandAccess,
     RecallCommand,
@@ -765,17 +764,14 @@ class BotApplication:
 
     def _register_commands(self) -> None:
         self.commands.register(PingCommand())
-        self.commands.register(HelpCommand(self.commands))
+        self.commands.register_definition(HelpCommand(self.commands).definition())
         self.commands.register(StatusCommand(self.health))
         self.commands.register(WhoAmICommand())
         self.commands.register(
             RoleCommand(self.authorization, self.role_administration),
             access=RoleCommandAccess(),
         )
-        self.commands.register(
-            InitCommand(self.channel_initialization),
-            access=InitCommandAccess(),
-        )
+        self.commands.register_definition(InitCommand(self.channel_initialization).definition())
         self.commands.register(
             DebugCommand(self.agent_diagnostics, self.agent_diagnostic_renderer),
             access=DebugCommandAccess(),
