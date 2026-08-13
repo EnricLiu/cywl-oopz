@@ -207,3 +207,30 @@ class AgentResponseDiagnostic:
     def __post_init__(self) -> None:
         for name in ("limits", "usage", "run_diagnostics"):
             object.__setattr__(self, name, MappingProxyType(dict(getattr(self, name))))
+
+
+@dataclass(frozen=True, slots=True)
+class ReferencedMessageCandidate:
+    """Strict project-owned projection of an OOPZ message reference."""
+
+    message_id: str
+    message_timestamp: str
+    sender_person_id: str
+    address: OopzMessageAddress
+
+    def __post_init__(self) -> None:
+        message_id = self.message_id.strip()
+        timestamp = self.message_timestamp.strip()
+        sender = self.sender_person_id.strip()
+        if not message_id or len(message_id) > 256:
+            raise ValueError("Referenced message ID must contain at most 256 characters")
+        if not sender or len(sender) > 128 or len(timestamp) > 64:
+            raise ValueError("Referenced message metadata is invalid")
+        object.__setattr__(self, "message_id", message_id)
+        object.__setattr__(self, "message_timestamp", timestamp)
+        object.__setattr__(self, "sender_person_id", sender)
+
+
+class MessageRecallOutcome(StrEnum):
+    RECALLED = "recalled"
+    ALREADY_RECALLED = "already_recalled"

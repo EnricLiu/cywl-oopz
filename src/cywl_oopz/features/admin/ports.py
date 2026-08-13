@@ -14,6 +14,7 @@ from .models import (
     OopzMessageAddress,
     OutboundMessageReceipt,
     OutboundMessageState,
+    ReferencedMessageCandidate,
 )
 
 
@@ -66,6 +67,16 @@ class OutboundMessageRepository(Protocol):
     ) -> bool:
         """Update lifecycle state and an optional display-safe diagnostic snapshot."""
 
+    async def get_by_message(
+        self,
+        message_id: str,
+        address: OopzMessageAddress,
+    ) -> OutboundMessageReceipt | None:
+        """Read any exact Bot-owned receipt for recall."""
+
+    async def mark_recalled(self, message_id: str) -> bool:
+        """Atomically move a non-recalled receipt to recalled."""
+
 
 class AgentDiagnosticRepository(Protocol):
     """Read a bounded diagnostic aggregate by exact tracked message address."""
@@ -88,3 +99,42 @@ class AgentDiagnosticRenderer(Protocol):
         verbose: bool,
     ) -> tuple[str, ...]:
         """Return bounded pages without performing I/O."""
+
+
+class RecentBotMessageLookup(Protocol):
+    """Bounded migration fallback for pre-tracking channel messages."""
+
+    async def find(
+        self,
+        message_id: str,
+        address: OopzMessageAddress,
+    ) -> ReferencedMessageCandidate | None:
+        """Find an exact recent message, or none when unsupported/not found."""
+
+
+class ReferencedMessageParser(Protocol):
+    """Parse a trusted subset of an SDK or mapping reference object."""
+
+    def parse(self, value: object) -> ReferencedMessageCandidate | None:
+        """Return a strict candidate, or none for incomplete/malformed data."""
+
+
+class ActivePresentationDismissal(Protocol):
+    """Stop edits and terminal fallback for one active Agent display."""
+
+    async def dismiss(self, message_id: str) -> bool:
+        """Dismiss a registered presentation and report whether it existed."""
+
+
+class OutboundConversationCanceller(Protocol):
+    """Cancel the Agent task that owns one active outbound message."""
+
+    async def cancel_for_message(self, receipt: OutboundMessageReceipt) -> bool:
+        """Cancel and await matching work when enough owner metadata exists."""
+
+
+class BotMessageRecallGateway(Protocol):
+    """Recall an exact tracked channel or private message through OOPZ."""
+
+    async def recall(self, receipt: OutboundMessageReceipt) -> None:
+        """Raise a transport error when OOPZ does not confirm the recall."""

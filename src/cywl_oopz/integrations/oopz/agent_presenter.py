@@ -26,6 +26,7 @@ from cywl_oopz.features.chat.progress import (
     ProgressKind,
 )
 
+from .active_presentations import ActivePresentationRegistry
 from .editable_messages import (
     EditableMessageRef,
     MessageAddress,
@@ -201,6 +202,7 @@ class OopzAgentLoopMessage:
         clock: Callable[[], float] | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         heartbeat_interval_seconds: float | None = None,
+        active_presentations: ActivePresentationRegistry | None = None,
     ) -> None:
         if edit_interval_seconds <= 0:
             raise ValueError("Edit interval must be positive")
@@ -243,6 +245,8 @@ class OopzAgentLoopMessage:
         self._activity_frame = 0
         self._run_id: UUID | None = None
         self._provider_retries: list[dict[str, object]] = []
+        self._active_presentations = active_presentations
+        self._dismissed = False
 
     @property
     def owns_message(self) -> bool:
@@ -265,6 +269,8 @@ class OopzAgentLoopMessage:
             self._run_worker(),
             name="oopz-agent-loop-message",
         )
+        if self._active_presentations is not None:
+            await self._active_presentations.register(self._message.message_id, self)
         logger.info("Opened OOPZ Agent display: address=%s", self._address_ref())
 
     async def bind_run(self, run_id: UUID) -> None:
@@ -276,6 +282,8 @@ class OopzAgentLoopMessage:
 
     async def emit(self, event: ConversationProgressEvent) -> None:
         async with self._state_lock:
+            if self._dismissed:
+                return
             previous_phase = self._state.phase
             if event.kind is ProgressKind.TOOL_STARTED:
                 self._tool_started_at.setdefault(event.call_id, self._now())
@@ -352,16 +360,37 @@ class OopzAgentLoopMessage:
         self._closing = True
         self._wake.set()
         worker = self._worker
+        try:
+            if worker is not None:
+                await worker
+                self._worker = None
+        finally:
+            if self._active_presentations is not None and self._message is not None:
+                await self._active_presentations.discard(self._message.message_id, self)
+
+    async def dismiss(self) -> None:
+        """Permanently stop future edits/fallback before OOPZ recall."""
+        async with self._state_lock:
+            self._dismissed = True
+            self._disabled = True
+            self._closing = True
+            self._terminal_delivery_failed = False
+            self._terminal_done.set()
+        self._wake.set()
+        worker = self._worker
         if worker is not None:
             await worker
             self._worker = None
+        logger.info("Dismissed OOPZ Agent display: address=%s", self._address_ref())
 
     async def _finish(self, event: ConversationProgressEvent) -> None:
-        if not self.owns_message:
+        if not self.owns_message or self._dismissed:
             return
         await self.emit(event)
         self._wake.set()
         await self._terminal_done.wait()
+        if self._dismissed:
+            return
         if self._terminal_delivery_failed and not self._fallback_attempted:
             self._fallback_attempted = True
             fallback_delivered = False
@@ -399,6 +428,8 @@ class OopzAgentLoopMessage:
 
     async def _run_worker(self) -> None:
         while True:
+            if self._dismissed:
+                return
             if self._closing and self._dirty_revision <= self._flushed_revision:
                 return
             heartbeat_due = False
@@ -410,6 +441,8 @@ class OopzAgentLoopMessage:
             except TimeoutError:
                 heartbeat_due = True
             self._wake.clear()
+            if self._dismissed:
+                return
             has_live_activity = self._has_live_activity()
             if self._dirty_revision <= self._flushed_revision and not (
                 heartbeat_due and has_live_activity
@@ -423,6 +456,9 @@ class OopzAgentLoopMessage:
                 delay = self._next_edit_at - self._now()
                 if delay > 0:
                     await self._sleep(delay)
+
+            if self._dismissed:
+                return
 
             async with self._state_lock:
                 state = self._state
@@ -615,11 +651,13 @@ class OopzAgentPresenterFactory:
         *,
         enabled: bool,
         edit_interval_seconds: float,
+        active_presentations: ActivePresentationRegistry | None = None,
     ) -> None:
         self._gateway = gateway
         self._renderer = renderer
         self._enabled = enabled
         self._edit_interval_seconds = edit_interval_seconds
+        self._active_presentations = active_presentations
 
     async def open(self, context: Any) -> ConversationProgressSession:
         try:
@@ -639,6 +677,7 @@ class OopzAgentPresenterFactory:
                 address,
                 self._renderer,
                 edit_interval_seconds=self._edit_interval_seconds,
+                active_presentations=self._active_presentations,
             )
             await session.open()
             return session

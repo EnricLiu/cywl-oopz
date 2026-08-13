@@ -188,6 +188,19 @@ async def test_outbound_agent_receipt_bind_finalize_and_diagnostic_read_on_postg
         assert expired is not None
         assert expired.run_id is None
         assert expired.receipt.diagnostic_snapshot["final_text"] == "完整答案"
+        exact = await writes.get_by_message("message", address)
+        assert exact is not None
+        assert exact.state is OutboundMessageState.FINAL
+        assert await writes.mark_recalled("message")
+        assert not await writes.mark_recalled("message")
+        recalled = await writes.get_by_message("message", address)
+        assert recalled is not None
+        assert recalled.state is OutboundMessageState.RECALLED
+        async with sessions() as session:
+            recalled_at = await session.scalar(
+                text("SELECT recalled_at FROM oopz_outbound_messages WHERE message_id = 'message'")
+            )
+        assert recalled_at is not None
     finally:
         if test_engine is not None:
             await test_engine.dispose()

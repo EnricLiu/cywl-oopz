@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import select, update
@@ -127,6 +128,49 @@ class SqlAlchemyOutboundMessageRepository:
         except SQLAlchemyError as exc:
             raise _database_error("update outbound message state", exc) from exc
 
+    async def get_by_message(
+        self,
+        message_id: str,
+        address: OopzMessageAddress,
+    ) -> OutboundMessageReceipt | None:
+        try:
+            async with self._sessions() as session:
+                record = await session.scalar(
+                    select(OopzOutboundMessageRecord).where(
+                        OopzOutboundMessageRecord.message_id == message_id,
+                        OopzOutboundMessageRecord.scope == address.scope,
+                        OopzOutboundMessageRecord.area_id == address.area_id,
+                        OopzOutboundMessageRecord.channel_id == address.channel_id,
+                        OopzOutboundMessageRecord.target_person_id == address.target_person_id,
+                    )
+                )
+                return self._receipt(record) if record is not None else None
+        except SQLAlchemyError as exc:
+            raise _database_error("load outbound message receipt", exc) from exc
+
+    async def mark_recalled(self, message_id: str) -> bool:
+        try:
+            async with self._sessions() as session:
+                async with session.begin():
+                    result = await session.execute(
+                        update(OopzOutboundMessageRecord)
+                        .where(
+                            OopzOutboundMessageRecord.message_id == message_id,
+                            OopzOutboundMessageRecord.state != OutboundMessageState.RECALLED,
+                        )
+                        .values(
+                            state=OutboundMessageState.RECALLED,
+                            recalled_at=datetime.now(UTC),
+                        )
+                    )
+                    return result.rowcount == 1
+        except SQLAlchemyError as exc:
+            raise _database_error("mark outbound message recalled", exc) from exc
+
+    @staticmethod
+    def _receipt(record: OopzOutboundMessageRecord) -> OutboundMessageReceipt:
+        return _outbound_receipt(record)
+
 
 class SqlAlchemyAgentDiagnosticRepository:
     """Read only the rows belonging to one exact tracked Agent response."""
@@ -216,22 +260,7 @@ class SqlAlchemyAgentDiagnosticRepository:
 
     @staticmethod
     def _receipt(record: OopzOutboundMessageRecord) -> OutboundMessageReceipt:
-        return OutboundMessageReceipt(
-            message_id=record.message_id,
-            message_timestamp=record.message_timestamp,
-            kind=record.kind,
-            state=record.state,
-            address=OopzMessageAddress(
-                record.scope,
-                record.area_id,
-                record.channel_id,
-                record.target_person_id,
-            ),
-            in_reply_to_message_id=record.in_reply_to_message_id,
-            owner_person_id=record.owner_person_id,
-            agent_run_id=record.agent_run_id,
-            diagnostic_snapshot=_mapping(record.diagnostic_snapshot),
-        )
+        return _outbound_receipt(record)
 
     @staticmethod
     def _tool(record: AgentToolExecutionRecord) -> AgentDiagnosticTool:
@@ -254,6 +283,25 @@ class SqlAlchemyAgentDiagnosticRepository:
 def _database_error(operation: str, error: SQLAlchemyError) -> DatabaseError:
     logger.warning("Failed to %s: error=%s", operation, type(error).__name__)
     return DatabaseError(f"Failed to {operation}")
+
+
+def _outbound_receipt(record: OopzOutboundMessageRecord) -> OutboundMessageReceipt:
+    return OutboundMessageReceipt(
+        message_id=record.message_id,
+        message_timestamp=record.message_timestamp,
+        kind=record.kind,
+        state=record.state,
+        address=OopzMessageAddress(
+            record.scope,
+            record.area_id,
+            record.channel_id,
+            record.target_person_id,
+        ),
+        in_reply_to_message_id=record.in_reply_to_message_id,
+        owner_person_id=record.owner_person_id,
+        agent_run_id=record.agent_run_id,
+        diagnostic_snapshot=_mapping(record.diagnostic_snapshot),
+    )
 
 
 def _mapping(value: object) -> dict[str, object]:

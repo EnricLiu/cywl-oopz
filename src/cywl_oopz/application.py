@@ -26,12 +26,16 @@ from .features.admin.commands import (
     DebugCommandAccess,
     InitCommand,
     InitCommandAccess,
+    RecallCommand,
+    RecallCommandAccess,
 )
 from .features.admin.initialization import ChannelInitializationService
 from .features.admin.outbound_repository import (
     SqlAlchemyAgentDiagnosticRepository,
     SqlAlchemyOutboundMessageRepository,
 )
+from .features.admin.recall import MessageRecallService
+from .features.admin.references import ReferencedMessageResolver
 from .features.admin.repository import SqlAlchemyChannelInitializationRepository
 from .features.agent.catalog import ProviderCatalogAdminService, ReloadableProviderCatalog
 from .features.agent.commands import (
@@ -140,7 +144,7 @@ from .features.chat.openai_compatible import OpenAICompatibleChatProvider
 from .features.chat.provider import ChatProvider, DisabledChatProvider
 from .features.chat.repository import SqlAlchemyConversationRepository
 from .features.chat.service import ChatService
-from .features.chat.tasks import ChatTaskSupervisor
+from .features.chat.tasks import ChatTaskSupervisor, OutboundChatTaskCanceller
 from .features.music.bilibili import BilibiliMusicProvider
 from .features.music.catalog import CompositeMusicCatalog, MusicProviderRegistry
 from .features.music.commands import MusicCommand
@@ -163,12 +167,18 @@ from .features.web.browser import BrowserSessionManager
 from .features.web.errors import BrowserError
 from .features.web.service import WebSearchService
 from .integrations.media.ytdlp_runner import YtDlpCapabilityProbe, YtDlpProcessRunner
+from .integrations.oopz.active_presentations import ActivePresentationRegistry
 from .integrations.oopz.agent_presenter import OopzAgentPresenterFactory
 from .integrations.oopz.channel_catalog import OopzAreaChannelCatalog
 from .integrations.oopz.chat_invocation import OopzChatInvocationFactory
 from .integrations.oopz.diagnostic_renderer import OopzAgentDiagnosticRenderer
 from .integrations.oopz.editable_messages import OopzEditableMessageGateway
 from .integrations.oopz.master_audio import OopzMasterPcmOutputFactory
+from .integrations.oopz.message_recall import (
+    OopzBotMessageRecallGateway,
+    OopzRecentBotMessageLookup,
+    OopzReferencedMessageParser,
+)
 from .integrations.oopz.message_renderer import OopzMessageRenderer
 from .integrations.oopz.music import OopzMusicVoiceGateway
 from .integrations.oopz.reactions import OopzReactionGateway
@@ -245,6 +255,7 @@ class BotApplication:
             master_factory=self.master_audio,
         )
         self.chat_invocations = OopzChatInvocationFactory(settings.oopz.person_uid)
+        self.active_agent_presentations = ActivePresentationRegistry()
         self.editable_messages = OopzEditableMessageGateway(
             self.bot,
             self.outbound_messages,
@@ -254,6 +265,7 @@ class BotApplication:
             OopzMessageRenderer(),
             enabled=settings.agent.enabled and settings.agent.live_display,
             edit_interval_seconds=settings.agent.display_edit_interval_seconds,
+            active_presentations=self.active_agent_presentations,
         )
         self.commands = CommandRouter(settings.command_prefix, self.authorization)
         catalog_repository = SqlAlchemyProviderCatalogRepository(self.database.session_factory)
@@ -571,6 +583,20 @@ class BotApplication:
         )
         self._provider = self._create_chat_provider()
         self.chat_tasks = ChatTaskSupervisor()
+        self.recent_bot_messages = OopzRecentBotMessageLookup(self.bot)
+        self.referenced_messages = ReferencedMessageResolver(
+            self.outbound_messages,
+            self.recent_bot_messages,
+            settings.oopz.person_uid,
+        )
+        self.message_recall = MessageRecallService(
+            self.referenced_messages,
+            self.outbound_messages,
+            self.active_agent_presentations,
+            OutboundChatTaskCanceller(self.chat_tasks),
+            OopzBotMessageRecallGateway(self.bot),
+        )
+        self.referenced_message_parser = OopzReferencedMessageParser()
         self.legacy_chat = ChatService(
             settings.chat,
             self._provider,
@@ -709,6 +735,10 @@ class BotApplication:
         self.commands.register(
             DebugCommand(self.agent_diagnostics, self.agent_diagnostic_renderer),
             access=DebugCommandAccess(),
+        )
+        self.commands.register(
+            RecallCommand(self.message_recall, self.referenced_message_parser),
+            access=RecallCommandAccess(),
         )
         self.commands.register(
             ChatCommand(

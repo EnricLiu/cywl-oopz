@@ -9,6 +9,7 @@ from oopz_sdk.exceptions import OopzConnectionError
 
 from cywl_oopz.features.chat.models import ChatResponse
 from cywl_oopz.features.chat.progress import ConversationProgressEvent, ProgressKind
+from cywl_oopz.integrations.oopz.active_presentations import ActivePresentationRegistry
 from cywl_oopz.integrations.oopz.agent_presenter import (
     OopzAgentLoopMessage,
     OopzAgentPresenterFactory,
@@ -431,6 +432,32 @@ async def test_passive_response_promotes_direct_reply_with_run_snapshot() -> Non
             "reason": "HTTP 429",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_dismissed_live_response_never_edits_or_creates_terminal_fallback() -> None:
+    gateway = FakeGateway()
+    registry = ActivePresentationRegistry()
+    session = OopzAgentLoopMessage(
+        gateway,  # type: ignore[arg-type]
+        address(),
+        OopzMessageRenderer(),
+        edit_interval_seconds=0.01,
+        active_presentations=registry,
+    )
+    await session.open()
+
+    assert await registry.dismiss("message-1") is True
+    await session.emit(ConversationProgressEvent(ProgressKind.THINKING))
+    await session.complete(ChatResponse("不应重新出现", "provider/model"))
+    await session.aclose()
+
+    assert len(gateway.created) == 1
+    assert "不应重新出现" not in gateway.created[0]
+    assert gateway.edits == []
+    assert gateway.finalized == []
+    assert gateway.superseded == []
+    assert await registry.dismiss("message-1") is False
 
 
 @pytest.mark.asyncio

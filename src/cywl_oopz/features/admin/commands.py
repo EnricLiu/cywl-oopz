@@ -17,10 +17,16 @@ from .initialization import ChannelCatalogError, ChannelInitializationService
 from .models import (
     AreaInitializationResult,
     ChannelKey,
+    MessageRecallOutcome,
     OopzMessageAddress,
     OopzMessageScope,
 )
-from .ports import AgentDiagnosticRenderer, AgentDiagnosticRepository
+from .ports import AgentDiagnosticRenderer, AgentDiagnosticRepository, ReferencedMessageParser
+from .recall import (
+    BotMessageRecallTransportError,
+    MessageRecallService,
+    ReferencedBotMessageNotFoundError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -198,12 +204,109 @@ class DebugCommand:
 
     @staticmethod
     def _address(context: EventContext) -> OopzMessageAddress:
-        event = context.event
-        message = event.message
-        private = bool(getattr(event, "is_private", False))
-        return OopzMessageAddress(
-            OopzMessageScope.PRIVATE if private else OopzMessageScope.CHANNEL,
-            area_id="" if private else str(getattr(message, "area", "")),
-            channel_id=str(getattr(message, "channel", "")),
-            target_person_id=(str(getattr(message, "sender_id", "")) if private else ""),
-        )
+        return _message_address(context)
+
+
+class RecallCommandAccess:
+    """Authorize recall in the exact current message resource."""
+
+    def is_available(self, invocation: OopzAccessInvocation) -> bool:
+        del invocation
+        return True
+
+    def requirement(
+        self,
+        command: ParsedCommand,
+        invocation: OopzAccessInvocation,
+    ) -> AccessRequirement:
+        del command
+        return AccessRequirement(Permission.BOT_MESSAGE_RECALL, invocation.resource)
+
+    def visibility_requirement(
+        self,
+        invocation: OopzAccessInvocation,
+    ) -> AccessRequirement:
+        return AccessRequirement(Permission.BOT_MESSAGE_RECALL, invocation.resource)
+
+
+class RecallCommand:
+    """Recall one explicitly quoted Bot-owned channel or private message."""
+
+    name = "recall"
+    description = "撤回引用的一条 CYWL 回复。"
+    timeout_seconds = 10.0
+
+    def __init__(
+        self,
+        service: MessageRecallService,
+        parser: ReferencedMessageParser,
+    ) -> None:
+        self._service = service
+        self._parser = parser
+
+    async def execute(self, command: ParsedCommand, context: EventContext) -> None:
+        if command.arguments:
+            await context.reply("用法：/recall（请引用一条 CYWL 回复）")
+            return
+        message = context.event.message
+        reference_id = str(getattr(message, "reference_message_id", "")).strip()
+        if not reference_id:
+            await context.reply("请先引用一条 CYWL 回复。")
+            return
+        embedded = self._parser.parse(getattr(message, "reference_message", None))
+        try:
+            async with asyncio.timeout(self.timeout_seconds):
+                outcome = await self._service.recall(
+                    reference_id,
+                    _message_address(context),
+                    embedded,
+                )
+        except ReferencedBotMessageNotFoundError:
+            await context.reply("引用的消息不是可撤回的 CYWL 回复。")
+            return
+        except (BotMessageRecallTransportError, TimeoutError) as exc:
+            logger.warning(
+                "Bot message recall unavailable: message=%s error=%s",
+                opaque_ref(reference_id),
+                type(exc).__name__,
+            )
+            await context.reply("撤回失败，请稍后重试。")
+            return
+        except DatabaseError as exc:
+            logger.warning(
+                "Bot message recall persistence unavailable: message=%s error=%s",
+                opaque_ref(reference_id),
+                type(exc).__name__,
+            )
+            await context.reply("撤回服务暂时不可用，请稍后重试。")
+            return
+        if outcome is MessageRecallOutcome.ALREADY_RECALLED:
+            await context.reply("这条回复已经撤回。")
+            return
+        await self._confirm(context, reference_id)
+
+    @staticmethod
+    async def _confirm(context: EventContext, reference_id: str) -> None:
+        try:
+            result = await context.react("✅")
+            if hasattr(result, "ok") and not bool(result.ok):
+                raise RuntimeError("OOPZ rejected confirmation reaction")
+        except Exception as exc:
+            logger.warning(
+                "Recall confirmation reaction degraded: message=%s error=%s",
+                opaque_ref(reference_id),
+                type(exc).__name__,
+            )
+            await context.reply("已撤回引用的回复。")
+
+
+def _message_address(context: EventContext) -> OopzMessageAddress:
+    event = context.event
+    message = event.message
+    private = bool(getattr(event, "is_private", False))
+    return OopzMessageAddress(
+        OopzMessageScope.PRIVATE if private else OopzMessageScope.CHANNEL,
+        area_id="" if private else str(getattr(message, "area", "")),
+        channel_id=str(getattr(message, "channel", "")),
+        target_person_id=(str(getattr(message, "sender_id", "")) if private else ""),
+    )
