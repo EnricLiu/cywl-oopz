@@ -33,6 +33,12 @@ from cywl_oopz.core.lifecycle import (
     ToolEffect,
     ToolExecutionStatus,
 )
+from cywl_oopz.features.access.models import AccessRole, RoleBindingScope
+from cywl_oopz.features.admin.models import (
+    OopzMessageScope,
+    OutboundMessageKind,
+    OutboundMessageState,
+)
 from cywl_oopz.features.agent.delegation.models import (
     DelegatedResultStyle,
     DelegatedTaskLane,
@@ -207,6 +213,36 @@ TASK_NOTIFICATION_STATE_ENUM = Enum(
     values_callable=_enum_values,
     validate_strings=True,
 )
+RBAC_ROLE_ENUM = Enum(
+    AccessRole,
+    name="rbac_role",
+    values_callable=_enum_values,
+    validate_strings=True,
+)
+RBAC_SCOPE_ENUM = Enum(
+    RoleBindingScope,
+    name="rbac_scope",
+    values_callable=_enum_values,
+    validate_strings=True,
+)
+OOPZ_MESSAGE_SCOPE_ENUM = Enum(
+    OopzMessageScope,
+    name="oopz_message_scope",
+    values_callable=_enum_values,
+    validate_strings=True,
+)
+OOPZ_OUTBOUND_MESSAGE_KIND_ENUM = Enum(
+    OutboundMessageKind,
+    name="oopz_outbound_message_kind",
+    values_callable=_enum_values,
+    validate_strings=True,
+)
+OOPZ_OUTBOUND_MESSAGE_STATE_ENUM = Enum(
+    OutboundMessageState,
+    name="oopz_outbound_message_state",
+    values_callable=_enum_values,
+    validate_strings=True,
+)
 
 
 def utc_now() -> datetime:
@@ -216,6 +252,77 @@ def utc_now() -> datetime:
 
 class Base(DeclarativeBase):
     """Base class for all application tables."""
+
+
+class RbacRoleBindingRecord(Base):
+    """One scoped role assignment for an OOPZ message sender."""
+
+    __tablename__ = "rbac_role_bindings"
+    __table_args__ = (
+        UniqueConstraint(
+            "subject_person_id",
+            "role",
+            "scope",
+            "area_id",
+            "channel_id",
+            name="uq_rbac_role_bindings_assignment",
+        ),
+        CheckConstraint(
+            "(scope = 'global' AND area_id = '' AND channel_id = '') OR "
+            "(scope = 'area' AND area_id <> '' AND channel_id = '') OR "
+            "(scope = 'channel' AND area_id <> '' AND channel_id <> '')",
+            name="ck_rbac_role_bindings_scope_address",
+        ),
+        CheckConstraint(
+            "role <> 'owner' OR scope = 'global'",
+            name="ck_rbac_role_bindings_owner_global",
+        ),
+        Index(
+            "ix_rbac_role_bindings_subject_scope",
+            "subject_person_id",
+            "scope",
+            "area_id",
+            "channel_id",
+        ),
+        Index(
+            "ix_rbac_role_bindings_resource",
+            "scope",
+            "area_id",
+            "channel_id",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid,
+        primary_key=True,
+        default=uuid4,
+        server_default=GENERATED_UUID,
+    )
+    subject_person_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    role: Mapped[AccessRole] = mapped_column(RBAC_ROLE_ENUM, nullable=False)
+    scope: Mapped[RoleBindingScope] = mapped_column(RBAC_SCOPE_ENUM, nullable=False)
+    area_id: Mapped[str] = mapped_column(
+        String(128), default="", server_default=EMPTY_STRING, nullable=False
+    )
+    channel_id: Mapped[str] = mapped_column(
+        String(128), default="", server_default=EMPTY_STRING, nullable=False
+    )
+    granted_by_person_id: Mapped[str] = mapped_column(
+        String(128), default="", server_default=EMPTY_STRING, nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        server_default=CURRENT_TIMESTAMP,
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        server_default=CURRENT_TIMESTAMP,
+        server_onupdate=FetchedValue(),
+        nullable=False,
+    )
 
 
 class ChannelSettingsRecord(Base):
@@ -986,6 +1093,12 @@ class AgentRunRecord(Base):
     """One pinned and bounded Agent execution."""
 
     __tablename__ = "agent_runs"
+    __table_args__ = (
+        CheckConstraint(
+            "jsonb_typeof(diagnostics) = 'object'",
+            name="ck_agent_runs_diagnostics_object",
+        ),
+    )
 
     id: Mapped[UUID] = mapped_column(
         Uuid,
@@ -1026,6 +1139,12 @@ class AgentRunRecord(Base):
         nullable=False,
     )
     usage: Mapped[dict[str, object]] = mapped_column(
+        JSONB,
+        default=dict,
+        server_default=EMPTY_JSONB_OBJECT,
+        nullable=False,
+    )
+    diagnostics: Mapped[dict[str, object]] = mapped_column(
         JSONB,
         default=dict,
         server_default=EMPTY_JSONB_OBJECT,
@@ -1139,6 +1258,91 @@ class AgentToolExecutionRecord(Base):
         nullable=False,
     )
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class OopzOutboundMessageRecord(Base):
+    """Address and diagnostic linkage for one message sent by this Bot."""
+
+    __tablename__ = "oopz_outbound_messages"
+    __table_args__ = (
+        CheckConstraint(
+            "(scope = 'channel' AND area_id <> '' AND channel_id <> '' "
+            "AND target_person_id = '') OR "
+            "(scope = 'private' AND area_id = '' AND channel_id <> '' "
+            "AND target_person_id <> '')",
+            name="ck_oopz_outbound_messages_scope_address",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(diagnostic_snapshot) = 'object'",
+            name="ck_oopz_outbound_messages_diagnostic_object",
+        ),
+        Index(
+            "ix_oopz_outbound_messages_address",
+            "scope",
+            "area_id",
+            "channel_id",
+            "target_person_id",
+        ),
+        Index("ix_oopz_outbound_messages_agent_run", "agent_run_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid,
+        primary_key=True,
+        default=uuid4,
+        server_default=GENERATED_UUID,
+    )
+    message_id: Mapped[str] = mapped_column(String(256), unique=True, nullable=False)
+    message_timestamp: Mapped[str] = mapped_column(
+        String(64), default="", server_default=EMPTY_STRING, nullable=False
+    )
+    kind: Mapped[OutboundMessageKind] = mapped_column(
+        OOPZ_OUTBOUND_MESSAGE_KIND_ENUM,
+        nullable=False,
+    )
+    state: Mapped[OutboundMessageState] = mapped_column(
+        OOPZ_OUTBOUND_MESSAGE_STATE_ENUM,
+        default=OutboundMessageState.FINAL,
+        server_default=text("'final'"),
+        nullable=False,
+    )
+    scope: Mapped[OopzMessageScope] = mapped_column(OOPZ_MESSAGE_SCOPE_ENUM, nullable=False)
+    area_id: Mapped[str] = mapped_column(
+        String(128), default="", server_default=EMPTY_STRING, nullable=False
+    )
+    channel_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    target_person_id: Mapped[str] = mapped_column(
+        String(128), default="", server_default=EMPTY_STRING, nullable=False
+    )
+    in_reply_to_message_id: Mapped[str] = mapped_column(
+        String(256), default="", server_default=EMPTY_STRING, nullable=False
+    )
+    owner_person_id: Mapped[str] = mapped_column(
+        String(128), default="", server_default=EMPTY_STRING, nullable=False
+    )
+    agent_run_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("agent_runs.id", ondelete="SET NULL"), nullable=True
+    )
+    diagnostic_snapshot: Mapped[dict[str, object]] = mapped_column(
+        JSONB,
+        default=dict,
+        server_default=EMPTY_JSONB_OBJECT,
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        server_default=CURRENT_TIMESTAMP,
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        server_default=CURRENT_TIMESTAMP,
+        server_onupdate=FetchedValue(),
+        nullable=False,
+    )
+    recalled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class VoiceProviderRecord(Base):

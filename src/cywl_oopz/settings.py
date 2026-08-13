@@ -264,6 +264,22 @@ class DatabaseSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class RbacSettings:
+    """Low-friction bootstrap policy for database-backed authorization."""
+
+    bootstrap_owner_ids: frozenset[str]
+
+    @classmethod
+    def from_mapping(cls, values: Mapping[str, str]) -> RbacSettings:
+        owner_ids = frozenset(_csv(values, "CYWL_RBAC_BOOTSTRAP_OWNER_IDS"))
+        if any(len(person_id) > 128 for person_id in owner_ids):
+            raise ConfigurationError(
+                "CYWL_RBAC_BOOTSTRAP_OWNER_IDS entries must be at most 128 characters"
+            )
+        return cls(bootstrap_owner_ids=owner_ids)
+
+
+@dataclass(frozen=True, slots=True)
 class ChatSettings:
     """Provider, context, and local rate-limit policy for text chat."""
 
@@ -1194,6 +1210,7 @@ class AppSettings:
 
     oopz: OopzConfig
     database: DatabaseSettings
+    rbac: RbacSettings
     chat: ChatSettings
     agent: AgentSettings
     music: MusicSettings
@@ -1231,6 +1248,7 @@ class AppSettings:
         return cls(
             oopz=oopz,
             database=DatabaseSettings.from_mapping(values),
+            rbac=RbacSettings.from_mapping(values),
             chat=ChatSettings.from_mapping(values),
             agent=AgentSettings.from_mapping(values),
             music=MusicSettings.from_mapping(values),

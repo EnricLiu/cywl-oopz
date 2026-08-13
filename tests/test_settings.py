@@ -12,6 +12,7 @@ from cywl_oopz.settings import (
     ChatSettings,
     DatabaseSettings,
     MusicSettings,
+    RbacSettings,
     VoiceSettings,
     WebSearchSafeSearch,
     WebToolsSettings,
@@ -35,6 +36,17 @@ def test_database_url_is_normalized_to_asyncpg() -> None:
     assert settings.url == "postgresql+asyncpg://user:secret@localhost:5432/cywl"
 
 
+def test_rbac_bootstrap_owner_ids_are_normalized_and_bounded() -> None:
+    settings = RbacSettings.from_mapping(
+        {"CYWL_RBAC_BOOTSTRAP_OWNER_IDS": " owner-1,owner-2, owner-1 "}
+    )
+
+    assert settings.bootstrap_owner_ids == frozenset({"owner-1", "owner-2"})
+
+    with pytest.raises(ConfigurationError, match="BOOTSTRAP_OWNER_IDS"):
+        RbacSettings.from_mapping({"CYWL_RBAC_BOOTSTRAP_OWNER_IDS": "x" * 129})
+
+
 def test_app_settings_use_the_injected_oopz_credentials(monkeypatch) -> None:
     for name in ("OOPZ_DEVICE_ID", "OOPZ_PERSON_UID", "OOPZ_JWT_TOKEN"):
         monkeypatch.delenv(name, raising=False)
@@ -44,6 +56,7 @@ def test_app_settings_use_the_injected_oopz_credentials(monkeypatch) -> None:
     assert settings.oopz.device_id == "device"
     assert settings.oopz.person_uid == "bot"
     assert settings.oopz.jwt_token == "token"
+    assert settings.rbac.bootstrap_owner_ids == frozenset()
     assert settings.agent.mode is AgentMode.LEGACY
     assert settings.agent.enabled_tools == (
         "get_agent_status",
