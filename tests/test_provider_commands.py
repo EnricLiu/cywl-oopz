@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import pytest
 
-from cywl_oopz.commands.router import ParsedCommand
+from cywl_oopz.commands.router import CommandRouter
 from cywl_oopz.features.agent.commands import (
     AgentModelCommand,
     ProviderCommand,
@@ -131,6 +131,24 @@ class FakeContext:
         self.replies.append(text)
 
 
+async def execute(command, name: str, arguments: tuple[str, ...], context: FakeContext) -> None:
+    router = CommandRouter("/")
+    router.register_definition(command.definition())
+    text = " ".join((f"/{name}", *arguments))
+    message = SimpleNamespace(
+        plain_text=text,
+        text=text,
+        content=text,
+        sender_id="person",
+        area="",
+        channel="",
+        message_id="message",
+        mention_list=(),
+    )
+    context.event.message = message
+    await router.dispatch(message, context)
+
+
 @pytest.mark.asyncio
 async def test_provider_command_lists_and_switches_thread_model() -> None:
     service = FakeProviderService()
@@ -138,11 +156,8 @@ async def test_provider_command_lists_and_switches_thread_model() -> None:
     list_context = FakeContext()
     use_context = FakeContext()
 
-    await command.execute(ParsedCommand("provider", ()), list_context)
-    await command.execute(
-        ParsedCommand("provider", ("secondary", "fast")),
-        use_context,
-    )
+    await execute(command, "provider", (), list_context)
+    await execute(command, "provider", ("secondary", "fast"), use_context)
 
     assert "🎛️ **当前模型** primary/chat · 当前对话" in list_context.replies[0]
     assert "**primary** Primary AI：chat（默认）、reasoning" in list_context.replies[0]
@@ -158,14 +173,8 @@ async def test_provider_command_keeps_old_use_syntax_and_explains_personal_defau
     old_context = FakeContext()
     default_context = FakeContext()
 
-    await command.execute(
-        ParsedCommand("provider", ("use", "secondary", "fast")),
-        old_context,
-    )
-    await command.execute(
-        ParsedCommand("provider", ("default", "primary")),
-        default_context,
-    )
+    await execute(command, "provider", ("use", "secondary", "fast"), old_context)
+    await execute(command, "provider", ("default", "primary"), default_context)
 
     assert old_context.replies == ["✅ **当前对话模型** secondary/fast"]
     assert "**个人默认模型** primary/default" in default_context.replies[0]
@@ -183,8 +192,8 @@ async def test_agent_model_command_lists_current_provider_and_accepts_short_alia
     list_context = FakeContext()
     switch_context = FakeContext()
 
-    await command.execute(ParsedCommand("model", ()), list_context)
-    await command.execute(ParsedCommand("model", ("reasoning",)), switch_context)
+    await execute(command, "model", (), list_context)
+    await execute(command, "model", ("reasoning",), switch_context)
 
     rendered = list_context.replies[0]
     assert "🎛️ **当前模型** primary/chat · 当前对话" in rendered
@@ -201,13 +210,17 @@ async def test_agent_model_and_provider_commands_return_specific_not_found_help(
     model_context = FakeContext()
     provider_context = FakeContext()
 
-    await AgentModelCommand(service, ChatTaskSupervisor()).execute(
-        ParsedCommand("model", ("missing",)),
+    await execute(
+        AgentModelCommand(service, ChatTaskSupervisor()),
+        "model",
+        ("missing",),
         model_context,
     )
     service.select_provider = _missing_provider
-    await ProviderCommand(service, ChatTaskSupervisor()).execute(
-        ParsedCommand("provider", ("unknown",)),
+    await execute(
+        ProviderCommand(service, ChatTaskSupervisor()),
+        "provider",
+        ("unknown",),
         provider_context,
     )
 
@@ -226,10 +239,7 @@ async def _missing_provider(*args, **kwargs) -> str:
 async def test_tools_command_lists_effects_without_internal_configuration() -> None:
     context = FakeContext()
 
-    await ToolsCommand(FakeProviderService()).execute(
-        ParsedCommand("tools", ()),
-        context,
-    )
+    await execute(ToolsCommand(FakeProviderService()), "tools", (), context)
 
     assert "get_agent_status（只读）" in context.replies[0]
     assert "react_to_message（写操作）" in context.replies[0]
@@ -239,10 +249,7 @@ async def test_tools_command_lists_effects_without_internal_configuration() -> N
 async def test_skills_command_lists_safe_discovery_metadata_only() -> None:
     context = FakeContext()
 
-    await SkillsCommand(FakeProviderService()).execute(
-        ParsedCommand("skills", ()),
-        context,
-    )
+    await execute(SkillsCommand(FakeProviderService()), "skills", (), context)
 
     assert "**网页研究** web-research · 我的 · v1" in context.replies[0]
     assert "搜索并阅读关键来源" in context.replies[0]
@@ -288,11 +295,8 @@ async def test_skills_command_lists_shared_skills_and_pending_invitations() -> N
     shared_context = FakeContext()
     invitation_context = FakeContext()
 
-    await command.execute(ParsedCommand("skills", ("shared",)), shared_context)
-    await command.execute(
-        ParsedCommand("skills", ("invitations",)),
-        invitation_context,
-    )
+    await execute(command, "skills", ("shared",), shared_context)
+    await execute(command, "skills", ("invitations",), invitation_context)
 
     assert "**旅行规划** travel-planner · v1" in shared_context.replies[0]
     assert str(invitation.share.id) in invitation_context.replies[0]

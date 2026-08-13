@@ -108,6 +108,13 @@ class FakeAvailabilityService:
 @dataclass
 class FakeMessage:
     plain_text: str
+    sender_id: str = "person"
+    area: str = "area"
+    channel: str = "channel"
+    message_id: str = "message"
+    text: str = ""
+    content: str = ""
+    mention_list: tuple[object, ...] = ()
 
 
 class FakeContext:
@@ -138,7 +145,7 @@ def direct_command(
         FakeSelectionService(),  # type: ignore[arg-type]
     )
     router = CommandRouter("/")
-    router.register(ToolCommand(service, "/"))
+    router.register_definition(ToolCommand(service, "/").definition())
     return router, tool, availability
 
 
@@ -231,7 +238,7 @@ async def test_direct_skill_loader_is_explicitly_unavailable_without_run_scope()
         FakeSelectionService(),  # type: ignore[arg-type]
     )
     router = CommandRouter("/")
-    router.register(ToolCommand(service, "/"))
+    router.register_definition(ToolCommand(service, "/").definition())
     context = FakeContext()
 
     await router.dispatch(

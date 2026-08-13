@@ -772,10 +772,6 @@ class BotApplication:
             ExecutionMode.BACKGROUND,
             timeout_seconds=30.0,
         )
-        background_tool = CommandExecutionPolicy(
-            ExecutionMode.BACKGROUND,
-            timeout_seconds=90.0,
-        )
         self.commands.register_definition(PingCommand().definition())
         self.commands.register_definition(HelpCommand(self.commands).definition())
         self.commands.register_definition(StatusCommand(self.health).definition())
@@ -810,13 +806,12 @@ class BotApplication:
             ).definition()
         )
         if self.settings.agent.enabled:
-            self.commands.register(
+            self.commands.register_definition(
                 AgentModelCommand(
                     self.agent_chat,
                     self.chat_tasks,
                     self.settings.command_prefix,
-                ),
-                execution=background_database,
+                ).definition()
             )
         else:
             self.commands.register(
@@ -833,34 +828,27 @@ class BotApplication:
                 ).definition()
             )
         if self.settings.agent.enabled:
-            self.commands.register(
+            self.commands.register_definition(
                 ProviderCommand(
                     self.agent_chat,
                     self.chat_tasks,
                     self.settings.command_prefix,
-                ),
-                execution=background_database,
+                ).definition()
             )
-            self.commands.register(
-                ToolsCommand(self.agent_chat),
-                execution=background_database,
-            )
-            self.commands.register(
+            self.commands.register_definition(ToolsCommand(self.agent_chat).definition())
+            self.commands.register_definition(
                 ToolCommand(
                     self.direct_tools,
                     self.settings.command_prefix,
-                    self.chat_invocations,
-                ),
-                execution=background_tool,
+                ).definition()
             )
-            self.commands.register(
-                MemoryCommand(self.agent_chat, self.agent_memory),
-                execution=background_database,
-            )
+            self.commands.register_definition(MemoryCommand(self.agent_memory).definition())
             if self.settings.agent.skills_enabled:
-                self.commands.register(
-                    SkillsCommand(self.agent_chat, self.agent_skill_library),
-                    execution=background_database,
+                self.commands.register_definition(
+                    SkillsCommand(
+                        self.agent_chat,
+                        self.agent_skill_library,
+                    ).definition()
                 )
         if self.settings.voice.enabled:
             self.commands.register(
