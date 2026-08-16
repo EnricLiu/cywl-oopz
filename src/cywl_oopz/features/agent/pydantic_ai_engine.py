@@ -38,7 +38,7 @@ from cywl_oopz.core.errors import (
     ProviderResponseError,
     ProviderTimeoutError,
 )
-from cywl_oopz.core.observability import exception_kind
+from cywl_oopz.core.observability import exception_kind, opaque_ref
 from cywl_oopz.features.chat.progress import ProgressSink, emit_progress
 
 from .models import AgentMessage, AgentRunRequest, AgentRunResult, AgentStopReason
@@ -127,10 +127,11 @@ class PydanticAiAgentEngine:
         progress: ProgressSink | None = None,
     ) -> AgentRunResult:
         """Run an Agent loop with hard wall-clock, model, token, and tool budgets."""
+        run_ref = opaque_ref("agent-run", request.run_id)
         logger.info(
-            "Agent engine run started: run=%s model=%s/%s context_messages=%s "
+            "Agent engine run started: run_ref=%s model=%s/%s context_messages=%s "
             "tools=%s timeout_seconds=%s",
-            request.run_id,
+            run_ref,
             request.model.provider_alias,
             request.model.model_alias,
             len(request.context),
@@ -162,8 +163,9 @@ class PydanticAiAgentEngine:
             raise
         except Exception as exc:
             logger.exception(
-                "Agent engine bootstrap failed: run=%s phase=engine_bootstrap error=%s",
-                request.run_id,
+                "Agent engine bootstrap failed: run_ref=%s phase=engine_bootstrap "
+                "responsibility=internal recoverability=terminal code=agent_internal error=%s",
+                run_ref,
                 exception_kind(exc),
             )
             raise AgentInternalError("Agent engine bootstrap failed") from exc
@@ -195,7 +197,10 @@ class PydanticAiAgentEngine:
                         raise ProviderResponseError("Agent stream ended without a result")
         except TimeoutError as exc:
             logger.warning(
-                "Agent engine timed out: run=%s error=%s", request.run_id, exception_kind(exc)
+                "Agent engine timed out: run_ref=%s phase=provider "
+                "responsibility=dependency recoverability=terminal code=provider_timeout error=%s",
+                run_ref,
+                exception_kind(exc),
             )
             raise ProviderTimeoutError("Agent run timed out") from exc
         except UsageLimitExceeded as exc:
@@ -214,22 +219,26 @@ class PydanticAiAgentEngine:
                 stop_reason=reason,
             )
             logger.warning(
-                "Agent engine reached usage limit: run=%s reason=%s",
-                request.run_id,
+                "Agent engine reached usage limit: run_ref=%s phase=provider "
+                "responsibility=request recoverability=terminal code=usage_limit reason=%s",
+                run_ref,
                 reason.value,
             )
             return exhausted
         except (ModelAPIError, ModelHTTPError) as exc:
             logger.warning(
-                "Agent model request failed: run=%s error=%s",
-                request.run_id,
+                "Agent model request failed: run_ref=%s phase=provider "
+                "responsibility=dependency recoverability=terminal code=provider_error error=%s",
+                run_ref,
                 exception_kind(exc),
             )
             raise ProviderError("Agent model request failed") from exc
         except (UnexpectedModelBehavior, UserError) as exc:
             logger.warning(
-                "Agent model response invalid: run=%s error=%s",
-                request.run_id,
+                "Agent model response invalid: run_ref=%s phase=provider "
+                "responsibility=model recoverability=terminal code=invalid_provider_response "
+                "error=%s",
+                run_ref,
                 exception_kind(exc),
             )
             raise ProviderResponseError("Agent model returned an invalid response") from exc
@@ -239,8 +248,9 @@ class PydanticAiAgentEngine:
             raise
         except Exception as exc:
             logger.exception(
-                "Agent engine stream failed internally: run=%s phase=engine_stream error=%s",
-                request.run_id,
+                "Agent engine stream failed internally: run_ref=%s phase=engine_stream "
+                "responsibility=internal recoverability=terminal code=agent_internal error=%s",
+                run_ref,
                 exception_kind(exc),
             )
             raise AgentInternalError("Agent engine stream failed") from exc
@@ -258,15 +268,16 @@ class PydanticAiAgentEngine:
             raise
         except Exception as exc:
             logger.exception(
-                "Agent engine result mapping failed: run=%s phase=result_mapping error=%s",
-                request.run_id,
+                "Agent engine result mapping failed: run_ref=%s phase=result_mapping "
+                "responsibility=internal recoverability=terminal code=agent_internal error=%s",
+                run_ref,
                 exception_kind(exc),
             )
             raise AgentInternalError("Agent engine result mapping failed") from exc
         logger.info(
-            "Agent engine run completed: run=%s model_requests=%s tool_calls=%s "
+            "Agent engine run completed: run_ref=%s model_requests=%s tool_calls=%s "
             "input_tokens=%s output_tokens=%s",
-            request.run_id,
+            run_ref,
             usage.requests,
             usage.tool_calls,
             usage.input_tokens,
@@ -401,10 +412,15 @@ class PydanticAiAgentEngine:
             if validation.valid:
                 return
             logger.warning(
-                "Agent tool arguments rejected: run=%s call=%s tool=%s "
-                "attempt=%s max_retries=%s issues=%s",
-                dependencies.context.run_id,
-                context.tool_call_id or "missing",
+                "Agent tool arguments rejected: run_ref=%s call_ref=%s tool=%s "
+                "phase=tool_validate responsibility=model recoverability=retry "
+                "code=invalid_arguments attempt=%s max_retries=%s issues=%s",
+                opaque_ref("agent-run", dependencies.context.run_id),
+                opaque_ref(
+                    "agent-tool-call",
+                    dependencies.context.run_id,
+                    context.tool_call_id or "missing",
+                ),
                 name,
                 context.retry + 1,
                 descriptor.max_retries,

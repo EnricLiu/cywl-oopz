@@ -57,6 +57,13 @@ class FakeContext:
         return SimpleNamespace(message_id=f"reply-{len(self.replies)}", timestamp="123")
 
 
+@dataclass
+class FailingReplyContext(FakeContext):
+    async def reply(self, text: str):
+        del text
+        raise RuntimeError("transport unavailable")
+
+
 def context_for(message: FakeMessage, *, private: bool = False) -> FakeContext:
     return FakeContext(event=SimpleNamespace(message=message, is_private=private))
 
@@ -265,6 +272,37 @@ class OwnedPresentationFactory:
         return self.presentation
 
 
+class BrokenPresentationFactory:
+    async def open(self, _: object) -> OwnedPresentation:
+        raise RuntimeError("presentation unavailable")
+
+
+class BrokenTerminalPresentation(OwnedPresentation):
+    def __init__(self, operation: str) -> None:
+        super().__init__()
+        self.operation = operation
+
+    async def complete(self, response: ChatResponse) -> None:
+        if self.operation == "complete":
+            raise RuntimeError("complete unavailable")
+        await super().complete(response)
+
+    async def fail(self, message: str) -> None:
+        if self.operation == "fail":
+            raise RuntimeError("fail unavailable")
+        await super().fail(message)
+
+    async def cancel(self) -> None:
+        if self.operation == "cancel":
+            raise RuntimeError("cancel unavailable")
+        await super().cancel()
+
+    async def aclose(self) -> None:
+        if self.operation == "close":
+            raise RuntimeError("close unavailable")
+        await super().aclose()
+
+
 class DirectPresentation(OwnedPresentation):
     owns_message = False
 
@@ -364,6 +402,142 @@ async def test_owned_presentation_keeps_safe_failure_in_the_original_message() -
 
 
 @pytest.mark.asyncio
+async def test_presentation_open_failure_falls_back_to_direct_reply() -> None:
+    router = CommandRouter("/")
+    router.register_definition(
+        ChatCommand(
+            ProgressChatService(),
+            ChatTaskSupervisor(),
+            BrokenPresentationFactory(),
+        ).definition()
+    )
+    message = FakeMessage("/chat hello")
+    context = context_for(message)
+
+    await dispatch_command(router, message, context)
+
+    assert context.replies == ["只有这一条最终回答"]
+
+
+@pytest.mark.asyncio
+async def test_direct_reply_failure_does_not_change_successful_command_outcome() -> None:
+    router = CommandRouter("/")
+    router.register_definition(
+        ChatCommand(ProgressChatService(), ChatTaskSupervisor()).definition()
+    )
+    message = FakeMessage("/chat hello")
+    context = FailingReplyContext(event=SimpleNamespace(message=message, is_private=False))
+
+    await dispatch_command(router, message, context)
+
+    assert context.replies == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["complete", "fail", "close"])
+async def test_terminal_presentation_failure_does_not_replace_primary_outcome(
+    operation: str,
+) -> None:
+    presentation = BrokenTerminalPresentation(operation)
+    service = (
+        FailingChatService(ProviderTimeoutError("timeout"))
+        if operation == "fail"
+        else ProgressChatService()
+    )
+    router = CommandRouter("/")
+    router.register_definition(
+        ChatCommand(
+            service,
+            ChatTaskSupervisor(),
+            OwnedPresentationFactory(presentation),
+        ).definition()
+    )
+    message = FakeMessage("/chat hello")
+    context = context_for(message)
+
+    await dispatch_command(router, message, context)
+
+    if operation == "complete":
+        assert context.replies == ["只有这一条最终回答"]
+    elif operation == "fail":
+        assert context.replies == ["模型响应超时，请稍后重试。"]
+    else:
+        assert context.replies == []
+        assert presentation.completed is not None
+
+
+@pytest.mark.asyncio
+async def test_mention_presentation_open_failure_falls_back_to_direct_reply() -> None:
+    handler = MentionChatHandler(
+        ProgressChatService(),
+        "bot",
+        BrokenPresentationFactory(),
+    )
+    message = FakeMessage(
+        "hello",
+        mention_list=(SimpleNamespace(person="bot"),),
+    )
+    context = context_for(message)
+
+    assert await handler.handle(message, context) is True
+
+    assert context.replies == ["只有这一条最终回答"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["complete", "fail", "close"])
+async def test_mention_terminal_presentation_failure_preserves_primary_outcome(
+    operation: str,
+) -> None:
+    presentation = BrokenTerminalPresentation(operation)
+    service = (
+        FailingChatService(ProviderTimeoutError("timeout"))
+        if operation == "fail"
+        else ProgressChatService()
+    )
+    handler = MentionChatHandler(
+        service,
+        "bot",
+        OwnedPresentationFactory(presentation),
+    )
+    message = FakeMessage(
+        "hello",
+        mention_list=(SimpleNamespace(person="bot"),),
+    )
+    context = context_for(message)
+
+    assert await handler.handle(message, context) is True
+
+    if operation == "complete":
+        assert context.replies == ["只有这一条最终回答"]
+    elif operation == "fail":
+        assert context.replies == ["模型响应超时，请稍后重试。"]
+    else:
+        assert context.replies == []
+        assert presentation.completed is not None
+
+
+@pytest.mark.asyncio
+async def test_mention_live_and_fallback_reply_failure_are_contained() -> None:
+    presentation = BrokenTerminalPresentation("complete")
+    handler = MentionChatHandler(
+        ProgressChatService(),
+        "bot",
+        OwnedPresentationFactory(presentation),
+    )
+    message = FakeMessage(
+        "hello",
+        mention_list=(SimpleNamespace(person="bot"),),
+    )
+    context = FailingReplyContext(event=SimpleNamespace(message=message, is_private=False))
+
+    assert await handler.handle(message, context) is True
+
+    assert context.replies == []
+    assert presentation.closed is True
+
+
+@pytest.mark.asyncio
 async def test_cancel_updates_owned_message_without_a_second_command_reply() -> None:
     presentation = OwnedPresentation()
     supervisor = ChatTaskSupervisor()
@@ -402,6 +576,85 @@ async def test_cancel_updates_owned_message_without_a_second_command_reply() -> 
     assert presentation.closed is True
     assert source_context.replies == []
     assert cancel_context.replies == []
+
+
+@pytest.mark.asyncio
+async def test_cancel_presentation_failure_preserves_cancellation() -> None:
+    presentation = BrokenTerminalPresentation("cancel")
+    supervisor = ChatTaskSupervisor()
+    started = asyncio.Event()
+
+    class WaitingService:
+        enabled = True
+
+        async def ask(self, *args: object, **kwargs: object) -> ChatResponse:
+            del args, kwargs
+            started.set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+    service = WaitingService()
+    source_message = FakeMessage("/chat wait")
+    source_context = context_for(source_message)
+    router = CommandRouter("/")
+    router.register_definition(
+        ChatCommand(
+            service,
+            supervisor,
+            OwnedPresentationFactory(presentation),
+        ).definition()
+    )
+    router.register_definition(
+        CancelChatCommand(
+            service,
+            supervisor,
+            active_message_reports_cancel=True,
+        ).definition()
+    )
+    operation = asyncio.create_task(dispatch_command(router, source_message, source_context))
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    cancel_context = context_for(FakeMessage("/cancel"))
+    await dispatch_command(router, cancel_context.event.message, cancel_context)
+    outcomes = await asyncio.gather(operation, return_exceptions=True)
+
+    assert isinstance(outcomes[0], asyncio.CancelledError)
+    assert source_context.replies == ["已取消当前文字回复。"]
+    assert cancel_context.replies == []
+
+
+@pytest.mark.asyncio
+async def test_mention_cancel_presentation_failure_preserves_cancellation() -> None:
+    presentation = BrokenTerminalPresentation("cancel")
+    started = asyncio.Event()
+
+    class WaitingService:
+        enabled = True
+
+        async def ask(self, *args: object, **kwargs: object) -> ChatResponse:
+            del args, kwargs
+            started.set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+    handler = MentionChatHandler(
+        WaitingService(),
+        "bot",
+        OwnedPresentationFactory(presentation),
+    )
+    message = FakeMessage(
+        "wait",
+        mention_list=(SimpleNamespace(person="bot"),),
+    )
+    context = context_for(message)
+    operation = asyncio.create_task(handler.handle(message, context))
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    operation.cancel()
+    outcomes = await asyncio.gather(operation, return_exceptions=True)
+
+    assert isinstance(outcomes[0], asyncio.CancelledError)
+    assert context.replies == ["已取消当前文字回复。"]
 
 
 @pytest.mark.asyncio

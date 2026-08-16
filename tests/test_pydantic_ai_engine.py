@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from uuid import uuid4
 
 import pytest
@@ -156,6 +157,37 @@ async def test_progress_sink_failure_never_fails_the_agent_run() -> None:
     result = await engine.run(request, RecordingProgress(fail=True))
 
     assert result.output == "still works"
+
+
+@pytest.mark.asyncio
+async def test_engine_skips_malformed_history_tool_message() -> None:
+    captured: dict[str, object] = {}
+
+    async def respond(messages: list[ModelMessage], _: AgentInfo):
+        captured["messages"] = messages
+        yield "history recovered"
+
+    engine = PydanticAiAgentEngine(FakeRegistry(FunctionModel(stream_function=respond)))
+    request = replace(
+        engine_request(),
+        context=(
+            AgentMessage(
+                "assistant",
+                "tool_call",
+                {
+                    "tool_name": 42,
+                    "tool_call_id": None,
+                    "arguments": ["not", "an", "object"],
+                },
+            ),
+            AgentMessage("user", "text", {"text": "continue"}),
+        ),
+    )
+
+    result = await engine.run(request)
+
+    assert result.output == "history recovered"
+    assert len(captured["messages"]) == 1  # type: ignore[arg-type]
 
 
 @pytest.mark.asyncio

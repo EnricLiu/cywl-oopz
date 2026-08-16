@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable
 from dataclasses import dataclass
 from datetime import UTC
 
@@ -96,6 +97,53 @@ class ChatCommandController:
             exc_info=presentation.internal,
         )
 
+    @staticmethod
+    async def _safe_presentation(
+        operation: str,
+        work: Awaitable[None],
+        *,
+        request_ref: str = "none",
+    ) -> bool:
+        try:
+            await work
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "Conversation presentation degraded: request_ref=%s phase=presentation "
+                "responsibility=transport recoverability=fallback "
+                "code=presentation_%s_failed error=%s",
+                request_ref,
+                operation,
+                type(exc).__name__,
+                exc_info=True,
+            )
+            return False
+        return True
+
+    @staticmethod
+    async def _safe_reply(
+        operation: str,
+        work: Awaitable[object],
+        *,
+        request_ref: str,
+    ) -> object | None:
+        try:
+            return await work
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "Conversation reply delivery degraded: request_ref=%s phase=presentation "
+                "responsibility=transport recoverability=discarded "
+                "code=reply_%s_failed error=%s",
+                request_ref,
+                operation,
+                type(exc).__name__,
+                exc_info=True,
+            )
+            return None
+
     def _request_invocation(self, request: CommandRequest) -> ChatInvocation:
         if self._invocations is not None:
             return self._invocations.from_request(request)
@@ -130,12 +178,20 @@ class ChatCommandController:
         prompt: str,
     ) -> bool:
         """Run the command path using only project-owned request values."""
+        key = self._request_key(request)
+        request_ref = self._request_ref(request, key)
         try:
             presentation = await self._presenters.open(request)
         except Exception as exc:
-            logger.warning("Conversation presenter failed to open: %s", type(exc).__name__)
+            logger.warning(
+                "Conversation presentation degraded: request_ref=%s phase=presentation "
+                "responsibility=transport recoverability=fallback "
+                "code=presentation_open_failed error=%s",
+                request_ref,
+                type(exc).__name__,
+                exc_info=True,
+            )
             presentation = NoopProgressSession()
-        key = self._request_key(request)
         try:
             response = await self._service.ask(
                 key,
@@ -155,35 +211,105 @@ class ChatCommandController:
             self._log_error(error_presentation, exc, conversation_ref=conversation_ref)
             message = error_presentation.message
             if presentation.owns_message:
-                await presentation.fail(message)
-            else:
-                sent = await request.responder.reply(message)
-                await self._record_direct_delivery(
-                    presentation,
-                    sent,
-                    failure_message=message,
+                delivered = await self._safe_presentation(
+                    "fail",
+                    presentation.fail(message),
+                    request_ref=request_ref,
                 )
+                if not delivered:
+                    sent = await self._safe_reply(
+                        "error",
+                        request.responder.reply(message),
+                        request_ref=request_ref,
+                    )
+                    if sent is not None:
+                        await self._record_direct_delivery(
+                            presentation,
+                            sent,
+                            failure_message=message,
+                        )
+            else:
+                sent = await self._safe_reply(
+                    "error",
+                    request.responder.reply(message),
+                    request_ref=request_ref,
+                )
+                if sent is not None:
+                    await self._record_direct_delivery(
+                        presentation,
+                        sent,
+                        failure_message=message,
+                    )
             return False
         else:
             if presentation.owns_message:
-                await presentation.complete(response)
+                delivered = await self._safe_presentation(
+                    "complete",
+                    presentation.complete(response),
+                    request_ref=request_ref,
+                )
+                if not delivered:
+                    sent = await self._safe_reply(
+                        "final",
+                        request.responder.reply(response.content),
+                        request_ref=request_ref,
+                    )
+                    if sent is not None:
+                        await self._record_direct_delivery(
+                            presentation,
+                            sent,
+                            response=response,
+                        )
             else:
-                sent = await request.responder.reply(response.content)
-                await self._record_direct_delivery(presentation, sent, response=response)
+                sent = await self._safe_reply(
+                    "final",
+                    request.responder.reply(response.content),
+                    request_ref=request_ref,
+                )
+                if sent is not None:
+                    await self._record_direct_delivery(
+                        presentation,
+                        sent,
+                        response=response,
+                    )
             return True
         finally:
-            await asyncio.shield(presentation.aclose())
+            await asyncio.shield(
+                self._safe_presentation(
+                    "close",
+                    presentation.aclose(),
+                    request_ref=request_ref,
+                )
+            )
 
     @staticmethod
     async def _show_request_cancelled(
         request: CommandRequest,
         presentation: ConversationProgressSession,
     ) -> None:
+        key = ChatCommandController._request_key(request)
+        request_ref = ChatCommandController._request_ref(request, key)
         if presentation.owns_message:
-            await asyncio.shield(presentation.cancel())
+            delivered = await asyncio.shield(
+                ChatCommandController._safe_presentation(
+                    "cancel",
+                    presentation.cancel(),
+                    request_ref=request_ref,
+                )
+            )
+            if not delivered:
+                await ChatCommandController._safe_reply(
+                    "cancel",
+                    request.responder.reply("已取消当前文字回复。"),
+                    request_ref=request_ref,
+                )
         else:
-            sent = await request.responder.reply("已取消当前文字回复。")
-            if isinstance(presentation, DirectResponseTraceSink):
+            sent = await ChatCommandController._safe_reply(
+                "cancel",
+                request.responder.reply("已取消当前文字回复。"),
+                request_ref=request_ref,
+            )
+            if sent is not None and isinstance(presentation, DirectResponseTraceSink):
                 try:
                     await presentation.record_delivery(sent, cancelled=True)
                 except Exception as exc:

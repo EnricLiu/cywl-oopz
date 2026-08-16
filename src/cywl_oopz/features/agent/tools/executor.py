@@ -11,7 +11,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ValidationError
 
-from cywl_oopz.core.observability import exception_kind
+from cywl_oopz.core.observability import exception_kind, opaque_ref
 
 from .models import (
     ToolCall,
@@ -53,14 +53,17 @@ class ToolExecutor:
         context: ToolExecutionContext,
     ) -> ToolExecutionResult:
         """Execute one call and convert all tool failures to safe model data."""
+        run_ref, call_ref = self._log_refs(context, call)
         try:
             tool = self._registry.get(call.name)
             descriptor = tool.descriptor if tool is not None else None
         except Exception as exc:
             logger.exception(
-                "Agent tool registry failed: run=%s call=%s tool=%s phase=tool_validate error=%s",
-                context.run_id,
-                call.call_id,
+                "Agent tool registry failed: run_ref=%s call_ref=%s tool=%s "
+                "phase=tool_validate responsibility=internal recoverability=tool_result "
+                "code=tool_failed error=%s",
+                run_ref,
+                call_ref,
                 call.name,
                 exception_kind(exc),
             )
@@ -72,8 +75,11 @@ class ToolExecutor:
             )
         if tool is None:
             logger.warning(
-                "Rejected unregistered Agent tool: run=%s tool=%s",
-                context.run_id,
+                "Rejected unregistered Agent tool: run_ref=%s call_ref=%s tool=%s "
+                "phase=tool_validate responsibility=model recoverability=tool_result "
+                "code=tool_not_registered",
+                run_ref,
+                call_ref,
                 call.name,
             )
             return ToolExecutionResult(
@@ -88,9 +94,11 @@ class ToolExecutor:
             arguments = descriptor.input_model.model_validate(dict(call.arguments))
         except ValidationError:
             logger.warning(
-                "Rejected Agent tool arguments: run=%s call=%s tool=%s phase=tool_validate",
-                context.run_id,
-                call.call_id,
+                "Rejected Agent tool arguments: run_ref=%s call_ref=%s tool=%s "
+                "phase=tool_validate responsibility=model recoverability=tool_result "
+                "code=invalid_arguments",
+                run_ref,
+                call_ref,
                 descriptor.name,
             )
             return ToolExecutionResult(
@@ -101,10 +109,11 @@ class ToolExecutor:
             )
         except Exception as exc:
             logger.exception(
-                "Agent tool argument validation crashed: run=%s call=%s tool=%s "
-                "phase=tool_validate error=%s",
-                context.run_id,
-                call.call_id,
+                "Agent tool argument validation crashed: run_ref=%s call_ref=%s tool=%s "
+                "phase=tool_validate responsibility=internal recoverability=tool_result "
+                "code=tool_failed error=%s",
+                run_ref,
+                call_ref,
                 descriptor.name,
                 exception_kind(exc),
             )
@@ -141,10 +150,11 @@ class ToolExecutor:
             )
         except Exception as exc:
             logger.exception(
-                "Failed to normalize Agent tool state: run=%s call=%s tool=%s "
-                "phase=tool_claim error=%s",
-                context.run_id,
-                call.call_id,
+                "Failed to normalize Agent tool state: run_ref=%s call_ref=%s tool=%s "
+                "phase=tool_claim responsibility=internal recoverability=tool_result "
+                "code=tool_state_unavailable error=%s",
+                run_ref,
+                call_ref,
                 descriptor.name,
                 exception_kind(exc),
             )
@@ -159,9 +169,10 @@ class ToolExecutor:
             claim = await self._executions.claim(pending_execution)
             if not claim.created:
                 logger.info(
-                    "Reused existing Agent tool execution: run=%s call=%s tool=%s status=%s",
-                    context.run_id,
-                    call.call_id,
+                    "Reused existing Agent tool execution: run_ref=%s call_ref=%s "
+                    "tool=%s status=%s",
+                    run_ref,
+                    call_ref,
                     call.name,
                     claim.execution.status.value,
                 )
@@ -170,9 +181,11 @@ class ToolExecutor:
             raise
         except Exception as exc:
             logger.exception(
-                "Agent tool state claim failed: run=%s call=%s tool=%s phase=tool_claim error=%s",
-                context.run_id,
-                call.call_id,
+                "Agent tool state claim failed: run_ref=%s call_ref=%s tool=%s "
+                "phase=tool_claim responsibility=database recoverability=tool_result "
+                "code=tool_state_unavailable error=%s",
+                run_ref,
+                call_ref,
                 descriptor.name,
                 exception_kind(exc),
             )
@@ -193,18 +206,20 @@ class ToolExecutor:
             )
         except asyncio.CancelledError:
             logger.info(
-                "Agent tool execution cancelled: run=%s call=%s tool=%s",
-                context.run_id,
-                call.call_id,
+                "Agent tool execution cancelled: run_ref=%s call_ref=%s tool=%s",
+                run_ref,
+                call_ref,
                 descriptor.name,
             )
             await self._finish_after_cancellation(context, normalized_call)
             raise
         except Exception as exc:
             logger.exception(
-                "Agent tool boundary crashed: run=%s call=%s tool=%s phase=tool_execute error=%s",
-                context.run_id,
-                call.call_id,
+                "Agent tool boundary crashed: run_ref=%s call_ref=%s tool=%s "
+                "phase=tool_execute responsibility=internal recoverability=tool_result "
+                "code=tool_failed error=%s",
+                run_ref,
+                call_ref,
                 descriptor.name,
                 exception_kind(exc),
             )
@@ -224,15 +239,18 @@ class ToolExecutor:
         arguments: BaseModel,
     ) -> ToolExecutionResult:
         """Execute one validated, durably claimed call."""
+        run_ref, call_ref = self._log_refs(context, call)
         try:
             error_code = await self._policy.denial_reason(context, descriptor)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             logger.exception(
-                "Agent tool policy failed: run=%s call=%s tool=%s phase=tool_policy error=%s",
-                context.run_id,
-                call.call_id,
+                "Agent tool policy failed: run_ref=%s call_ref=%s tool=%s "
+                "phase=tool_policy responsibility=internal recoverability=tool_result "
+                "code=tool_failed error=%s",
+                run_ref,
+                call_ref,
                 descriptor.name,
                 exception_kind(exc),
             )
@@ -244,9 +262,11 @@ class ToolExecutor:
             )
         if error_code:
             logger.warning(
-                "Denied Agent tool execution: run=%s call=%s tool=%s reason=%s",
-                context.run_id,
-                call.call_id,
+                "Denied Agent tool execution: run_ref=%s call_ref=%s tool=%s "
+                "phase=tool_policy responsibility=request recoverability=tool_result "
+                "code=%s",
+                run_ref,
+                call_ref,
                 descriptor.name,
                 error_code,
             )
@@ -259,9 +279,9 @@ class ToolExecutor:
 
         try:
             logger.info(
-                "Agent tool execution started: run=%s call=%s tool=%s timeout_seconds=%s",
-                context.run_id,
-                call.call_id,
+                "Agent tool execution started: run_ref=%s call_ref=%s tool=%s timeout_seconds=%s",
+                run_ref,
+                call_ref,
                 descriptor.name,
                 descriptor.timeout_seconds,
             )
@@ -271,9 +291,11 @@ class ToolExecutor:
             raise
         except TimeoutError as exc:
             logger.warning(
-                "Agent tool execution timed out: run=%s call=%s tool=%s error=%s",
-                context.run_id,
-                call.call_id,
+                "Agent tool execution timed out: run_ref=%s call_ref=%s tool=%s "
+                "phase=tool_execute responsibility=dependency recoverability=tool_result "
+                "code=tool_timeout error=%s",
+                run_ref,
+                call_ref,
                 descriptor.name,
                 exception_kind(exc),
             )
@@ -285,9 +307,11 @@ class ToolExecutor:
             )
         except ToolExecutionError as exc:
             logger.warning(
-                "Agent tool execution failed: run=%s call=%s tool=%s reason=%s",
-                context.run_id,
-                call.call_id,
+                "Agent tool execution failed: run_ref=%s call_ref=%s tool=%s "
+                "phase=tool_execute responsibility=request recoverability=tool_result "
+                "code=%s",
+                run_ref,
+                call_ref,
                 descriptor.name,
                 exc.error_code,
             )
@@ -299,9 +323,11 @@ class ToolExecutor:
             )
         except Exception as exc:
             logger.exception(
-                "Agent tool execution crashed: run=%s call=%s tool=%s phase=tool_execute error=%s",
-                context.run_id,
-                call.call_id,
+                "Agent tool execution crashed: run_ref=%s call_ref=%s tool=%s "
+                "phase=tool_execute responsibility=internal recoverability=tool_result "
+                "code=tool_failed error=%s",
+                run_ref,
+                call_ref,
                 descriptor.name,
                 exception_kind(exc),
             )
@@ -318,9 +344,11 @@ class ToolExecutor:
             bounded = self._bounded_output(output, descriptor.max_output_characters)
         except ValidationError:
             logger.warning(
-                "Agent tool returned invalid output: run=%s call=%s tool=%s phase=tool_output",
-                context.run_id,
-                call.call_id,
+                "Agent tool returned invalid output: run_ref=%s call_ref=%s tool=%s "
+                "phase=tool_output responsibility=internal recoverability=tool_result "
+                "code=invalid_tool_output",
+                run_ref,
+                call_ref,
                 descriptor.name,
             )
             return await self._finish_safely(
@@ -331,10 +359,11 @@ class ToolExecutor:
             )
         except Exception as exc:
             logger.exception(
-                "Agent tool output normalization failed: run=%s call=%s tool=%s "
-                "phase=tool_output error=%s",
-                context.run_id,
-                call.call_id,
+                "Agent tool output normalization failed: run_ref=%s call_ref=%s tool=%s "
+                "phase=tool_output responsibility=internal recoverability=tool_result "
+                "code=invalid_tool_output error=%s",
+                run_ref,
+                call_ref,
                 descriptor.name,
                 exception_kind(exc),
             )
@@ -351,9 +380,9 @@ class ToolExecutor:
             output=bounded,
         )
         logger.info(
-            "Agent tool execution completed: run=%s call=%s tool=%s output_truncated=%s",
-            context.run_id,
-            call.call_id,
+            "Agent tool execution completed: run_ref=%s call_ref=%s tool=%s output_truncated=%s",
+            run_ref,
+            call_ref,
             descriptor.name,
             bounded.get("truncated") is True,
         )
@@ -379,11 +408,13 @@ class ToolExecutor:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            run_ref, call_ref = self._log_refs(context, call)
             logger.exception(
-                "Agent tool state finish failed: run=%s call=%s tool=%s "
-                "phase=tool_finish primary_status=%s primary_error=%s error=%s",
-                context.run_id,
-                call.call_id,
+                "Agent tool state finish failed: run_ref=%s call_ref=%s tool=%s "
+                "phase=tool_finish responsibility=database recoverability=tool_result "
+                "code=tool_state_unavailable primary_status=%s primary_error=%s error=%s",
+                run_ref,
+                call_ref,
                 call.name,
                 status.value,
                 error_code or "none",
@@ -401,6 +432,7 @@ class ToolExecutor:
         context: ToolExecutionContext,
         call: ToolCall,
     ) -> None:
+        run_ref, call_ref = self._log_refs(context, call)
         try:
             await asyncio.shield(
                 self._finish(
@@ -412,18 +444,20 @@ class ToolExecutor:
             )
         except asyncio.CancelledError:
             logger.warning(
-                "Agent tool cancellation cleanup interrupted: run=%s call=%s tool=%s "
-                "phase=tool_finish",
-                context.run_id,
-                call.call_id,
+                "Agent tool cancellation cleanup interrupted: run_ref=%s call_ref=%s "
+                "tool=%s phase=tool_finish responsibility=runtime "
+                "recoverability=preserve_cancel code=cancelled",
+                run_ref,
+                call_ref,
                 call.name,
             )
         except Exception as exc:
             logger.exception(
-                "Agent tool cancellation cleanup failed: run=%s call=%s tool=%s "
-                "phase=tool_finish primary_status=cancelled error=%s",
-                context.run_id,
-                call.call_id,
+                "Agent tool cancellation cleanup failed: run_ref=%s call_ref=%s tool=%s "
+                "phase=tool_finish responsibility=database recoverability=preserve_cancel "
+                "code=tool_state_unavailable primary_status=cancelled error=%s",
+                run_ref,
+                call_ref,
                 call.name,
                 exception_kind(exc),
             )
@@ -462,6 +496,16 @@ class ToolExecutor:
         )
         digest = hashlib.sha256(canonical_arguments.encode()).hexdigest()
         return f"{context.run_id}:{call.name}:{digest}"
+
+    @staticmethod
+    def _log_refs(
+        context: ToolExecutionContext,
+        call: ToolCall,
+    ) -> tuple[str, str]:
+        return (
+            opaque_ref("agent-run", context.run_id),
+            opaque_ref("agent-tool-call", context.run_id, call.call_id),
+        )
 
     @staticmethod
     def _persisted_input(

@@ -288,7 +288,9 @@ async def emit_progress(
         await progress.emit(event)
     except Exception as exc:
         logger.warning(
-            "Conversation progress sink failed for %s: %s",
+            "Conversation progress delivery degraded: phase=presentation "
+            "responsibility=transport recoverability=ignored "
+            "code=progress_emit_failed event=%s error=%s",
             event.kind.value,
             type(exc).__name__,
         )

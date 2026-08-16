@@ -40,7 +40,7 @@ asyncio_mode = "auto"
 [tool.ruff]
 line-length = 100
 target-version = "py313"
-extend-exclude = ["ref"]
+extend-exclude = ["ref", "sdk"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]

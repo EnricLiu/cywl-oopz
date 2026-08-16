@@ -88,7 +88,9 @@ class PydanticAiProgressMapper:
             return self._map(event)
         except Exception as exc:
             logger.error(
-                "Skipped invalid Agent progress projection: event=%s error=%s",
+                "Skipped invalid Agent progress projection: phase=progress_projection "
+                "responsibility=internal recoverability=ignored "
+                "code=progress_projection_failed event=%s error=%s",
                 type(event).__name__,
                 exception_kind(exc),
                 exc_info=True,
