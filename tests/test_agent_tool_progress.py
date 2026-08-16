@@ -52,6 +52,16 @@ def test_result_summary_explains_success_and_known_errors_without_raw_payloads()
         {"ok": False, "error": "private_internal_error"},
         succeeded=False,
     )
+    invalid_arguments = catalog.result(
+        "read_web_page",
+        {"ok": False, "error": "invalid_arguments"},
+        succeeded=False,
+    )
+    state_unavailable = catalog.result(
+        "read_web_page",
+        {"ok": False, "error": "tool_state_unavailable"},
+        succeeded=False,
+    )
 
     assert succeeded.summary == "找到 2 条结果"
     assert succeeded.items == (
@@ -60,6 +70,8 @@ def test_result_summary_explains_success_and_known_errors_without_raw_payloads()
     )
     assert failed.summary == "网页搜索服务暂不可用"
     assert unknown.summary == "工具执行失败"
+    assert invalid_arguments.summary == "工具参数生成失败"
+    assert state_unavailable.summary == "工具状态服务暂不可用"
     assert "private" not in repr((succeeded, failed, unknown))
 
 

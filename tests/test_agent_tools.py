@@ -100,8 +100,11 @@ class RecordingTool:
 class InMemoryExecutionRepository:
     def __init__(self) -> None:
         self.records: dict[tuple[UUID, str], ToolExecution] = {}
+        self.claims = 0
+        self.finishes = 0
 
     async def claim(self, execution: ToolExecution) -> ToolExecutionClaim:
+        self.claims += 1
         key = (execution.run_id, execution.call_id)
         existing = self.records.get(key)
         if existing is None:
@@ -128,6 +131,7 @@ class InMemoryExecutionRepository:
         output: dict[str, object] | None,
         error_code: str,
     ) -> ToolExecution:
+        self.finishes += 1
         key = (run_id, call_id)
         execution = replace(
             self.records[key],
@@ -285,6 +289,151 @@ async def test_executor_validates_policy_and_replays_success_without_side_effect
 
 
 @pytest.mark.asyncio
+async def test_executor_validates_arguments_before_claiming_state() -> None:
+    tool = RecordingTool()
+    repository = InMemoryExecutionRepository()
+    executor = ToolExecutor(ToolRegistry((tool,)), ToolPolicy(), repository)
+
+    result = await executor.execute(
+        ToolCall("call-invalid", "double", {"value": "nope"}),
+        tool_context("double"),
+    )
+
+    assert result.status is ToolExecutionStatus.FAILED
+    assert result.error_code == "invalid_arguments"
+    assert repository.claims == 0
+    assert repository.records == {}
+    assert tool.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_executor_contains_claim_failure_without_running_tool(caplog) -> None:
+    class ClaimFailureRepository(InMemoryExecutionRepository):
+        async def claim(self, execution: ToolExecution) -> ToolExecutionClaim:
+            del execution
+            raise DatabaseError("claim unavailable")
+
+    tool = RecordingTool("write_value", effect=ToolEffect.WRITE)
+    repository = ClaimFailureRepository()
+    executor = ToolExecutor(ToolRegistry((tool,)), ToolPolicy(), repository)
+    caplog.set_level(logging.ERROR, logger="cywl_oopz.features.agent.tools.executor")
+
+    result = await executor.execute(
+        ToolCall("call-claim", "write_value", {"value": 2}),
+        tool_context("write_value"),
+    )
+
+    assert result.status is ToolExecutionStatus.FAILED
+    assert result.error_code == "tool_state_unavailable"
+    assert tool.calls == 0
+    assert "phase=tool_claim" in "\n".join(caplog.messages)
+
+
+@pytest.mark.asyncio
+async def test_executor_contains_finish_failure_and_records_primary_outcome(caplog) -> None:
+    class FinishFailureRepository(InMemoryExecutionRepository):
+        async def finish(self, *args, **kwargs) -> ToolExecution:
+            del args, kwargs
+            raise DatabaseError("finish unavailable")
+
+    class ExpectedFailureTool(RecordingTool):
+        async def execute(
+            self,
+            context: ToolExecutionContext,
+            arguments: BaseModel,
+        ) -> BaseModel:
+            del context, arguments
+            raise ToolExecutionError("voice_channel_required")
+
+    caplog.set_level(logging.ERROR, logger="cywl_oopz.features.agent.tools.executor")
+
+    succeeded_tool = RecordingTool()
+    succeeded = await ToolExecutor(
+        ToolRegistry((succeeded_tool,)),
+        ToolPolicy(),
+        FinishFailureRepository(),
+    ).execute(
+        ToolCall("call-succeeded", "double", {"value": 2}),
+        tool_context("double"),
+    )
+
+    failed_tool = ExpectedFailureTool("expected_failure")
+    failed = await ToolExecutor(
+        ToolRegistry((failed_tool,)),
+        ToolPolicy(),
+        FinishFailureRepository(),
+    ).execute(
+        ToolCall("call-failed", "expected_failure", {"value": 2}),
+        tool_context("expected_failure"),
+    )
+
+    assert succeeded.status is ToolExecutionStatus.FAILED
+    assert succeeded.error_code == "tool_state_unavailable"
+    assert succeeded_tool.calls == 1
+    assert failed.status is ToolExecutionStatus.FAILED
+    assert failed.error_code == "tool_state_unavailable"
+    messages = "\n".join(caplog.messages)
+    assert "phase=tool_finish" in messages
+    assert "primary_status=succeeded" in messages
+    assert "primary_status=failed" in messages
+    assert "primary_error=voice_channel_required" in messages
+
+
+@pytest.mark.parametrize("error", [ValueError("broken"), TypeError("broken")])
+@pytest.mark.asyncio
+async def test_executor_contains_unexpected_tool_exceptions(error: Exception) -> None:
+    class CrashingTool(RecordingTool):
+        async def execute(
+            self,
+            context: ToolExecutionContext,
+            arguments: BaseModel,
+        ) -> BaseModel:
+            del context, arguments
+            raise error
+
+    tool = CrashingTool("crashing")
+    repository = InMemoryExecutionRepository()
+
+    result = await ToolExecutor(
+        ToolRegistry((tool,)),
+        ToolPolicy(),
+        repository,
+    ).execute(
+        ToolCall("call-crash", "crashing", {"value": 2}),
+        tool_context("crashing"),
+    )
+
+    assert result.status is ToolExecutionStatus.FAILED
+    assert result.error_code == "tool_failed"
+    assert next(iter(repository.records.values())).status is ToolExecutionStatus.FAILED
+
+
+@pytest.mark.asyncio
+async def test_executor_contains_invalid_tool_output() -> None:
+    class InvalidOutputTool(RecordingTool):
+        async def execute(
+            self,
+            context: ToolExecutionContext,
+            arguments: BaseModel,
+        ) -> BaseModel:
+            del context, arguments
+            return cast(BaseModel, {"value": "not-an-integer"})
+
+    tool = InvalidOutputTool("invalid_output")
+    result = await ToolExecutor(
+        ToolRegistry((tool,)),
+        ToolPolicy(),
+        InMemoryExecutionRepository(),
+    ).execute(
+        ToolCall("call-output", "invalid_output", {"value": 2}),
+        tool_context("invalid_output"),
+    )
+
+    assert result.status is ToolExecutionStatus.FAILED
+    assert result.error_code == "invalid_tool_output"
+
+
+@pytest.mark.asyncio
 async def test_executor_propagates_cancellation_and_persists_terminal_state() -> None:
     wait = asyncio.Event()
     tool = RecordingTool(wait=wait)
@@ -304,6 +453,32 @@ async def test_executor_propagates_cancellation_and_persists_terminal_state() ->
     execution = repository.records[(context.run_id, "call-cancel")]
     assert execution.status is ToolExecutionStatus.CANCELLED
     assert execution.error_code == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_executor_preserves_cancellation_when_finish_fails(caplog) -> None:
+    class FinishFailureRepository(InMemoryExecutionRepository):
+        async def finish(self, *args, **kwargs) -> ToolExecution:
+            del args, kwargs
+            raise DatabaseError("finish unavailable")
+
+    wait = asyncio.Event()
+    tool = RecordingTool(wait=wait)
+    repository = FinishFailureRepository()
+    executor = ToolExecutor(ToolRegistry((tool,)), ToolPolicy(), repository)
+    context = tool_context("double")
+    caplog.set_level(logging.ERROR, logger="cywl_oopz.features.agent.tools.executor")
+    task = asyncio.create_task(
+        executor.execute(ToolCall("call-cancel", "double", {"value": 2}), context)
+    )
+    while tool.calls == 0:
+        await asyncio.sleep(0)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert "primary_status=cancelled" in "\n".join(caplog.messages)
 
 
 @pytest.mark.asyncio
