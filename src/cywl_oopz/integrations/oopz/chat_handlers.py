@@ -53,13 +53,28 @@ class OopzChatHandlerController(ChatCommandController):
             await self._show_cancelled(context, presentation)
             raise
         except Exception as exc:
-            logger.warning(
-                "Chat request failed: conversation=%s error=%s",
-                opaque_ref(key.scope, key.area_id, key.channel_id, key.person_id),
-                type(exc).__name__,
-                exc_info=True,
+            conversation_ref = opaque_ref(
+                key.scope,
+                key.area_id,
+                key.channel_id,
+                key.person_id,
             )
-            message = self._error_message(exc)
+            source_message_id = str(
+                getattr(getattr(context.event, "message", None), "message_id", "")
+            )
+            error_presentation = self._error_presentation(
+                exc,
+                request_ref=opaque_ref(
+                    "chat-event",
+                    source_message_id,
+                    key.scope,
+                    key.area_id,
+                    key.channel_id,
+                    key.person_id,
+                ),
+            )
+            self._log_error(error_presentation, exc, conversation_ref=conversation_ref)
+            message = error_presentation.message
             if presentation.owns_message:
                 await presentation.fail(message)
             else:

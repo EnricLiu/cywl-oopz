@@ -231,6 +231,27 @@ async def test_agent_model_and_provider_commands_return_specific_not_found_help(
     assert "/provider <Provider> [模型]" in provider_context.replies[0]
 
 
+@pytest.mark.asyncio
+async def test_agent_management_command_contains_unknown_failure_with_reference() -> None:
+    class FailingService(FakeProviderService):
+        async def model_catalog_view(self, key) -> ModelCatalogView:
+            del key
+            raise RuntimeError("private catalog detail")
+
+    context = FakeContext()
+
+    await execute(
+        AgentModelCommand(FailingService(), ChatTaskSupervisor()),
+        "model",
+        (),
+        context,
+    )
+
+    assert len(context.replies) == 1
+    assert context.replies[0].startswith("这次处理在内部出错，请稍后重试（参考号：")
+    assert "private catalog detail" not in context.replies[0]
+
+
 async def _missing_provider(*args, **kwargs) -> str:
     del args, kwargs
     raise ValueError("not found")

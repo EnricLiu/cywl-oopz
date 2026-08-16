@@ -8,13 +8,19 @@ import pytest
 
 from cywl_oopz.commands.parsing import CommandTextParser
 from cywl_oopz.commands.router import CommandRouter
-from cywl_oopz.core.errors import ProviderResponseError, ProviderTimeoutError, RateLimitExceeded
+from cywl_oopz.core.errors import (
+    AgentInternalError,
+    ProviderResponseError,
+    ProviderTimeoutError,
+    RateLimitExceeded,
+)
 from cywl_oopz.features.chat.commands import (
     CancelChatCommand,
     ChatCommand,
     ChatStatusCommand,
     NewConversationCommand,
 )
+from cywl_oopz.features.chat.history import ChatInputTooLongError
 from cywl_oopz.features.chat.models import ChatResponse
 from cywl_oopz.features.chat.progress import ConversationProgressEvent, ProgressKind
 from cywl_oopz.features.chat.service import ChatService
@@ -405,7 +411,7 @@ async def test_cancel_updates_owned_message_without_a_second_command_reply() -> 
         (ProviderTimeoutError("timeout"), "模型响应超时，请稍后重试。"),
         (ProviderResponseError("invalid"), "模型服务暂时不可用，请稍后重试。"),
         (RateLimitExceeded("global concurrency"), "当前对话请求较多，请稍后重试。"),
-        (ValueError("internal invariant"), "处理请求时出现了问题，请稍后重试。"),
+        (ChatInputTooLongError(), "这条消息太长，请缩短后再试。"),
     ],
 )
 async def test_chat_command_maps_expected_failures_to_one_safe_reply(error, expected) -> None:
@@ -419,3 +425,40 @@ async def test_chat_command_maps_expected_failures_to_one_safe_reply(error, expe
     await dispatch_command(router, message, context)
 
     assert context.replies == [expected]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error",
+    [ValueError("internal invariant"), AgentInternalError("adapter invariant")],
+)
+async def test_chat_command_internal_failure_has_safe_reference(error: Exception) -> None:
+    router = CommandRouter("/")
+    router.register_definition(
+        ChatCommand(FailingChatService(error), ChatTaskSupervisor()).definition()
+    )
+    message = FakeMessage("/chat hello")
+    context = context_for(message)
+
+    await dispatch_command(router, message, context)
+
+    assert len(context.replies) == 1
+    assert context.replies[0].startswith("这次处理在内部出错，请稍后重试（参考号：")
+    assert context.replies[0].endswith("）。")
+    assert "invariant" not in context.replies[0]
+
+
+@pytest.mark.asyncio
+async def test_mention_handler_uses_the_same_internal_error_protocol() -> None:
+    handler = MentionChatHandler(FailingChatService(ValueError("private detail")), "bot")
+    message = FakeMessage(
+        "hello",
+        mention_list=(SimpleNamespace(person="bot"),),
+    )
+    context = context_for(message)
+
+    assert await handler.handle(message, context) is True
+
+    assert len(context.replies) == 1
+    assert context.replies[0].startswith("这次处理在内部出错，请稍后重试（参考号：")
+    assert "private detail" not in context.replies[0]

@@ -18,17 +18,9 @@ from cywl_oopz.commands.definitions import (
     PublicCommandAuthorization,
 )
 from cywl_oopz.commands.models import CommandRequest, CommandScope
-from cywl_oopz.core.errors import (
-    AuthorizationError,
-    DatabaseError,
-    FeatureDisabledError,
-    ProviderError,
-    ProviderTimeoutError,
-    RateLimitExceeded,
-)
 from cywl_oopz.core.observability import opaque_ref
 
-from .history import ChatInputTooLongError
+from .error_presenter import ChatErrorPresentation, ChatErrorPresenter
 from .models import ChatInvocation, ChatInvocationFactory, ConversationKey
 from .progress import (
     ConversationPresenterFactory,
@@ -55,6 +47,7 @@ class ChatCommandController:
         self._service = service
         self._presenters = presenter_factory or NoopPresenterFactory()
         self._invocations = invocation_factory
+        self._errors = ChatErrorPresenter()
 
     @staticmethod
     def _request_key(request: CommandRequest) -> ConversationKey:
@@ -66,26 +59,42 @@ class ChatCommandController:
             person_id=request.actor.person_id,
         )
 
+    def _error_presentation(
+        self,
+        error: Exception,
+        *,
+        request_ref: str,
+    ) -> ChatErrorPresentation:
+        return self._errors.present(error, request_ref=request_ref)
+
     @staticmethod
-    def _error_message(error: Exception) -> str:
-        if isinstance(error, FeatureDisabledError):
-            return "文字对话功能当前未启用。"
-        if isinstance(error, ChatInputTooLongError):
-            return "这条消息太长，请缩短后再试。"
-        if isinstance(error, RateLimitExceeded):
-            if error.retry_after_seconds > 0:
-                return f"请求过于频繁，请在 {error.retry_after_seconds:.1f} 秒后重试。"
-            return "当前对话请求较多，请稍后重试。"
-        if isinstance(error, ProviderTimeoutError):
-            return "模型响应超时，请稍后重试。"
-        if isinstance(error, ProviderError):
-            return "模型服务暂时不可用，请稍后重试。"
-        if isinstance(error, DatabaseError):
-            return "会话服务暂时不可用，请稍后重试。"
-        if isinstance(error, AuthorizationError):
-            return "你没有执行此操作的权限。"
-        logger.error("Unexpected chat command failure: error=%s", type(error).__name__)
-        return "处理请求时出现了问题，请稍后重试。"
+    def _request_ref(request: CommandRequest, key: ConversationKey) -> str:
+        return opaque_ref(
+            "chat-command",
+            request.source.message_id,
+            key.scope,
+            key.area_id,
+            key.channel_id,
+            key.person_id,
+        )
+
+    @staticmethod
+    def _log_error(
+        presentation: ChatErrorPresentation,
+        error: Exception,
+        *,
+        conversation_ref: str,
+    ) -> None:
+        log = logger.error if presentation.internal else logger.warning
+        log(
+            "Chat request failed: conversation=%s code=%s responsibility=%s reference=%s error=%s",
+            conversation_ref,
+            presentation.code,
+            presentation.responsibility,
+            presentation.reference or "none",
+            type(error).__name__,
+            exc_info=presentation.internal,
+        )
 
     def _request_invocation(self, request: CommandRequest) -> ChatInvocation:
         if self._invocations is not None:
@@ -107,12 +116,13 @@ class ChatCommandController:
         error: Exception,
     ) -> None:
         key = self._request_key(request)
-        logger.warning(
-            "Chat command failed: conversation=%s error=%s",
-            opaque_ref(key.scope, key.area_id, key.channel_id, key.person_id),
-            type(error).__name__,
+        conversation_ref = opaque_ref(key.scope, key.area_id, key.channel_id, key.person_id)
+        presentation = self._error_presentation(
+            error,
+            request_ref=self._request_ref(request, key),
         )
-        await request.responder.reply(self._error_message(error))
+        self._log_error(presentation, error, conversation_ref=conversation_ref)
+        await request.responder.reply(presentation.message)
 
     async def _ask_request_with_presenter(
         self,
@@ -137,13 +147,13 @@ class ChatCommandController:
             await self._show_request_cancelled(request, presentation)
             raise
         except Exception as exc:
-            logger.warning(
-                "Chat request failed: conversation=%s error=%s",
-                opaque_ref(key.scope, key.area_id, key.channel_id, key.person_id),
-                type(exc).__name__,
-                exc_info=True,
+            conversation_ref = opaque_ref(key.scope, key.area_id, key.channel_id, key.person_id)
+            error_presentation = self._error_presentation(
+                exc,
+                request_ref=self._request_ref(request, key),
             )
-            message = self._error_message(exc)
+            self._log_error(error_presentation, exc, conversation_ref=conversation_ref)
+            message = error_presentation.message
             if presentation.owns_message:
                 await presentation.fail(message)
             else:

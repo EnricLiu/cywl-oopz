@@ -15,6 +15,15 @@ class DatabaseError(CywlError):
     """Raised when the database cannot safely serve the application."""
 
 
+class UserRequestError(CywlError):
+    """A validated request problem with a specific safe user-facing response."""
+
+    def __init__(self, code: str, user_message: str) -> None:
+        self.code = code
+        self.user_message = user_message
+        super().__init__(code)
+
+
 class AgentInternalError(CywlError):
     """Raised when Agent orchestration violates an internal adapter invariant."""
 
