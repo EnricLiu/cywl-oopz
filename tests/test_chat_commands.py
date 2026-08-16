@@ -405,6 +405,7 @@ async def test_cancel_updates_owned_message_without_a_second_command_reply() -> 
         (ProviderTimeoutError("timeout"), "模型响应超时，请稍后重试。"),
         (ProviderResponseError("invalid"), "模型服务暂时不可用，请稍后重试。"),
         (RateLimitExceeded("global concurrency"), "当前对话请求较多，请稍后重试。"),
+        (ValueError("internal invariant"), "处理请求时出现了问题，请稍后重试。"),
     ],
 )
 async def test_chat_command_maps_expected_failures_to_one_safe_reply(error, expected) -> None:

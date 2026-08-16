@@ -84,8 +84,6 @@ class ChatCommandController:
             return "会话服务暂时不可用，请稍后重试。"
         if isinstance(error, AuthorizationError):
             return "你没有执行此操作的权限。"
-        if isinstance(error, ValueError):
-            return "命令参数不正确，请检查用法后重试。"
         logger.error("Unexpected chat command failure: error=%s", type(error).__name__)
         return "处理请求时出现了问题，请稍后重试。"
 
