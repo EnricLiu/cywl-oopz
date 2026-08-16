@@ -32,7 +32,12 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 
-from cywl_oopz.core.errors import ProviderError, ProviderResponseError, ProviderTimeoutError
+from cywl_oopz.core.errors import (
+    AgentInternalError,
+    ProviderError,
+    ProviderResponseError,
+    ProviderTimeoutError,
+)
 from cywl_oopz.core.observability import exception_kind
 from cywl_oopz.features.chat.progress import ProgressSink, emit_progress
 
@@ -132,24 +137,36 @@ class PydanticAiAgentEngine:
             len(request.enabled_tools),
             request.limits.timeout_seconds,
         )
-        model = await self._registry.model(request.model)
-        instructions, history = self._map_context(request.context)
-        framework_tools, dependencies, descriptors = self._build_tools(request, progress)
-        progress_mapper = PydanticAiProgressMapper(descriptors)
-        if framework_tools:
-            agent = Agent(
-                model,
-                instructions=instructions,
-                deps_type=_ToolRunDependencies,
-                tools=framework_tools,
+        try:
+            model = await self._registry.model(request.model)
+            instructions, history = self._map_context(request.context)
+            framework_tools, dependencies, descriptors = self._build_tools(request, progress)
+            progress_mapper = PydanticAiProgressMapper(descriptors)
+            if framework_tools:
+                agent = Agent(
+                    model,
+                    instructions=instructions,
+                    deps_type=_ToolRunDependencies,
+                    tools=framework_tools,
+                )
+            else:
+                agent = Agent(model, instructions=instructions)
+            usage_limits = UsageLimits(
+                request_limit=request.limits.max_model_requests,
+                tool_calls_limit=request.limits.max_tool_calls,
+                total_tokens_limit=request.limits.max_total_tokens,
             )
-        else:
-            agent = Agent(model, instructions=instructions)
-        usage_limits = UsageLimits(
-            request_limit=request.limits.max_model_requests,
-            tool_calls_limit=request.limits.max_tool_calls,
-            total_tokens_limit=request.limits.max_total_tokens,
-        )
+        except asyncio.CancelledError:
+            raise
+        except ProviderError:
+            raise
+        except Exception as exc:
+            logger.exception(
+                "Agent engine bootstrap failed: run=%s phase=engine_bootstrap error=%s",
+                request.run_id,
+                exception_kind(exc),
+            )
+            raise AgentInternalError("Agent engine bootstrap failed") from exc
         try:
             with bind_provider_retry_progress(progress):
                 await emit_progress(progress, progress_mapper.thinking())
@@ -216,11 +233,36 @@ class PydanticAiAgentEngine:
                 exception_kind(exc),
             )
             raise ProviderResponseError("Agent model returned an invalid response") from exc
+        except ProviderError:
+            raise
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception(
+                "Agent engine stream failed internally: run=%s phase=engine_stream error=%s",
+                request.run_id,
+                exception_kind(exc),
+            )
+            raise AgentInternalError("Agent engine stream failed") from exc
 
-        output = result.output
-        if not isinstance(output, str) or not output.strip():
-            raise ProviderResponseError("Agent model returned no text")
-        usage = result.usage
+        try:
+            output = result.output
+            if not isinstance(output, str) or not output.strip():
+                raise ProviderResponseError("Agent model returned no text")
+            usage = result.usage
+            intermediate_messages = self._map_new_tool_messages(
+                result.new_messages(),
+                descriptors,
+            )
+        except ProviderError:
+            raise
+        except Exception as exc:
+            logger.exception(
+                "Agent engine result mapping failed: run=%s phase=result_mapping error=%s",
+                request.run_id,
+                exception_kind(exc),
+            )
+            raise AgentInternalError("Agent engine result mapping failed") from exc
         logger.info(
             "Agent engine run completed: run=%s model_requests=%s tool_calls=%s "
             "input_tokens=%s output_tokens=%s",
@@ -237,10 +279,7 @@ class PydanticAiAgentEngine:
             output_tokens=usage.output_tokens,
             model_requests=usage.requests,
             tool_calls=usage.tool_calls,
-            intermediate_messages=self._map_new_tool_messages(
-                result.new_messages(),
-                descriptors,
-            ),
+            intermediate_messages=intermediate_messages,
         )
 
     async def aclose(self) -> None:
@@ -319,12 +358,12 @@ class PydanticAiAgentEngine:
         if not request.enabled_tools:
             return [], None, ()
         if self._tools is None:
-            raise ProviderResponseError("Agent tools are not configured")
+            raise AgentInternalError("Agent tools are not configured")
         descriptors = self._tools.descriptors(request.enabled_tools)
         if tuple(descriptor.name for descriptor in descriptors) != tuple(
             sorted(request.enabled_tools)
         ):
-            raise ProviderResponseError("Agent tool set changed before execution")
+            raise AgentInternalError("Agent tool set changed before execution")
 
         context = ToolExecutionContext(
             run_id=request.run_id,

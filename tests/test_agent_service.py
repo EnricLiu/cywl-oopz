@@ -412,6 +412,27 @@ async def test_agent_service_persists_turns_and_reuses_provider_neutral_history(
 
 
 @pytest.mark.asyncio
+async def test_agent_service_returns_answer_when_expiry_refresh_fails(chat_settings) -> None:
+    service, threads, _, runs, messages = await build_service(chat_settings)
+
+    async def fail_refresh(thread_id, expires_at) -> None:
+        del thread_id, expires_at
+        raise RuntimeError("expiry unavailable")
+
+    threads.refresh_expiry = fail_refresh
+
+    response = await service.ask(key(), "question")
+
+    assert response.content == "answer"
+    thread = threads.values[key()]
+    assert [message.role for message in messages.values[thread.id]] == [
+        "user",
+        "assistant",
+    ]
+    assert next(iter(runs.states.values())).status is AgentRunStatus.SUCCEEDED
+
+
+@pytest.mark.asyncio
 async def test_agent_service_pins_skill_scope_and_hides_loaders_for_empty_catalog(
     chat_settings,
 ) -> None:

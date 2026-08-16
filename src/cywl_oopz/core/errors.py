@@ -15,6 +15,10 @@ class DatabaseError(CywlError):
     """Raised when the database cannot safely serve the application."""
 
 
+class AgentInternalError(CywlError):
+    """Raised when Agent orchestration violates an internal adapter invariant."""
+
+
 class ProviderError(CywlError):
     """Raised when an upstream AI provider cannot fulfil a request."""
 
