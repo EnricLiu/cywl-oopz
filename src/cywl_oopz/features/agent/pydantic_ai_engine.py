@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from dataclasses import dataclass, replace
 from typing import Any
 
+from pydantic import ValidationError
 from pydantic_ai import (
     Agent,
     AgentRunResultEvent,
     ModelAPIError,
     ModelHTTPError,
+    ModelRetry,
     RunContext,
     Tool,
     UnexpectedModelBehavior,
@@ -41,6 +44,57 @@ from .tools.models import ToolCall, ToolDescriptor, ToolExecutionContext
 from .tools.ports import AgentToolRuntime
 
 logger = logging.getLogger(__name__)
+
+_RAW_TOOL_ARGUMENTS = "__cywl_raw_tool_arguments__"
+_MALFORMED_TOOL_ARGUMENTS = "__cywl_malformed_tool_arguments__"
+_MAX_ARGUMENT_ISSUES = 5
+
+
+class _ToolArgumentsEnvelopeValidator:
+    """Decode any model JSON into kwargs without trusting its root shape."""
+
+    def validate_json(
+        self,
+        value: str | bytes | bytearray,
+        *,
+        allow_partial: object = None,
+        context: object = None,
+    ) -> dict[str, object]:
+        del allow_partial, context
+        try:
+            decoded = json.loads(value or "{}")
+        except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
+            return {
+                _RAW_TOOL_ARGUMENTS: None,
+                _MALFORMED_TOOL_ARGUMENTS: True,
+            }
+        return {
+            _RAW_TOOL_ARGUMENTS: decoded,
+            _MALFORMED_TOOL_ARGUMENTS: False,
+        }
+
+    def validate_python(
+        self,
+        value: object,
+        *,
+        allow_partial: object = None,
+        context: object = None,
+    ) -> dict[str, object]:
+        del allow_partial, context
+        return {
+            _RAW_TOOL_ARGUMENTS: value,
+            _MALFORMED_TOOL_ARGUMENTS: False,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class _ToolArgumentValidation:
+    arguments: dict[str, object] | None
+    issues: tuple[str, ...]
+
+    @property
+    def valid(self) -> bool:
+        return self.arguments is not None
 
 
 @dataclass(slots=True)
@@ -297,6 +351,29 @@ class PydanticAiAgentEngine:
         descriptor: ToolDescriptor,
         dependencies: _ToolRunDependencies,
     ) -> Tool[_ToolRunDependencies]:
+        def validate_arguments(
+            context: RunContext[_ToolRunDependencies],
+            **envelope: Any,
+        ) -> None:
+            validation = PydanticAiAgentEngine._validate_tool_arguments(
+                descriptor,
+                envelope,
+            )
+            if validation.valid:
+                return
+            logger.warning(
+                "Agent tool arguments rejected: run=%s call=%s tool=%s "
+                "attempt=%s max_retries=%s issues=%s",
+                dependencies.context.run_id,
+                context.tool_call_id or "missing",
+                name,
+                context.retry + 1,
+                descriptor.max_retries,
+                ",".join(validation.issues),
+            )
+            if context.retry < descriptor.max_retries:
+                raise ModelRetry(PydanticAiAgentEngine._argument_retry_message(validation.issues))
+
         async def invoke(
             context: RunContext[_ToolRunDependencies],
             **arguments: Any,
@@ -304,6 +381,12 @@ class PydanticAiAgentEngine:
             call_id = context.tool_call_id
             if not call_id:
                 return {"ok": False, "error": "missing_tool_call_id"}
+            validation = PydanticAiAgentEngine._validate_tool_arguments(
+                descriptor,
+                arguments,
+            )
+            if not validation.valid:
+                return {"ok": False, "error": "invalid_arguments"}
             execution_context = replace(
                 dependencies.context,
                 model_requests_used=context.usage.requests,
@@ -321,7 +404,7 @@ class PydanticAiAgentEngine:
             )
             async with dependencies.semaphore:
                 result = await dependencies.runtime.execute(
-                    ToolCall(call_id, name, arguments),
+                    ToolCall(call_id, name, validation.arguments),
                     execution_context,
                 )
             return result.model_payload()
@@ -333,9 +416,47 @@ class PydanticAiAgentEngine:
             json_schema=descriptor.input_model.model_json_schema(),
             takes_ctx=True,
             sequential=descriptor.sequential,
+            args_validator=validate_arguments,
         )
+        # Tool.from_schema() deliberately uses any_schema() at runtime. Replace it with
+        # a root-shape-safe envelope so scalar, list, null, and malformed JSON never
+        # reach invoke() through ``**arguments`` or expose their original values.
+        tool.function_schema.validator = _ToolArgumentsEnvelopeValidator()  # type: ignore[assignment]
         tool.max_retries = descriptor.max_retries
         return tool
+
+    @staticmethod
+    def _validate_tool_arguments(
+        descriptor: ToolDescriptor,
+        envelope: dict[str, Any],
+    ) -> _ToolArgumentValidation:
+        if envelope.get(_MALFORMED_TOOL_ARGUMENTS) is True:
+            return _ToolArgumentValidation(None, ("$: malformed_json",))
+        raw_arguments = envelope.get(_RAW_TOOL_ARGUMENTS)
+        try:
+            validated = descriptor.input_model.model_validate(raw_arguments)
+        except ValidationError as exc:
+            issues: list[str] = []
+            for error in exc.errors(
+                include_url=False,
+                include_context=False,
+                include_input=False,
+            )[:_MAX_ARGUMENT_ISSUES]:
+                location = ".".join(str(item) for item in error["loc"]) or "$"
+                issues.append(f"{location}: {error['type']}")
+            return _ToolArgumentValidation(
+                None,
+                tuple(issues) or ("$: invalid_arguments",),
+            )
+        return _ToolArgumentValidation(
+            validated.model_dump(mode="json"),
+            (),
+        )
+
+    @staticmethod
+    def _argument_retry_message(issues: tuple[str, ...]) -> str:
+        detail = "; ".join(issues[:_MAX_ARGUMENT_ISSUES])
+        return f"工具参数不符合已提供的 JSON Schema，请修正后重试。问题：{detail}"
 
     @staticmethod
     def _map_new_tool_messages(

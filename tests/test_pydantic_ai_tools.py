@@ -10,6 +10,7 @@ from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
     ModelResponse,
+    RetryPromptPart,
     TextPart,
     ToolCallPart,
     ToolReturnPart,
@@ -395,7 +396,9 @@ def streaming_model(respond) -> FunctionModel:
                 yield {
                     index: DeltaToolCall(
                         name=part.tool_name,
-                        json_args=json.dumps(part.args),
+                        json_args=(
+                            part.args if isinstance(part.args, str) else json.dumps(part.args)
+                        ),
                         tool_call_id=part.tool_call_id,
                     )
                 }
@@ -724,6 +727,115 @@ async def test_engine_returns_tool_failure_as_data_and_allows_model_recovery() -
 
     assert result.stop_reason is AgentStopReason.COMPLETED
     assert observed_result == {"ok": False, "error": "tool_failed"}
+
+
+@pytest.mark.parametrize(
+    "invalid_arguments",
+    [
+        "{}",
+        '{"unexpected": true}',
+        '{"url": 123}',
+        '"https://example.com/source"',
+        '["https://example.com/source"]',
+        "null",
+        '{"url":',
+    ],
+)
+@pytest.mark.asyncio
+async def test_engine_requests_one_safe_tool_argument_correction(
+    invalid_arguments: str,
+) -> None:
+    observed_retry: RetryPromptPart | None = None
+
+    async def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        nonlocal observed_retry
+        del info
+        returns = [
+            part
+            for message in messages
+            if isinstance(message, ModelRequest)
+            for part in message.parts
+            if isinstance(part, ToolReturnPart)
+        ]
+        if returns:
+            return ModelResponse(parts=[TextPart("网页已经读完。")])
+        retries = [
+            part
+            for message in messages
+            if isinstance(message, ModelRequest)
+            for part in message.parts
+            if isinstance(part, RetryPromptPart)
+        ]
+        if retries:
+            observed_retry = retries[-1]
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        "read_web_page",
+                        {"url": "https://example.com/source"},
+                        "call-read",
+                    )
+                ]
+            )
+        return ModelResponse(parts=[ToolCallPart("read_web_page", invalid_arguments, "call-read")])
+
+    runtime = WebResearchRuntime()
+    engine = PydanticAiAgentEngine(
+        StaticRegistry(streaming_model(respond)),
+        runtime,
+    )
+
+    result = await engine.run(request(enabled_tools=("read_web_page",)))
+
+    assert result.stop_reason is AgentStopReason.COMPLETED
+    assert result.output == "网页已经读完。"
+    assert len(runtime.calls) == 1
+    assert runtime.calls[0].arguments == {"url": "https://example.com/source"}
+    assert observed_retry is not None
+    assert isinstance(observed_retry.content, str)
+    assert "JSON Schema" in observed_retry.content
+    assert "https://example.com/source" not in observed_retry.content
+
+
+@pytest.mark.asyncio
+async def test_engine_returns_invalid_arguments_after_correction_budget() -> None:
+    observed_result: object = None
+
+    async def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        nonlocal observed_result
+        del info
+        returns = [
+            part
+            for message in messages
+            if isinstance(message, ModelRequest)
+            for part in message.parts
+            if isinstance(part, ToolReturnPart)
+        ]
+        if returns:
+            observed_result = returns[-1].content
+            return ModelResponse(parts=[TextPart("参数没修好，但我仍然可以说明情况。")])
+        return ModelResponse(
+            parts=[
+                ToolCallPart(
+                    "read_web_page",
+                    '{"private_value": "do-not-repeat"}',
+                    "call-read",
+                )
+            ]
+        )
+
+    runtime = WebResearchRuntime()
+    engine = PydanticAiAgentEngine(
+        StaticRegistry(streaming_model(respond)),
+        runtime,
+    )
+
+    result = await engine.run(request(enabled_tools=("read_web_page",)))
+
+    assert result.stop_reason is AgentStopReason.COMPLETED
+    assert result.output == "参数没修好，但我仍然可以说明情况。"
+    assert runtime.calls == []
+    assert observed_result == {"ok": False, "error": "invalid_arguments"}
 
 
 @pytest.mark.asyncio
