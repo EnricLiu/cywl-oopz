@@ -181,6 +181,89 @@ def test_web_tool_events_include_bounded_request_result_and_error_details() -> N
     assert failed.tool_summary == "网页搜索超时"
 
 
+def test_composed_web_progress_is_bounded_after_projection() -> None:
+    descriptors = (
+        ToolDescriptor(
+            name="search_web",
+            display_name="搜索公开网页",
+            description="Search public pages.",
+            input_model=EmptyModel,
+            output_model=EmptyModel,
+            effect=ToolEffect.READ,
+            concurrency_safe=True,
+            idempotent=True,
+        ),
+        ToolDescriptor(
+            name="read_web_page",
+            display_name="读取网页正文",
+            description="Read a public page.",
+            input_model=EmptyModel,
+            output_model=EmptyModel,
+            effect=ToolEffect.READ,
+            idempotent=True,
+        ),
+    )
+    progress = PydanticAiProgressMapper(descriptors)
+
+    search = progress.map(
+        FunctionToolCallEvent(ToolCallPart("search_web", {"query": "查" * 80}, "search-long"))
+    )[0]
+    read_started = progress.map(
+        FunctionToolCallEvent(
+            ToolCallPart(
+                "read_web_page",
+                {"url": f"https://{'a' * 120}.example/path"},
+                "read-long",
+            )
+        )
+    )[0]
+    read_finished = progress.map(
+        FunctionToolResultEvent(
+            ToolReturnPart(
+                "read_web_page",
+                {
+                    "ok": True,
+                    "data": {
+                        "title": "长" * 100,
+                        "content": "第一行\n第二行",
+                        "truncated": True,
+                    },
+                },
+                "read-long",
+            )
+        )
+    )[0]
+
+    assert len(search.tool_subject) <= 80
+    assert len(read_started.tool_subject) <= 80
+    assert len(read_finished.tool_summary) <= 100
+    assert read_finished.tool_summary.endswith(" · 内容已截断")
+    assert read_finished.tool_preview_lines == ("第一行", "第二行")
+
+
+def test_progress_projection_failure_is_skipped_without_escaping() -> None:
+    class BrokenDetails:
+        def request(self, tool_name: str, arguments: object):
+            del tool_name, arguments
+            raise ValueError("broken display projection")
+
+    descriptor = ToolDescriptor(
+        name="lookup",
+        display_name="查询资料",
+        description="Look up safe data.",
+        input_model=EmptyModel,
+        output_model=EmptyModel,
+        effect=ToolEffect.READ,
+        concurrency_safe=True,
+        idempotent=True,
+    )
+    progress = PydanticAiProgressMapper((descriptor,), details=BrokenDetails())
+
+    mapped = progress.map(FunctionToolCallEvent(ToolCallPart("lookup", {}, "broken-call")))
+
+    assert mapped == ()
+
+
 def test_text_after_tool_call_starts_a_new_draft_generation() -> None:
     progress = mapper()
     progress.map(PartStartEvent(index=0, part=TextPart("旧草稿")))

@@ -12,6 +12,14 @@ from .models import ChatResponse
 
 logger = logging.getLogger(__name__)
 
+TOOL_DISPLAY_NAME_MAX_CHARACTERS = 48
+TOOL_SUBJECT_MAX_CHARACTERS = 80
+TOOL_SUMMARY_MAX_CHARACTERS = 100
+TOOL_ITEM_MAX_CHARACTERS = 180
+TOOL_PREVIEW_LINE_MAX_CHARACTERS = 120
+TOOL_MAX_ITEMS = 3
+TOOL_MAX_PREVIEW_LINES = 3
+
 
 class ProgressKind(StrEnum):
     """Stable lifecycle events understood by presentation adapters."""
@@ -78,19 +86,32 @@ class ConversationProgressEvent:
             if not self.tool_display_name.strip():
                 raise ValueError("Tool progress requires a display name")
             if (
-                len(self.tool_display_name) > 48
+                len(self.tool_display_name) > TOOL_DISPLAY_NAME_MAX_CHARACTERS
                 or "\n" in self.tool_display_name
                 or "\r" in self.tool_display_name
             ):
                 raise ValueError("Tool progress display name must be one short line")
-            self._validate_tool_text(self.tool_subject, "subject", 80)
-            self._validate_tool_text(self.tool_summary, "summary", 100)
-            self._validate_tool_lines(self.tool_items, "items", maximum=3, line_limit=180)
+            self._validate_tool_text(
+                self.tool_subject,
+                "subject",
+                TOOL_SUBJECT_MAX_CHARACTERS,
+            )
+            self._validate_tool_text(
+                self.tool_summary,
+                "summary",
+                TOOL_SUMMARY_MAX_CHARACTERS,
+            )
+            self._validate_tool_lines(
+                self.tool_items,
+                "items",
+                maximum=TOOL_MAX_ITEMS,
+                line_limit=TOOL_ITEM_MAX_CHARACTERS,
+            )
             self._validate_tool_lines(
                 self.tool_preview_lines,
                 "preview lines",
-                maximum=3,
-                line_limit=120,
+                maximum=TOOL_MAX_PREVIEW_LINES,
+                line_limit=TOOL_PREVIEW_LINE_MAX_CHARACTERS,
             )
         elif (
             self.call_id
@@ -267,7 +288,9 @@ async def emit_progress(
         await progress.emit(event)
     except Exception as exc:
         logger.warning(
-            "Conversation progress sink failed for %s: %s",
+            "Conversation progress delivery degraded: phase=presentation "
+            "responsibility=transport recoverability=ignored "
+            "code=progress_emit_failed event=%s error=%s",
             event.kind.value,
             type(exc).__name__,
         )

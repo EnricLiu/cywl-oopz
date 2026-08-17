@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from datetime import UTC, datetime, timedelta
@@ -9,7 +10,7 @@ from uuid import UUID, uuid4
 
 from cywl_oopz.core.errors import ProviderSelectionError
 from cywl_oopz.core.health import HealthRegistry, HealthState
-from cywl_oopz.core.observability import opaque_ref
+from cywl_oopz.core.observability import exception_kind, opaque_ref
 from cywl_oopz.core.tasks import TaskSupervisor
 from cywl_oopz.features.chat.history import HistoryTrimmer
 from cywl_oopz.features.chat.locks import ConversationLockPool
@@ -205,18 +206,43 @@ class AgentConversationService:
                 )
                 result = outcome.result
                 finished_at = datetime.now(UTC)
-                await self._threads.refresh_expiry(
-                    thread.id,
-                    finished_at + timedelta(seconds=self._settings.session_ttl_seconds),
-                )
-                if self._summary_service is not None and self._summary_tasks is not None:
-                    self._summary_tasks.start(
+                try:
+                    await self._threads.refresh_expiry(
                         thread.id,
-                        self._summary_service.maybe_summarize(
-                            thread,
-                            selection.model,
-                        ),
+                        finished_at + timedelta(seconds=self._settings.session_ttl_seconds),
                     )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning(
+                        "Could not refresh Agent thread expiry: run=%s conversation=%s "
+                        "phase=thread_expiry error=%s",
+                        opaque_ref(str(outcome.run_id)),
+                        conversation,
+                        exception_kind(exc),
+                        exc_info=True,
+                    )
+                if (
+                    not outcome.persistence_degraded
+                    and self._summary_service is not None
+                    and self._summary_tasks is not None
+                ):
+                    summary_operation = self._summary_service.maybe_summarize(
+                        thread,
+                        selection.model,
+                    )
+                    try:
+                        self._summary_tasks.start(thread.id, summary_operation)
+                    except Exception as exc:
+                        summary_operation.close()
+                        logger.warning(
+                            "Could not schedule Agent thread summary: run=%s "
+                            "conversation=%s phase=summary_schedule error=%s",
+                            opaque_ref(str(outcome.run_id)),
+                            conversation,
+                            exception_kind(exc),
+                            exc_info=True,
+                        )
                 logger.debug(
                     "Agent conversation turn completed: run=%s conversation=%s skills=%s",
                     opaque_ref(str(outcome.run_id)),

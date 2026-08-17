@@ -9,8 +9,36 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 from urllib.parse import urlsplit
 
+from cywl_oopz.features.chat.progress import (
+    TOOL_ITEM_MAX_CHARACTERS,
+    TOOL_MAX_ITEMS,
+    TOOL_MAX_PREVIEW_LINES,
+    TOOL_PREVIEW_LINE_MAX_CHARACTERS,
+    TOOL_SUBJECT_MAX_CHARACTERS,
+    TOOL_SUMMARY_MAX_CHARACTERS,
+)
+
 _WHITESPACE = re.compile(r"\s+")
 _LINE_BREAKS = re.compile(r"[\r\n]+")
+
+
+def _bounded_line(value: object, limit: int) -> str:
+    rendered = _WHITESPACE.sub(" ", str(value)).strip()
+    if not rendered:
+        return ""
+    return rendered[: limit - 1] + "…" if len(rendered) > limit else rendered
+
+
+def _bounded_lines(
+    values: object,
+    *,
+    maximum: int,
+    line_limit: int,
+) -> tuple[str, ...]:
+    if not isinstance(values, Sequence) or isinstance(values, str):
+        return ()
+    bounded = (_bounded_line(value, line_limit) for value in values[:maximum])
+    return tuple(value for value in bounded if value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,6 +49,37 @@ class ToolProgressPresentation:
     summary: str = ""
     items: tuple[str, ...] = ()
     preview_lines: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Normalize external display data after projectors finish composing it."""
+        object.__setattr__(
+            self,
+            "subject",
+            _bounded_line(self.subject, TOOL_SUBJECT_MAX_CHARACTERS),
+        )
+        object.__setattr__(
+            self,
+            "summary",
+            _bounded_line(self.summary, TOOL_SUMMARY_MAX_CHARACTERS),
+        )
+        object.__setattr__(
+            self,
+            "items",
+            _bounded_lines(
+                self.items,
+                maximum=TOOL_MAX_ITEMS,
+                line_limit=TOOL_ITEM_MAX_CHARACTERS,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "preview_lines",
+            _bounded_lines(
+                self.preview_lines,
+                maximum=TOOL_MAX_PREVIEW_LINES,
+                line_limit=TOOL_PREVIEW_LINE_MAX_CHARACTERS,
+            ),
+        )
 
 
 class ToolProgressProjector(Protocol):
@@ -60,10 +119,7 @@ class _ProjectionSupport:
     def scalar(cls, value: object, *, limit: int = 80) -> str:
         if value is None or (isinstance(value, Mapping | Sequence) and not isinstance(value, str)):
             return ""
-        rendered = _WHITESPACE.sub(" ", str(value)).strip()
-        if not rendered:
-            return ""
-        return rendered[: limit - 1] + "…" if len(rendered) > limit else rendered
+        return _bounded_line(value, limit)
 
     @classmethod
     def line(cls, value: object, *, limit: int) -> str:
@@ -112,7 +168,10 @@ class WebSearchProgressProjector(_ProjectionSupport):
         arguments: Mapping[str, Any],
     ) -> ToolProgressPresentation:
         del tool_name
-        query = self.scalar(arguments.get("query"))
+        query = self.scalar(
+            arguments.get("query"),
+            limit=TOOL_SUBJECT_MAX_CHARACTERS - 2,
+        )
         return ToolProgressPresentation(subject=f"「{query}」" if query else "")
 
     def result(
@@ -181,21 +240,21 @@ class BrowserProgressProjector(_ProjectionSupport):
             return ToolProgressPresentation(
                 summary=("输入框已填写" if values.get("applied") else "输入框未改变")
             )
-        title = self.scalar(values.get("title"), limit=100)
         truncated = values.get("truncated") is True
+        suffix = " · 内容已截断" if truncated else ""
+        title = self.scalar(
+            values.get("title"),
+            limit=TOOL_SUMMARY_MAX_CHARACTERS - len(suffix),
+        )
         if tool_name == "read_web_page":
             content = values.get("content")
-            summary = title or "网页读取完成"
-            if truncated:
-                summary = f"{summary} · 内容已截断"
+            summary = f"{title or '网页读取完成'}{suffix}"
             return ToolProgressPresentation(
                 summary=summary,
                 preview_lines=self.preview(content),
             )
         snapshot = values.get("snapshot")
-        summary = title or "页面状态已更新"
-        if truncated:
-            summary = f"{summary} · 内容已截断"
+        summary = f"{title or '页面状态已更新'}{suffix}"
         return ToolProgressPresentation(
             summary=summary,
             preview_lines=self.preview(snapshot, limit=2),
@@ -605,7 +664,7 @@ class ToolProgressCatalog:
         "browser_unavailable": "浏览器暂不可用",
         "cancelled": "调用已取消",
         "duplicate_tool_call_in_progress": "相同调用仍在执行",
-        "invalid_arguments": "调用参数不正确",
+        "invalid_arguments": "工具参数生成失败",
         "invalid_tool_output": "工具返回了无效结果",
         "invalid_web_search_query": "搜索内容不正确",
         "invalid_music_query": "歌曲搜索内容不正确",
@@ -675,6 +734,7 @@ class ToolProgressCatalog:
         "tool_failed": "工具执行失败",
         "tool_not_enabled": "当前频道未启用此工具",
         "tool_not_registered": "工具当前不可用",
+        "tool_state_unavailable": "工具状态服务暂不可用",
         "tool_timeout": "工具执行超时",
         "web_page_url_invalid": "网页地址不可访问",
         "web_search_rate_limited": "网页搜索请求过于频繁",

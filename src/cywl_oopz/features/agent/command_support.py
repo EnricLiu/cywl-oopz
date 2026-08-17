@@ -5,15 +5,8 @@ from __future__ import annotations
 import logging
 
 from cywl_oopz.commands.models import CommandRequest, CommandScope
-from cywl_oopz.core.errors import (
-    AuthorizationError,
-    DatabaseError,
-    FeatureDisabledError,
-    ProviderError,
-    ProviderTimeoutError,
-    RateLimitExceeded,
-)
 from cywl_oopz.core.observability import opaque_ref
+from cywl_oopz.features.chat.error_presenter import ChatErrorPresenter
 from cywl_oopz.features.chat.models import ChatInvocation, ConversationKey
 
 logger = logging.getLogger(__name__)
@@ -56,30 +49,27 @@ class AgentCommandContext:
 class AgentCommandErrorPresenter:
     """Render expected Agent/chat infrastructure errors for management commands."""
 
-    def message(self, error: Exception) -> str | None:
-        if isinstance(error, FeatureDisabledError):
-            return "文字对话功能当前未启用。"
-        if isinstance(error, RateLimitExceeded):
-            if error.retry_after_seconds > 0:
-                return f"请求过于频繁，请在 {error.retry_after_seconds:.1f} 秒后重试。"
-            return "当前对话请求较多，请稍后重试。"
-        if isinstance(error, ProviderTimeoutError):
-            return "模型响应超时，请稍后重试。"
-        if isinstance(error, ProviderError):
-            return "模型服务暂时不可用，请稍后重试。"
-        if isinstance(error, DatabaseError):
-            return "会话服务暂时不可用，请稍后重试。"
-        if isinstance(error, AuthorizationError):
-            return "你没有执行此操作的权限。"
-        return None
+    def __init__(self) -> None:
+        self._presenter = ChatErrorPresenter()
+
+    def message(self, error: Exception, *, request_ref: str = "agent-command") -> str:
+        return self._presenter.present(error, request_ref=request_ref).message
 
     async def reply(self, request: CommandRequest, error: Exception) -> None:
-        message = self.message(error)
-        if message is None:
-            raise error
-        logger.warning(
-            "Agent command failed: conversation=%s error=%s",
+        request_ref = opaque_ref(
+            "agent-command",
+            request.source.message_id,
             AgentCommandContext.reference(request),
-            type(error).__name__,
         )
-        await request.responder.reply(message)
+        presentation = self._presenter.present(error, request_ref=request_ref)
+        log = logger.error if presentation.internal else logger.warning
+        log(
+            "Agent command failed: conversation=%s code=%s responsibility=%s reference=%s error=%s",
+            AgentCommandContext.reference(request),
+            presentation.code,
+            presentation.responsibility,
+            presentation.reference or "none",
+            type(error).__name__,
+            exc_info=presentation.internal,
+        )
+        await request.responder.reply(presentation.message)

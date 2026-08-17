@@ -9,11 +9,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from cywl_oopz.core.errors import (
-    DatabaseError,
-    ProviderError,
-    ProviderTimeoutError,
-)
+from cywl_oopz.core.errors import AgentInternalError, ProviderError, ProviderTimeoutError
 from cywl_oopz.core.health import HealthRegistry, HealthState
 from cywl_oopz.core.observability import exception_kind, opaque_ref
 from cywl_oopz.features.chat.progress import ProgressSink, RunTraceSink
@@ -61,6 +57,7 @@ class AgentRunOutcome:
     run_id: UUID
     result: AgentRunResult
     elapsed_seconds: float
+    persistence_degraded: bool = False
 
 
 class AgentRunService:
@@ -92,6 +89,24 @@ class AgentRunService:
         started_at = datetime.now(UTC)
         run_id = uuid4()
         state = AgentRunState(run_id).start(started_at)
+        request = AgentRunRequest(
+            run_id=run_id,
+            thread_id=spec.thread.id,
+            identity=spec.identity,
+            model=spec.model,
+            prompt=spec.prompt,
+            context=spec.context,
+            enabled_tools=spec.enabled_tools,
+            limits=spec.limits,
+            skill_scope=spec.skill_scope,
+        )
+        run_ref = opaque_ref(str(run_id))
+        conversation_ref = opaque_ref(
+            spec.identity.conversation.scope,
+            spec.identity.conversation.area_id,
+            spec.identity.conversation.channel_id,
+            spec.identity.person_id,
+        )
         await self._runs.add(
             AgentRun(
                 id=run_id,
@@ -113,29 +128,34 @@ class AgentRunService:
                     opaque_ref(str(run_id)),
                     exception_kind(exc),
                 )
-        await self._messages.append(
-            spec.thread.id,
-            run_id,
-            (AgentMessage("user", "text", {"text": spec.prompt}),),
-        )
-        request = AgentRunRequest(
-            run_id=run_id,
-            thread_id=spec.thread.id,
-            identity=spec.identity,
-            model=spec.model,
-            prompt=spec.prompt,
-            context=spec.context,
-            enabled_tools=spec.enabled_tools,
-            limits=spec.limits,
-            skill_scope=spec.skill_scope,
-        )
-        run_ref = opaque_ref(str(run_id))
-        conversation_ref = opaque_ref(
-            spec.identity.conversation.scope,
-            spec.identity.conversation.area_id,
-            spec.identity.conversation.channel_id,
-            spec.identity.person_id,
-        )
+        try:
+            await self._messages.append(
+                spec.thread.id,
+                run_id,
+                (AgentMessage("user", "text", {"text": spec.prompt}),),
+            )
+        except asyncio.CancelledError:
+            await self._finish_after_interrupt(
+                state,
+                AgentStopReason.CANCELLED,
+                "cancelled",
+            )
+            raise
+        except Exception as exc:
+            logger.exception(
+                "Could not persist Agent user message: run=%s conversation=%s "
+                "phase=user_persist error=%s",
+                run_ref,
+                conversation_ref,
+                exception_kind(exc),
+            )
+            await self._finish_after_interrupt(
+                state,
+                AgentStopReason.INVALID_OUTPUT,
+                "user_message_persistence_error",
+            )
+            self._mark_health(HealthState.DEGRADED, "Agent message persistence failed")
+            raise
         logger.info(
             "Agent run started: run=%s conversation=%s model=%s/%s context_messages=%s tools=%s",
             run_ref,
@@ -190,6 +210,21 @@ class AgentRunService:
                 )
                 self._mark_health(HealthState.DEGRADED, "request failed")
                 raise
+            except AgentInternalError as exc:
+                logger.error(
+                    "Agent adapter failed internally: run=%s conversation=%s phase=engine error=%s",
+                    run_ref,
+                    conversation_ref,
+                    exception_kind(exc),
+                    exc_info=True,
+                )
+                await self._finish_after_interrupt(
+                    state,
+                    AgentStopReason.INVALID_OUTPUT,
+                    "agent_internal",
+                )
+                self._mark_health(HealthState.DEGRADED, "Agent adapter failed")
+                raise
             except Exception as exc:
                 logger.error(
                     "Agent run failed unexpectedly: run=%s conversation=%s error=%s",
@@ -212,29 +247,22 @@ class AgentRunService:
             except asyncio.CancelledError:
                 pass
 
-        await self._messages.append(
-            spec.thread.id,
-            run_id,
-            result.intermediate_messages
-            + (
-                AgentMessage(
-                    "assistant",
-                    "text",
-                    {"text": result.output},
-                    input_tokens=result.input_tokens,
-                    output_tokens=result.output_tokens,
-                ),
-            ),
-        )
-        await self._runs.finish(
-            state.finish(result.stop_reason, datetime.now(UTC)),
-            usage=self._usage(result),
+        persistence_degraded = not await self._persist_result(
+            spec,
+            state,
+            result,
+            run_ref=run_ref,
+            conversation_ref=conversation_ref,
         )
         elapsed_seconds = time.perf_counter() - started_monotonic
-        self._mark_health(HealthState.HEALTHY, "last Agent run succeeded")
+        if persistence_degraded:
+            self._mark_health(HealthState.DEGRADED, "Agent result persistence failed")
+        else:
+            self._mark_health(HealthState.HEALTHY, "last Agent run succeeded")
         logger.info(
             "Agent run completed: run=%s conversation=%s reason=%s elapsed_seconds=%.3f "
-            "model_requests=%s tool_calls=%s input_tokens=%s output_tokens=%s",
+            "model_requests=%s tool_calls=%s input_tokens=%s output_tokens=%s "
+            "persistence_degraded=%s",
             run_ref,
             conversation_ref,
             result.stop_reason.value,
@@ -243,8 +271,78 @@ class AgentRunService:
             result.tool_calls,
             result.input_tokens,
             result.output_tokens,
+            persistence_degraded,
         )
-        return AgentRunOutcome(run_id, result, elapsed_seconds)
+        return AgentRunOutcome(run_id, result, elapsed_seconds, persistence_degraded)
+
+    async def _persist_result(
+        self,
+        spec: AgentRunSpec,
+        state: AgentRunState,
+        result: AgentRunResult,
+        *,
+        run_ref: str,
+        conversation_ref: str,
+    ) -> bool:
+        try:
+            messages = result.intermediate_messages + (
+                AgentMessage(
+                    "assistant",
+                    "text",
+                    {"text": result.output},
+                    input_tokens=result.input_tokens,
+                    output_tokens=result.output_tokens,
+                ),
+            )
+            await self._messages.append(
+                spec.thread.id,
+                state.run_id,
+                messages,
+            )
+        except asyncio.CancelledError:
+            await self._finish_after_interrupt(
+                state,
+                AgentStopReason.CANCELLED,
+                "cancelled",
+            )
+            raise
+        except Exception as exc:
+            logger.exception(
+                "Could not persist Agent result messages: run=%s conversation=%s "
+                "phase=result_persist error=%s",
+                run_ref,
+                conversation_ref,
+                exception_kind(exc),
+            )
+            await self._finish_after_interrupt(
+                state,
+                AgentStopReason.INVALID_OUTPUT,
+                "result_message_persistence_error",
+            )
+            return False
+
+        try:
+            await self._runs.finish(
+                state.finish(result.stop_reason, datetime.now(UTC)),
+                usage=self._usage(result),
+            )
+        except asyncio.CancelledError:
+            await self._finish_after_interrupt(
+                state,
+                AgentStopReason.CANCELLED,
+                "cancelled",
+            )
+            raise
+        except Exception as exc:
+            logger.exception(
+                "Could not persist successful Agent run: run=%s conversation=%s "
+                "phase=run_finish error=%s",
+                run_ref,
+                conversation_ref,
+                exception_kind(exc),
+            )
+            return False
+        return True
 
     async def _heartbeat(self, run_id: UUID) -> None:
         while True:
@@ -278,12 +376,16 @@ class AgentRunService:
                 usage={},
                 error_code=error_code,
             )
-        except DatabaseError as exc:
-            logger.warning(
-                "Could not persist interrupted Agent run: run=%s reason=%s error=%s",
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error(
+                "Could not persist interrupted Agent run: run=%s reason=%s "
+                "phase=run_finish error=%s",
                 opaque_ref(str(state.run_id)),
                 reason.value,
                 exception_kind(exc),
+                exc_info=True,
             )
 
     @staticmethod

@@ -35,13 +35,33 @@ class OopzChatHandlerController(ChatCommandController):
             return self._invocations.from_context(context)
         return ChatInvocation.from_oopz_context(context)
 
+    @staticmethod
+    def _event_request_ref(context: EventContext, key: ConversationKey) -> str:
+        source_message_id = str(getattr(getattr(context.event, "message", None), "message_id", ""))
+        return opaque_ref(
+            "chat-event",
+            source_message_id,
+            key.scope,
+            key.area_id,
+            key.channel_id,
+            key.person_id,
+        )
+
     async def _ask_with_presenter(self, context: EventContext, prompt: str) -> bool:
+        key = self._key(context)
+        request_ref = self._event_request_ref(context, key)
         try:
             presentation = await self._presenters.open(context)
         except Exception as exc:
-            logger.warning("Conversation presenter failed to open: %s", type(exc).__name__)
+            logger.warning(
+                "Conversation presentation degraded: request_ref=%s phase=presentation "
+                "responsibility=transport recoverability=fallback "
+                "code=presentation_open_failed error=%s",
+                request_ref,
+                type(exc).__name__,
+                exc_info=True,
+            )
             presentation = NoopProgressSession()
-        key = self._key(context)
         try:
             response = await self._service.ask(
                 key,
@@ -53,43 +73,113 @@ class OopzChatHandlerController(ChatCommandController):
             await self._show_cancelled(context, presentation)
             raise
         except Exception as exc:
-            logger.warning(
-                "Chat request failed: conversation=%s error=%s",
-                opaque_ref(key.scope, key.area_id, key.channel_id, key.person_id),
-                type(exc).__name__,
-                exc_info=True,
+            conversation_ref = opaque_ref(
+                key.scope,
+                key.area_id,
+                key.channel_id,
+                key.person_id,
             )
-            message = self._error_message(exc)
+            error_presentation = self._error_presentation(
+                exc,
+                request_ref=request_ref,
+            )
+            self._log_error(error_presentation, exc, conversation_ref=conversation_ref)
+            message = error_presentation.message
             if presentation.owns_message:
-                await presentation.fail(message)
-            else:
-                sent = await context.reply(message)
-                await self._record_direct_delivery(
-                    presentation,
-                    sent,
-                    failure_message=message,
+                delivered = await self._safe_presentation(
+                    "fail",
+                    presentation.fail(message),
+                    request_ref=request_ref,
                 )
+                if not delivered:
+                    sent = await self._safe_reply(
+                        "error",
+                        context.reply(message),
+                        request_ref=request_ref,
+                    )
+                    if sent is not None:
+                        await self._record_direct_delivery(
+                            presentation,
+                            sent,
+                            failure_message=message,
+                        )
+            else:
+                sent = await self._safe_reply(
+                    "error",
+                    context.reply(message),
+                    request_ref=request_ref,
+                )
+                if sent is not None:
+                    await self._record_direct_delivery(
+                        presentation,
+                        sent,
+                        failure_message=message,
+                    )
             return False
         else:
             if presentation.owns_message:
-                await presentation.complete(response)
+                delivered = await self._safe_presentation(
+                    "complete",
+                    presentation.complete(response),
+                    request_ref=request_ref,
+                )
+                if not delivered:
+                    sent = await self._safe_reply(
+                        "final",
+                        context.reply(response.content),
+                        request_ref=request_ref,
+                    )
+                    if sent is not None:
+                        await self._record_direct_delivery(
+                            presentation,
+                            sent,
+                            response=response,
+                        )
             else:
-                sent = await context.reply(response.content)
-                await self._record_direct_delivery(presentation, sent, response=response)
+                sent = await self._safe_reply(
+                    "final",
+                    context.reply(response.content),
+                    request_ref=request_ref,
+                )
+                if sent is not None:
+                    await self._record_direct_delivery(
+                        presentation,
+                        sent,
+                        response=response,
+                    )
             return True
         finally:
-            await asyncio.shield(presentation.aclose())
+            await asyncio.shield(
+                self._safe_presentation(
+                    "close",
+                    presentation.aclose(),
+                    request_ref=request_ref,
+                )
+            )
 
     @staticmethod
     async def _show_cancelled(
         context: EventContext,
         presentation: ConversationProgressSession,
     ) -> None:
+        key = OopzChatHandlerController._key(context)
+        request_ref = OopzChatHandlerController._event_request_ref(context, key)
         if presentation.owns_message:
-            await asyncio.shield(presentation.cancel())
-            return
-        sent = await context.reply("已取消当前文字回复。")
-        if isinstance(presentation, DirectResponseTraceSink):
+            delivered = await asyncio.shield(
+                OopzChatHandlerController._safe_presentation(
+                    "cancel",
+                    presentation.cancel(),
+                    request_ref=request_ref,
+                )
+            )
+            if delivered:
+                return
+        sent = await OopzChatHandlerController._safe_reply(
+            "cancel",
+            context.reply("已取消当前文字回复。"),
+            request_ref=request_ref,
+        )
+        if sent is not None and isinstance(presentation, DirectResponseTraceSink):
             try:
                 await presentation.record_delivery(sent, cancelled=True)
             except Exception as exc:

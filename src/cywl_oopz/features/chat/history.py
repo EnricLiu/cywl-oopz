@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
-from cywl_oopz.core.errors import CywlError
+from cywl_oopz.core.errors import UserRequestError
 
 from .models import ChatMessage, ChatRole
 
 
-class ChatInputTooLongError(CywlError):
+class ChatInputTooLongError(UserRequestError):
     """Raised before a single user prompt would exceed the configured context budget."""
+
+    def __init__(self) -> None:
+        super().__init__("chat_input_too_long", "这条消息太长，请缩短后再试。")
 
 
 class HistoryTrimmer:
@@ -38,4 +41,4 @@ class HistoryTrimmer:
     def validate_input(self, content: str) -> None:
         """Avoid silently rewriting a user's current prompt to fit the context."""
         if len(content) > self._max_characters:
-            raise ChatInputTooLongError("The prompt exceeds the configured history budget")
+            raise ChatInputTooLongError()

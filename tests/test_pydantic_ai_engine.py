@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from uuid import uuid4
 
 import pytest
 from pydantic_ai.messages import ModelMessage
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
+from cywl_oopz.core.errors import AgentInternalError
 from cywl_oopz.features.agent.models import (
     AgentIdentity,
     AgentMessage,
@@ -41,6 +43,29 @@ class RecordingProgress:
         self.events.append(event)
         if self.fail:
             raise RuntimeError("display unavailable")
+
+
+def engine_request() -> AgentRunRequest:
+    conversation = ConversationKey("private", "", "", "person")
+    return AgentRunRequest(
+        run_id=uuid4(),
+        thread_id=uuid4(),
+        identity=AgentIdentity("person", conversation),
+        model=AgentModelRef(
+            provider_id=uuid4(),
+            model_id=uuid4(),
+            provider_alias="provider",
+            model_alias="model",
+            remote_model_name="remote",
+            protocol=ProviderProtocol.OPENAI_CHAT_COMPATIBLE,
+            capabilities=frozenset(),
+            fallback_model_id=None,
+        ),
+        prompt="current",
+        context=(),
+        enabled_tools=(),
+        limits=AgentRunLimits(),
+    )
 
 
 @pytest.mark.asyncio
@@ -132,3 +157,74 @@ async def test_progress_sink_failure_never_fails_the_agent_run() -> None:
     result = await engine.run(request, RecordingProgress(fail=True))
 
     assert result.output == "still works"
+
+
+@pytest.mark.asyncio
+async def test_engine_skips_malformed_history_tool_message() -> None:
+    captured: dict[str, object] = {}
+
+    async def respond(messages: list[ModelMessage], _: AgentInfo):
+        captured["messages"] = messages
+        yield "history recovered"
+
+    engine = PydanticAiAgentEngine(FakeRegistry(FunctionModel(stream_function=respond)))
+    request = replace(
+        engine_request(),
+        context=(
+            AgentMessage(
+                "assistant",
+                "tool_call",
+                {
+                    "tool_name": 42,
+                    "tool_call_id": None,
+                    "arguments": ["not", "an", "object"],
+                },
+            ),
+            AgentMessage("user", "text", {"text": "continue"}),
+        ),
+    )
+
+    result = await engine.run(request)
+
+    assert result.output == "history recovered"
+    assert len(captured["messages"]) == 1  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_engine_classifies_bootstrap_failure_as_internal() -> None:
+    class FailingRegistry(FakeRegistry):
+        async def model(self, reference):
+            del reference
+            raise RuntimeError("registry invariant failed")
+
+    engine = PydanticAiAgentEngine(FailingRegistry(None))
+
+    with pytest.raises(AgentInternalError, match="bootstrap"):
+        await engine.run(engine_request())
+
+
+@pytest.mark.asyncio
+async def test_engine_classifies_unknown_stream_failure_as_internal() -> None:
+    async def fail_stream(*_: object):
+        raise RuntimeError("framework stream failed")
+        yield "unreachable"
+
+    engine = PydanticAiAgentEngine(FakeRegistry(FunctionModel(stream_function=fail_stream)))
+
+    with pytest.raises(AgentInternalError, match="stream"):
+        await engine.run(engine_request())
+
+
+@pytest.mark.asyncio
+async def test_engine_classifies_result_mapping_failure_as_internal(monkeypatch) -> None:
+    async def respond(*_: object):
+        yield "answer"
+
+    def fail_mapping(*_: object):
+        raise ValueError("history projection failed")
+
+    monkeypatch.setattr(PydanticAiAgentEngine, "_map_new_tool_messages", fail_mapping)
+    engine = PydanticAiAgentEngine(FakeRegistry(FunctionModel(stream_function=respond)))
+
+    with pytest.raises(AgentInternalError, match="result mapping"):
+        await engine.run(engine_request())

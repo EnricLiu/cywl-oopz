@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 
 from pydantic_ai.messages import (
@@ -14,6 +15,7 @@ from pydantic_ai.messages import (
     ToolReturnPart,
 )
 
+from cywl_oopz.core.observability import exception_kind
 from cywl_oopz.features.chat.progress import (
     ConversationProgressEvent,
     ProgressKind,
@@ -23,6 +25,8 @@ from cywl_oopz.features.chat.progress import (
 
 from .tool_progress import ToolProgressCatalog, ToolProgressPresentation
 from .tools.models import ToolDescriptor, ToolProgressUpdate
+
+logger = logging.getLogger(__name__)
 
 
 class ConversationToolProgressReporter:
@@ -79,7 +83,22 @@ class PydanticAiProgressMapper:
         return self._event(ProgressKind.THINKING)
 
     def map(self, event: object) -> tuple[ConversationProgressEvent, ...]:
-        """Map one framework event; unsupported and hidden events produce nothing."""
+        """Best-effort map one framework event without controlling Agent success."""
+        try:
+            return self._map(event)
+        except Exception as exc:
+            logger.error(
+                "Skipped invalid Agent progress projection: phase=progress_projection "
+                "responsibility=internal recoverability=ignored "
+                "code=progress_projection_failed event=%s error=%s",
+                type(event).__name__,
+                exception_kind(exc),
+                exc_info=True,
+            )
+            return ()
+
+    def _map(self, event: object) -> tuple[ConversationProgressEvent, ...]:
+        """Map supported framework events after the best-effort boundary."""
         if isinstance(event, PartStartEvent) and isinstance(event.part, TextPart):
             mapped: list[ConversationProgressEvent] = []
             if not self._text_generation_active or event.previous_part_kind is None:

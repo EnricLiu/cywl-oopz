@@ -85,7 +85,8 @@ class ToolDescriptor:
     required_permission: Permission | None = None
     version: str = "1"
     timeout_seconds: float = 10.0
-    max_retries: int = 0
+    # Retries only cover pre-execution argument correction at the framework edge.
+    max_retries: int = 1
     max_output_characters: int = 32_768
     concurrency_safe: bool = False
     idempotent: bool = False

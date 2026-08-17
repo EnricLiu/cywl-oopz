@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from dataclasses import dataclass, replace
 from typing import Any
 
+from pydantic import ValidationError
 from pydantic_ai import (
     Agent,
     AgentRunResultEvent,
     ModelAPIError,
     ModelHTTPError,
+    ModelRetry,
     RunContext,
     Tool,
     UnexpectedModelBehavior,
@@ -29,8 +32,13 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 
-from cywl_oopz.core.errors import ProviderError, ProviderResponseError, ProviderTimeoutError
-from cywl_oopz.core.observability import exception_kind
+from cywl_oopz.core.errors import (
+    AgentInternalError,
+    ProviderError,
+    ProviderResponseError,
+    ProviderTimeoutError,
+)
+from cywl_oopz.core.observability import exception_kind, opaque_ref
 from cywl_oopz.features.chat.progress import ProgressSink, emit_progress
 
 from .models import AgentMessage, AgentRunRequest, AgentRunResult, AgentStopReason
@@ -41,6 +49,57 @@ from .tools.models import ToolCall, ToolDescriptor, ToolExecutionContext
 from .tools.ports import AgentToolRuntime
 
 logger = logging.getLogger(__name__)
+
+_RAW_TOOL_ARGUMENTS = "__cywl_raw_tool_arguments__"
+_MALFORMED_TOOL_ARGUMENTS = "__cywl_malformed_tool_arguments__"
+_MAX_ARGUMENT_ISSUES = 5
+
+
+class _ToolArgumentsEnvelopeValidator:
+    """Decode any model JSON into kwargs without trusting its root shape."""
+
+    def validate_json(
+        self,
+        value: str | bytes | bytearray,
+        *,
+        allow_partial: object = None,
+        context: object = None,
+    ) -> dict[str, object]:
+        del allow_partial, context
+        try:
+            decoded = json.loads(value or "{}")
+        except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
+            return {
+                _RAW_TOOL_ARGUMENTS: None,
+                _MALFORMED_TOOL_ARGUMENTS: True,
+            }
+        return {
+            _RAW_TOOL_ARGUMENTS: decoded,
+            _MALFORMED_TOOL_ARGUMENTS: False,
+        }
+
+    def validate_python(
+        self,
+        value: object,
+        *,
+        allow_partial: object = None,
+        context: object = None,
+    ) -> dict[str, object]:
+        del allow_partial, context
+        return {
+            _RAW_TOOL_ARGUMENTS: value,
+            _MALFORMED_TOOL_ARGUMENTS: False,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class _ToolArgumentValidation:
+    arguments: dict[str, object] | None
+    issues: tuple[str, ...]
+
+    @property
+    def valid(self) -> bool:
+        return self.arguments is not None
 
 
 @dataclass(slots=True)
@@ -68,34 +127,48 @@ class PydanticAiAgentEngine:
         progress: ProgressSink | None = None,
     ) -> AgentRunResult:
         """Run an Agent loop with hard wall-clock, model, token, and tool budgets."""
+        run_ref = opaque_ref("agent-run", request.run_id)
         logger.info(
-            "Agent engine run started: run=%s model=%s/%s context_messages=%s "
+            "Agent engine run started: run_ref=%s model=%s/%s context_messages=%s "
             "tools=%s timeout_seconds=%s",
-            request.run_id,
+            run_ref,
             request.model.provider_alias,
             request.model.model_alias,
             len(request.context),
             len(request.enabled_tools),
             request.limits.timeout_seconds,
         )
-        model = await self._registry.model(request.model)
-        instructions, history = self._map_context(request.context)
-        framework_tools, dependencies, descriptors = self._build_tools(request, progress)
-        progress_mapper = PydanticAiProgressMapper(descriptors)
-        if framework_tools:
-            agent = Agent(
-                model,
-                instructions=instructions,
-                deps_type=_ToolRunDependencies,
-                tools=framework_tools,
+        try:
+            model = await self._registry.model(request.model)
+            instructions, history = self._map_context(request.context)
+            framework_tools, dependencies, descriptors = self._build_tools(request, progress)
+            progress_mapper = PydanticAiProgressMapper(descriptors)
+            if framework_tools:
+                agent = Agent(
+                    model,
+                    instructions=instructions,
+                    deps_type=_ToolRunDependencies,
+                    tools=framework_tools,
+                )
+            else:
+                agent = Agent(model, instructions=instructions)
+            usage_limits = UsageLimits(
+                request_limit=request.limits.max_model_requests,
+                tool_calls_limit=request.limits.max_tool_calls,
+                total_tokens_limit=request.limits.max_total_tokens,
             )
-        else:
-            agent = Agent(model, instructions=instructions)
-        usage_limits = UsageLimits(
-            request_limit=request.limits.max_model_requests,
-            tool_calls_limit=request.limits.max_tool_calls,
-            total_tokens_limit=request.limits.max_total_tokens,
-        )
+        except asyncio.CancelledError:
+            raise
+        except ProviderError:
+            raise
+        except Exception as exc:
+            logger.exception(
+                "Agent engine bootstrap failed: run_ref=%s phase=engine_bootstrap "
+                "responsibility=internal recoverability=terminal code=agent_internal error=%s",
+                run_ref,
+                exception_kind(exc),
+            )
+            raise AgentInternalError("Agent engine bootstrap failed") from exc
         try:
             with bind_provider_retry_progress(progress):
                 await emit_progress(progress, progress_mapper.thinking())
@@ -124,7 +197,10 @@ class PydanticAiAgentEngine:
                         raise ProviderResponseError("Agent stream ended without a result")
         except TimeoutError as exc:
             logger.warning(
-                "Agent engine timed out: run=%s error=%s", request.run_id, exception_kind(exc)
+                "Agent engine timed out: run_ref=%s phase=provider "
+                "responsibility=dependency recoverability=terminal code=provider_timeout error=%s",
+                run_ref,
+                exception_kind(exc),
             )
             raise ProviderTimeoutError("Agent run timed out") from exc
         except UsageLimitExceeded as exc:
@@ -143,34 +219,65 @@ class PydanticAiAgentEngine:
                 stop_reason=reason,
             )
             logger.warning(
-                "Agent engine reached usage limit: run=%s reason=%s",
-                request.run_id,
+                "Agent engine reached usage limit: run_ref=%s phase=provider "
+                "responsibility=request recoverability=terminal code=usage_limit reason=%s",
+                run_ref,
                 reason.value,
             )
             return exhausted
         except (ModelAPIError, ModelHTTPError) as exc:
             logger.warning(
-                "Agent model request failed: run=%s error=%s",
-                request.run_id,
+                "Agent model request failed: run_ref=%s phase=provider "
+                "responsibility=dependency recoverability=terminal code=provider_error error=%s",
+                run_ref,
                 exception_kind(exc),
             )
             raise ProviderError("Agent model request failed") from exc
         except (UnexpectedModelBehavior, UserError) as exc:
             logger.warning(
-                "Agent model response invalid: run=%s error=%s",
-                request.run_id,
+                "Agent model response invalid: run_ref=%s phase=provider "
+                "responsibility=model recoverability=terminal code=invalid_provider_response "
+                "error=%s",
+                run_ref,
                 exception_kind(exc),
             )
             raise ProviderResponseError("Agent model returned an invalid response") from exc
+        except ProviderError:
+            raise
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception(
+                "Agent engine stream failed internally: run_ref=%s phase=engine_stream "
+                "responsibility=internal recoverability=terminal code=agent_internal error=%s",
+                run_ref,
+                exception_kind(exc),
+            )
+            raise AgentInternalError("Agent engine stream failed") from exc
 
-        output = result.output
-        if not isinstance(output, str) or not output.strip():
-            raise ProviderResponseError("Agent model returned no text")
-        usage = result.usage
+        try:
+            output = result.output
+            if not isinstance(output, str) or not output.strip():
+                raise ProviderResponseError("Agent model returned no text")
+            usage = result.usage
+            intermediate_messages = self._map_new_tool_messages(
+                result.new_messages(),
+                descriptors,
+            )
+        except ProviderError:
+            raise
+        except Exception as exc:
+            logger.exception(
+                "Agent engine result mapping failed: run_ref=%s phase=result_mapping "
+                "responsibility=internal recoverability=terminal code=agent_internal error=%s",
+                run_ref,
+                exception_kind(exc),
+            )
+            raise AgentInternalError("Agent engine result mapping failed") from exc
         logger.info(
-            "Agent engine run completed: run=%s model_requests=%s tool_calls=%s "
+            "Agent engine run completed: run_ref=%s model_requests=%s tool_calls=%s "
             "input_tokens=%s output_tokens=%s",
-            request.run_id,
+            run_ref,
             usage.requests,
             usage.tool_calls,
             usage.input_tokens,
@@ -183,10 +290,7 @@ class PydanticAiAgentEngine:
             output_tokens=usage.output_tokens,
             model_requests=usage.requests,
             tool_calls=usage.tool_calls,
-            intermediate_messages=self._map_new_tool_messages(
-                result.new_messages(),
-                descriptors,
-            ),
+            intermediate_messages=intermediate_messages,
         )
 
     async def aclose(self) -> None:
@@ -265,12 +369,12 @@ class PydanticAiAgentEngine:
         if not request.enabled_tools:
             return [], None, ()
         if self._tools is None:
-            raise ProviderResponseError("Agent tools are not configured")
+            raise AgentInternalError("Agent tools are not configured")
         descriptors = self._tools.descriptors(request.enabled_tools)
         if tuple(descriptor.name for descriptor in descriptors) != tuple(
             sorted(request.enabled_tools)
         ):
-            raise ProviderResponseError("Agent tool set changed before execution")
+            raise AgentInternalError("Agent tool set changed before execution")
 
         context = ToolExecutionContext(
             run_id=request.run_id,
@@ -297,6 +401,34 @@ class PydanticAiAgentEngine:
         descriptor: ToolDescriptor,
         dependencies: _ToolRunDependencies,
     ) -> Tool[_ToolRunDependencies]:
+        def validate_arguments(
+            context: RunContext[_ToolRunDependencies],
+            **envelope: Any,
+        ) -> None:
+            validation = PydanticAiAgentEngine._validate_tool_arguments(
+                descriptor,
+                envelope,
+            )
+            if validation.valid:
+                return
+            logger.warning(
+                "Agent tool arguments rejected: run_ref=%s call_ref=%s tool=%s "
+                "phase=tool_validate responsibility=model recoverability=retry "
+                "code=invalid_arguments attempt=%s max_retries=%s issues=%s",
+                opaque_ref("agent-run", dependencies.context.run_id),
+                opaque_ref(
+                    "agent-tool-call",
+                    dependencies.context.run_id,
+                    context.tool_call_id or "missing",
+                ),
+                name,
+                context.retry + 1,
+                descriptor.max_retries,
+                ",".join(validation.issues),
+            )
+            if context.retry < descriptor.max_retries:
+                raise ModelRetry(PydanticAiAgentEngine._argument_retry_message(validation.issues))
+
         async def invoke(
             context: RunContext[_ToolRunDependencies],
             **arguments: Any,
@@ -304,6 +436,12 @@ class PydanticAiAgentEngine:
             call_id = context.tool_call_id
             if not call_id:
                 return {"ok": False, "error": "missing_tool_call_id"}
+            validation = PydanticAiAgentEngine._validate_tool_arguments(
+                descriptor,
+                arguments,
+            )
+            if not validation.valid:
+                return {"ok": False, "error": "invalid_arguments"}
             execution_context = replace(
                 dependencies.context,
                 model_requests_used=context.usage.requests,
@@ -321,7 +459,7 @@ class PydanticAiAgentEngine:
             )
             async with dependencies.semaphore:
                 result = await dependencies.runtime.execute(
-                    ToolCall(call_id, name, arguments),
+                    ToolCall(call_id, name, validation.arguments),
                     execution_context,
                 )
             return result.model_payload()
@@ -333,9 +471,47 @@ class PydanticAiAgentEngine:
             json_schema=descriptor.input_model.model_json_schema(),
             takes_ctx=True,
             sequential=descriptor.sequential,
+            args_validator=validate_arguments,
         )
+        # Tool.from_schema() deliberately uses any_schema() at runtime. Replace it with
+        # a root-shape-safe envelope so scalar, list, null, and malformed JSON never
+        # reach invoke() through ``**arguments`` or expose their original values.
+        tool.function_schema.validator = _ToolArgumentsEnvelopeValidator()  # type: ignore[assignment]
         tool.max_retries = descriptor.max_retries
         return tool
+
+    @staticmethod
+    def _validate_tool_arguments(
+        descriptor: ToolDescriptor,
+        envelope: dict[str, Any],
+    ) -> _ToolArgumentValidation:
+        if envelope.get(_MALFORMED_TOOL_ARGUMENTS) is True:
+            return _ToolArgumentValidation(None, ("$: malformed_json",))
+        raw_arguments = envelope.get(_RAW_TOOL_ARGUMENTS)
+        try:
+            validated = descriptor.input_model.model_validate(raw_arguments)
+        except ValidationError as exc:
+            issues: list[str] = []
+            for error in exc.errors(
+                include_url=False,
+                include_context=False,
+                include_input=False,
+            )[:_MAX_ARGUMENT_ISSUES]:
+                location = ".".join(str(item) for item in error["loc"]) or "$"
+                issues.append(f"{location}: {error['type']}")
+            return _ToolArgumentValidation(
+                None,
+                tuple(issues) or ("$: invalid_arguments",),
+            )
+        return _ToolArgumentValidation(
+            validated.model_dump(mode="json"),
+            (),
+        )
+
+    @staticmethod
+    def _argument_retry_message(issues: tuple[str, ...]) -> str:
+        detail = "; ".join(issues[:_MAX_ARGUMENT_ISSUES])
+        return f"工具参数不符合已提供的 JSON Schema，请修正后重试。问题：{detail}"
 
     @staticmethod
     def _map_new_tool_messages(

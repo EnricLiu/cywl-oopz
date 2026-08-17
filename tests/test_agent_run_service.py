@@ -7,7 +7,12 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from cywl_oopz.core.errors import ProviderError, ProviderTimeoutError
+from cywl_oopz.core.errors import (
+    AgentInternalError,
+    DatabaseError,
+    ProviderError,
+    ProviderTimeoutError,
+)
 from cywl_oopz.core.lifecycle import ModelSelectionSource
 from cywl_oopz.features.agent.models import (
     AgentIdentity,
@@ -192,6 +197,7 @@ async def test_agent_run_service_binds_progress_after_run_persistence_before_eng
     (
         (ProviderTimeoutError("timeout"), AgentStopReason.TIMEOUT, "provider_timeout"),
         (ProviderError("failed"), AgentStopReason.PROVIDER_ERROR, "provider_error"),
+        (AgentInternalError("adapter"), AgentStopReason.INVALID_OUTPUT, "agent_internal"),
         (RuntimeError("bad output"), AgentStopReason.INVALID_OUTPUT, "agent_error"),
     ),
 )
@@ -240,3 +246,104 @@ async def test_agent_run_service_cancellation_is_terminal_and_stops_heartbeat() 
     heartbeat_count = len(runs.heartbeats)
     await asyncio.sleep(0.02)
     assert len(runs.heartbeats) == heartbeat_count
+
+
+@pytest.mark.asyncio
+async def test_agent_run_service_finishes_run_when_user_message_append_fails() -> None:
+    class UserAppendFailure(RecordingMessages):
+        async def append(self, thread_id, run_id, messages) -> None:
+            del thread_id, run_id, messages
+            raise DatabaseError("user append unavailable")
+
+    runs = RecordingRuns()
+    service = AgentRunService(
+        ScriptedEngine(AgentRunResult("unused", AgentStopReason.COMPLETED)),
+        runs,
+        UserAppendFailure(),
+    )
+
+    with pytest.raises(DatabaseError, match="user append unavailable"):
+        await service.run(run_spec())
+
+    run_id = next(iter(runs.states))
+    assert runs.states[run_id].stop_reason is AgentStopReason.INVALID_OUTPUT
+    assert runs.errors[run_id] == "user_message_persistence_error"
+
+
+@pytest.mark.asyncio
+async def test_agent_run_service_returns_generated_answer_when_result_append_fails() -> None:
+    class ResultAppendFailure(RecordingMessages):
+        def __init__(self) -> None:
+            super().__init__()
+            self.append_count = 0
+
+        async def append(self, thread_id, run_id, messages) -> None:
+            self.append_count += 1
+            if self.append_count == 2:
+                raise DatabaseError("result append unavailable")
+            await super().append(thread_id, run_id, messages)
+
+    result = AgentRunResult("generated answer", AgentStopReason.COMPLETED)
+    runs = RecordingRuns()
+    messages = ResultAppendFailure()
+    spec = run_spec()
+
+    outcome = await AgentRunService(
+        ScriptedEngine(result),
+        runs,
+        messages,
+    ).run(spec)
+
+    assert outcome.result is result
+    assert outcome.persistence_degraded is True
+    assert [message.role for message in messages.values[spec.thread.id]] == ["user"]
+    assert runs.states[outcome.run_id].stop_reason is AgentStopReason.INVALID_OUTPUT
+    assert runs.errors[outcome.run_id] == "result_message_persistence_error"
+
+
+@pytest.mark.asyncio
+async def test_agent_run_service_returns_generated_answer_when_run_finish_fails() -> None:
+    class FinishFailureRuns(RecordingRuns):
+        async def finish(self, state, *, usage, error_code="") -> None:
+            del state, usage, error_code
+            raise DatabaseError("run finish unavailable")
+
+    result = AgentRunResult("generated answer", AgentStopReason.COMPLETED)
+    runs = FinishFailureRuns()
+    messages = RecordingMessages()
+    spec = run_spec()
+
+    outcome = await AgentRunService(
+        ScriptedEngine(result),
+        runs,
+        messages,
+    ).run(spec)
+
+    assert outcome.result is result
+    assert outcome.persistence_degraded is True
+    assert [message.role for message in messages.values[spec.thread.id]] == [
+        "user",
+        "assistant",
+    ]
+    assert runs.states[outcome.run_id].status is AgentRunStatus.RUNNING
+
+
+@pytest.mark.asyncio
+async def test_agent_run_service_cleanup_failure_preserves_provider_error() -> None:
+    class FinishFailureRuns(RecordingRuns):
+        async def finish(self, state, *, usage, error_code="") -> None:
+            del state, usage, error_code
+            raise RuntimeError("cleanup failed")
+
+    provider_error = ProviderError("primary provider failure")
+    runs = FinishFailureRuns()
+    service = AgentRunService(
+        ScriptedEngine(provider_error),
+        runs,
+        RecordingMessages(),
+    )
+
+    with pytest.raises(ProviderError) as captured:
+        await service.run(run_spec())
+
+    assert captured.value is provider_error
