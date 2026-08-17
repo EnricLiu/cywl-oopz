@@ -170,7 +170,11 @@ class ChatCommandController:
             request_ref=self._request_ref(request, key),
         )
         self._log_error(presentation, error, conversation_ref=conversation_ref)
-        await request.responder.reply(presentation.message)
+        await self._safe_reply(
+            "error",
+            request.responder.reply(presentation.message),
+            request_ref=self._request_ref(request, key),
+        )
 
     async def _ask_request_with_presenter(
         self,
