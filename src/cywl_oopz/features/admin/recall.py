@@ -66,7 +66,7 @@ class _MessageLockPool:
 
 
 class MessageRecallService:
-    """Dismiss, cancel, recall, then persist one exact message transition."""
+    """Dismiss exact active work, recall, then persist one message transition."""
 
     cancel_grace_seconds = 2.0
 
@@ -99,8 +99,15 @@ class MessageRecallService:
             if receipt.state is OutboundMessageState.RECALLED:
                 return MessageRecallOutcome.ALREADY_RECALLED
 
-            await self._active_presentations.dismiss(message_id)
-            await self._cancel_conversation(receipt)
+            presentation_was_active = await self._active_presentations.dismiss(message_id)
+            if presentation_was_active:
+                await self._cancel_conversation(receipt)
+            else:
+                logger.debug(
+                    "Recalled message has no active presentation; preserving current "
+                    "conversation task: message=%s",
+                    opaque_ref(message_id),
+                )
             await self._gateway.recall(receipt)
             marked = await self._receipts.mark_recalled(message_id)
             if not marked:
