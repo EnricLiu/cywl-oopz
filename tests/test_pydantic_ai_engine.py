@@ -4,8 +4,11 @@ from dataclasses import replace
 from uuid import uuid4
 
 import pytest
-from pydantic_ai.messages import ModelMessage
+from pydantic_ai import BinaryContent
+from pydantic_ai.messages import ModelMessage, UserPromptPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
+from pydantic_ai.models.openai import OpenAIChatModel
+from pydantic_ai.providers.openai import OpenAIProvider
 
 from cywl_oopz.core.errors import AgentInternalError
 from cywl_oopz.features.agent.input import AgentUserInput, ImageInputPart, TextInputPart
@@ -114,6 +117,28 @@ def test_engine_rehydrates_historical_multimodal_message() -> None:
     assert isinstance(content, list)
     assert content[0] == "describe this"
     assert content[1].data == b"png-bytes"
+
+
+@pytest.mark.asyncio
+async def test_openai_chat_wire_maps_binary_image_to_data_url() -> None:
+    model = OpenAIChatModel("doubao-seed-2.1-turbo", provider=OpenAIProvider(api_key="test"))
+
+    mapped = await model._map_user_prompt(  # noqa: SLF001 - verify our framework boundary.
+        UserPromptPart(
+            content=[
+                "这是谁",
+                BinaryContent(data=b"webp-bytes", media_type="image/webp"),
+            ]
+        )
+    )
+
+    assert mapped["content"] == [
+        {"type": "text", "text": "这是谁"},
+        {
+            "type": "image_url",
+            "image_url": {"url": "data:image/webp;base64,d2VicC1ieXRlcw=="},
+        },
+    ]
 
 
 @pytest.mark.asyncio

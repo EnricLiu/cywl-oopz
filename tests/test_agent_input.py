@@ -82,3 +82,27 @@ def test_image_bytes_are_not_in_repr() -> None:
     image = ImageInputPart(data=b"secret", media_type="image/png", byte_size=6)
 
     assert "secret" not in repr(image)
+
+
+def test_oopz_adapter_reconstructs_images_without_cached_segments() -> None:
+    message = _message(
+        text="![IMAGEw454h454](/im/image.webp)\n这是谁",
+        attachments=[_image()],
+    )
+
+    # Some event proxies expose the raw Message fields but not the SDK's
+    # cached `segments` property. The image token must not be downgraded to text.
+    proxy = type("MessageProxy", (), {})()
+    proxy.text = message.text
+    proxy.content = message.content
+    proxy.attachments = [attachment.model_dump(by_alias=True) for attachment in message.attachments]
+    proxy.mention_list = message.mention_list
+
+    result = OopzConversationInputFactory().from_message(proxy)
+
+    assert [type(part).__name__ for part in result.parts] == [
+        "ImageInputPart",
+        "TextInputPart",
+    ]
+    assert result.text == "这是谁"
+    assert result.images[0].source_file_key == "/im/image.webp"
