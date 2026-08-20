@@ -42,7 +42,7 @@ from cywl_oopz.core.errors import (
 from cywl_oopz.core.observability import exception_kind, opaque_ref
 from cywl_oopz.features.chat.progress import ProgressSink, emit_progress
 
-from .input import ImageInputPart, TextInputPart
+from .input import IMAGE_ONLY_PROMPT, ImageInputPart, TextInputPart
 from .models import AgentMessage, AgentRunRequest, AgentRunResult, AgentStopReason
 from .progress import ConversationToolProgressReporter, PydanticAiProgressMapper
 from .provider_retry import bind_provider_retry_progress
@@ -344,11 +344,33 @@ class PydanticAiAgentEngine:
                 if isinstance(text, str) and text.strip():
                     instructions.append(text)
                 continue
-            if message.role == "user" and message.kind == "text":
-                if not isinstance(text, str) or not text.strip():
-                    continue
+            if message.role == "user" and message.kind in {"text", "multimodal"}:
+                prompt_parts: list[str | BinaryContent] = []
+                if isinstance(text, str) and text.strip():
+                    prompt_parts.append(text)
+                if message.kind == "multimodal":
+                    raw_images = message.content.get("images", [])
+                    if isinstance(raw_images, list):
+                        for raw_image in raw_images:
+                            if not isinstance(raw_image, dict):
+                                continue
+                            data = raw_image.get("data")
+                            media_type = raw_image.get("media_type")
+                            if (
+                                isinstance(data, bytes)
+                                and isinstance(media_type, str)
+                                and media_type
+                            ):
+                                prompt_parts.append(BinaryContent(data=data, media_type=media_type))
+                if not prompt_parts:
+                    if message.kind == "multimodal" and message.content.get("implicit_prompt"):
+                        prompt_parts.append(IMAGE_ONLY_PROMPT)
+                    else:
+                        continue
                 flush_response()
-                pending_request_parts.append(UserPromptPart(text))
+                pending_request_parts.append(
+                    UserPromptPart(prompt_parts[0] if len(prompt_parts) == 1 else prompt_parts)
+                )
             elif message.role == "assistant" and message.kind == "text":
                 if not isinstance(text, str) or not text.strip():
                     continue

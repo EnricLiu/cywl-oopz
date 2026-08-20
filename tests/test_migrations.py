@@ -8,10 +8,11 @@ def test_initial_schema_models_and_migration_head_are_present() -> None:
     config = Config("alembic.ini")
     revisions = ScriptDirectory.from_config(config)
 
-    assert revisions.get_current_head() == "20260813_24"
+    assert revisions.get_current_head() == "20260820_25"
     assert set(Base.metadata.tables) == {
         "agent_memory_items",
         "agent_memory_preferences",
+        "agent_media_assets",
         "agent_messages",
         "agent_runs",
         "agent_skill_resources",
@@ -43,6 +44,12 @@ def test_initial_schema_models_and_migration_head_are_present() -> None:
     assert Base.metadata.tables["channel_settings"].c.updated_at.server_default is not None
     assert Base.metadata.tables["agent_runs"].c.status.type.name == "agent_run_status"
     assert Base.metadata.tables["agent_runs"].c.diagnostics.server_default is not None
+    media_assets = Base.metadata.tables["agent_media_assets"]
+    assert media_assets.c.id.server_default is not None
+    assert media_assets.c.created_at.server_default is not None
+    assert {index.name for index in media_assets.indexes} >= {
+        "ix_agent_media_assets_message_id",
+    }
     assert Base.metadata.tables["rbac_role_bindings"].c.role.type.name == "rbac_role"
     assert Base.metadata.tables["rbac_role_bindings"].c.scope.type.name == "rbac_scope"
     outbound = Base.metadata.tables["oopz_outbound_messages"]

@@ -17,6 +17,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -1197,6 +1198,42 @@ class AgentMessageRecord(Base):
     content: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
     input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        server_default=CURRENT_TIMESTAMP,
+    )
+
+
+class AgentMediaAssetRecord(Base):
+    """Validated binary media attached to one durable Agent message."""
+
+    __tablename__ = "agent_media_assets"
+    __table_args__ = (
+        UniqueConstraint("message_id", "ordinal"),
+        Index("ix_agent_media_assets_message_id", "message_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid,
+        primary_key=True,
+        default=uuid4,
+        server_default=GENERATED_UUID,
+    )
+    message_id: Mapped[UUID] = mapped_column(
+        ForeignKey("agent_messages.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    media_type: Mapped[str] = mapped_column(String(128), nullable=False)
+    width: Mapped[int] = mapped_column(Integer, nullable=False)
+    height: Mapped[int] = mapped_column(Integer, nullable=False)
+    byte_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    data: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    source_file_key: Mapped[str] = mapped_column(
+        String(512), default="", server_default=EMPTY_STRING
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=utc_now,

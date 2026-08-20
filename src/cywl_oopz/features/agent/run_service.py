@@ -132,11 +132,19 @@ class AgentRunService:
                     exception_kind(exc),
                 )
         try:
-            await self._messages.append(
-                spec.thread.id,
-                run_id,
-                (AgentMessage("user", "text", {"text": spec.prompt}),),
-            )
+            append_user_input = getattr(self._messages, "append_user_input", None)
+            if (
+                spec.user_input is not None
+                and spec.user_input.has_images
+                and callable(append_user_input)
+            ):
+                await append_user_input(spec.thread.id, run_id, spec.user_input)
+            else:
+                await self._messages.append(
+                    spec.thread.id,
+                    run_id,
+                    (AgentMessage("user", "text", {"text": spec.prompt}),),
+                )
         except asyncio.CancelledError:
             await self._finish_after_interrupt(
                 state,

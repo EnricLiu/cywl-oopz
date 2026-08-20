@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from dataclasses import asdict
 from datetime import UTC, datetime
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from cywl_oopz.core.errors import DatabaseError
 from cywl_oopz.features.chat.models import ConversationKey
 from cywl_oopz.storage.models import (
+    AgentMediaAssetRecord,
     AgentMessageRecord,
     AgentRunRecord,
     AgentThreadRecord,
@@ -27,6 +28,7 @@ from cywl_oopz.storage.models import (
     UserLlmPreferenceRecord,
 )
 
+from .input import AgentUserInput
 from .models import (
     AgentMessage,
     AgentRun,
@@ -539,7 +541,10 @@ class SqlAlchemyAgentMessageRepository:
                     )
                 ).all()
                 records.reverse()
-                return tuple(self._to_domain(record) for record in records)
+                assets = await self._load_assets(session, records)
+                return tuple(
+                    self._to_domain(record, assets.get(record.id, ())) for record in records
+                )
         except SQLAlchemyError as exc:
             raise _database_error("load Agent messages", exc) from exc
 
@@ -574,7 +579,10 @@ class SqlAlchemyAgentMessageRepository:
                         .limit(limit)
                     )
                 ).all()
-                return tuple(self._to_domain(record) for record in records)
+                assets = await self._load_assets(session, records)
+                return tuple(
+                    self._to_domain(record, assets.get(record.id, ())) for record in records
+                )
         except SQLAlchemyError as exc:
             raise _database_error("load Agent summary messages", exc) from exc
 
@@ -621,6 +629,83 @@ class SqlAlchemyAgentMessageRepository:
         except SQLAlchemyError as exc:
             raise _database_error("append Agent messages", exc) from exc
 
+    async def append_user_input(
+        self,
+        thread_id: UUID,
+        run_id: UUID,
+        user_input: AgentUserInput,
+    ) -> None:
+        """Append a user turn and its validated image bytes atomically."""
+        images = user_input.images
+        asset_ids = tuple(image.asset_id or uuid4() for image in images)
+        content: dict[str, object] = {
+            "text": user_input.text,
+            "implicit_prompt": user_input.implicit_prompt,
+            "images": [
+                {
+                    "asset_id": str(asset_id),
+                    "media_type": image.media_type,
+                    "width": image.width,
+                    "height": image.height,
+                    "byte_size": image.actual_byte_size,
+                    "sha256": image.sha256,
+                }
+                for image, asset_id in zip(images, asset_ids, strict=True)
+            ],
+        }
+        if not images:
+            await self.append(thread_id, run_id, (AgentMessage("user", "text", content),))
+            return
+        try:
+            async with self._sessions() as session:
+                async with session.begin():
+                    thread = await session.scalar(
+                        select(AgentThreadRecord)
+                        .where(AgentThreadRecord.id == thread_id)
+                        .with_for_update()
+                    )
+                    if thread is None:
+                        raise DatabaseError("Agent thread does not exist")
+                    last_sequence = (
+                        await session.scalar(
+                            select(func.max(AgentMessageRecord.sequence)).where(
+                                AgentMessageRecord.thread_id == thread_id
+                            )
+                        )
+                        or 0
+                    )
+                    message = AgentMessageRecord(
+                        thread_id=thread_id,
+                        run_id=run_id,
+                        sequence=last_sequence + 1,
+                        role="user",
+                        kind="multimodal",
+                        content=content,
+                    )
+                    session.add(message)
+                    await session.flush()
+                    for ordinal, (image, asset_id) in enumerate(
+                        zip(images, asset_ids, strict=True)
+                    ):
+                        if image.data is None or not image.media_type:
+                            raise DatabaseError("Resolved Agent image is missing runtime bytes")
+                        session.add(
+                            AgentMediaAssetRecord(
+                                id=asset_id,
+                                message_id=message.id,
+                                ordinal=ordinal,
+                                media_type=image.media_type,
+                                width=image.width,
+                                height=image.height,
+                                byte_size=len(image.data),
+                                sha256=image.sha256,
+                                data=image.data,
+                                source_file_key=image.source_file_key,
+                            )
+                        )
+        except SQLAlchemyError as exc:
+            raise _database_error("append Agent multimodal input", exc) from exc
+
     async def count(self, thread_id: UUID) -> int:
         """Count one thread without reading message content."""
         try:
@@ -645,11 +730,49 @@ class SqlAlchemyAgentMessageRepository:
             raise _database_error("count Agent messages", exc) from exc
 
     @staticmethod
-    def _to_domain(record: AgentMessageRecord) -> AgentMessage:
+    async def _load_assets(
+        session: AsyncSession,
+        records: list[AgentMessageRecord],
+    ) -> dict[UUID, tuple[AgentMediaAssetRecord, ...]]:
+        message_ids = [record.id for record in records]
+        if not message_ids:
+            return {}
+        asset_records = (
+            await session.scalars(
+                select(AgentMediaAssetRecord)
+                .where(AgentMediaAssetRecord.message_id.in_(message_ids))
+                .order_by(AgentMediaAssetRecord.message_id, AgentMediaAssetRecord.ordinal)
+            )
+        ).all()
+        grouped: dict[UUID, list[AgentMediaAssetRecord]] = {}
+        for asset in asset_records:
+            grouped.setdefault(asset.message_id, []).append(asset)
+        return {message_id: tuple(items) for message_id, items in grouped.items()}
+
+    @staticmethod
+    def _to_domain(
+        record: AgentMessageRecord,
+        assets: tuple[AgentMediaAssetRecord, ...] = (),
+    ) -> AgentMessage:
+        content = dict(_mapping(record.content))
+        if assets:
+            image_metadata = list(content.get("images", []))
+            for ordinal, (item, asset) in enumerate(zip(image_metadata, assets, strict=False)):
+                if isinstance(item, dict):
+                    item = dict(item)
+                    item["asset_id"] = str(asset.id)
+                    item["data"] = asset.data
+                    item["media_type"] = asset.media_type
+                    item["width"] = asset.width
+                    item["height"] = asset.height
+                    item["byte_size"] = asset.byte_size
+                    item["sha256"] = asset.sha256
+                    image_metadata[ordinal] = item
+            content["images"] = image_metadata
         return AgentMessage(
             role=record.role,
             kind=record.kind,
-            content=_mapping(record.content),
+            content=content,
             input_tokens=record.input_tokens,
             output_tokens=record.output_tokens,
             sequence=record.sequence,

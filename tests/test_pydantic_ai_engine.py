@@ -89,6 +89,33 @@ def test_engine_encodes_current_image_input_as_binary_content() -> None:
     assert content[1].media_type == "image/png"
 
 
+def test_engine_rehydrates_historical_multimodal_message() -> None:
+    instructions, messages = PydanticAiAgentEngine._map_context(
+        (
+            AgentMessage(
+                "user",
+                "multimodal",
+                {
+                    "text": "describe this",
+                    "images": [
+                        {
+                            "data": b"png-bytes",
+                            "media_type": "image/png",
+                        }
+                    ],
+                },
+            ),
+        )
+    )
+
+    assert instructions is None
+    assert len(messages) == 1
+    content = messages[0].parts[0].content
+    assert isinstance(content, list)
+    assert content[0] == "describe this"
+    assert content[1].data == b"png-bytes"
+
+
 @pytest.mark.asyncio
 async def test_engine_maps_context_usage_and_output_without_framework_leakage() -> None:
     captured: dict[str, object] = {}
