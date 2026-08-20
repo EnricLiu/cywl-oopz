@@ -9,6 +9,7 @@ from oopz_sdk.events.context import EventContext
 from oopz_sdk.models import Message as OopzMessage
 
 from cywl_oopz.core.observability import opaque_ref
+from cywl_oopz.features.agent.input import AgentUserInput
 from cywl_oopz.features.chat.commands import ChatCommandController
 from cywl_oopz.features.chat.models import ChatInvocation, ChatInvocationFactory, ConversationKey
 from cywl_oopz.features.chat.progress import (
@@ -19,6 +20,8 @@ from cywl_oopz.features.chat.progress import (
 )
 from cywl_oopz.features.chat.use_case import ChatUseCase
 from cywl_oopz.storage.channel_settings import ChannelSettingsRepository
+
+from .conversation_input import OopzConversationInputFactory
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +50,7 @@ class OopzChatHandlerController(ChatCommandController):
             key.person_id,
         )
 
-    async def _ask_with_presenter(self, context: EventContext, prompt: str) -> bool:
+    async def _ask_with_presenter(self, context: EventContext, user_input: AgentUserInput) -> bool:
         key = self._key(context)
         request_ref = self._event_request_ref(context, key)
         try:
@@ -65,7 +68,8 @@ class OopzChatHandlerController(ChatCommandController):
         try:
             response = await self._service.ask(
                 key,
-                prompt,
+                user_input.prompt,
+                user_input=user_input,
                 invocation=self._invocation(context),
                 progress=presentation,
             )
@@ -200,21 +204,24 @@ class MentionChatHandler(OopzChatHandlerController):
         invocation_factory: ChatInvocationFactory | None = None,
         *,
         command_prefix: str = "/",
+        input_factory: OopzConversationInputFactory | None = None,
     ) -> None:
         super().__init__(service, presenter_factory, invocation_factory)
         self._bot_person_id = bot_person_id
         self._prefix = command_prefix
+        self._input_factory = input_factory or OopzConversationInputFactory()
 
     async def handle(self, message: OopzMessage, context: EventContext) -> bool:
         if not self.matches(message):
             return False
-        prompt = (message.plain_text or message.text or message.content).strip()
-        if not prompt:
+        try:
+            user_input = self._input_factory.from_message(message)
+        except ValueError:
             await context.reply(
                 f"你好！请在提及我后附上想问的内容，或使用 {self._prefix}chat <内容>。"
             )
             return True
-        await self._ask_with_presenter(context, prompt)
+        await self._ask_with_presenter(context, user_input)
         return True
 
     def matches(self, message: OopzMessage) -> bool:
@@ -233,9 +240,11 @@ class AmbientChatHandler(OopzChatHandlerController):
         channels: ChannelSettingsRepository,
         presenter_factory: ConversationPresenterFactory | None = None,
         invocation_factory: ChatInvocationFactory | None = None,
+        input_factory: OopzConversationInputFactory | None = None,
     ) -> None:
         super().__init__(service, presenter_factory, invocation_factory)
         self._channels = channels
+        self._input_factory = input_factory or OopzConversationInputFactory()
 
     async def matches(self, message: OopzMessage, context: EventContext) -> bool:
         if not self._service.enabled:
@@ -249,8 +258,9 @@ class AmbientChatHandler(OopzChatHandlerController):
         return await self._channels.is_chat_enabled(area_id, channel_id)
 
     async def handle(self, message: OopzMessage, context: EventContext) -> bool:
-        prompt = (message.plain_text or message.text or message.content).strip()
-        if not prompt:
+        try:
+            user_input = self._input_factory.from_message(message)
+        except ValueError:
             return False
-        await self._ask_with_presenter(context, prompt)
+        await self._ask_with_presenter(context, user_input)
         return True

@@ -395,6 +395,21 @@ def test_success_header_shows_compact_agent_run_statistics() -> None:
     assert rendered == "🎵 **初音未来** · 12.3s · 2 次工具 · 1 次重试 · 2.1k tokens\n完成啦♪"
 
 
+def test_success_header_shows_image_statistics() -> None:
+    renderer = OopzMessageRenderer()
+    rendered = renderer.render(
+        AgentLoopViewState(
+            phase=DisplayPhase.SUCCEEDED,
+            final_text="看到了。",
+            elapsed_seconds=1.0,
+            image_count=2,
+            image_bytes=2 * 1024 * 1024,
+        )
+    )
+
+    assert "2 张图/2MB" in rendered
+
+
 def test_random_unicode_is_always_bounded_and_balanced() -> None:
     randomizer = random.Random(20260728)
     alphabet = "abc中文😀♪*~<u>`#[]()|\n"

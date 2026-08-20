@@ -9,6 +9,7 @@ from uuid import UUID
 from cywl_oopz.features.chat.models import ConversationKey
 from cywl_oopz.features.chat.progress import ProgressSink
 
+from .input import AgentUserInput
 from .models import (
     AgentMessage,
     AgentRun,
@@ -146,6 +147,14 @@ class AgentMessageRepository(Protocol):
         messages: tuple[AgentMessage, ...],
     ) -> None:
         """Append messages with thread-local monotonic sequence numbers."""
+
+    async def append_user_input(
+        self,
+        thread_id: UUID,
+        run_id: UUID,
+        user_input: AgentUserInput,
+    ) -> None:
+        """Append a current user turn and its resolved media assets atomically."""
 
     async def count(self, thread_id: UUID) -> int:
         """Count messages without loading their contents."""

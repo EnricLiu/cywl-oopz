@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from pydantic_ai import (
     Agent,
     AgentRunResultEvent,
+    BinaryContent,
     ModelAPIError,
     ModelHTTPError,
     ModelRetry,
@@ -41,6 +42,7 @@ from cywl_oopz.core.errors import (
 from cywl_oopz.core.observability import exception_kind, opaque_ref
 from cywl_oopz.features.chat.progress import ProgressSink, emit_progress
 
+from .input import IMAGE_ONLY_PROMPT, ImageInputPart, TextInputPart
 from .models import AgentMessage, AgentRunRequest, AgentRunResult, AgentStopReason
 from .progress import ConversationToolProgressReporter, PydanticAiProgressMapper
 from .provider_retry import bind_provider_retry_progress
@@ -175,13 +177,13 @@ class PydanticAiAgentEngine:
                 async with asyncio.timeout(request.limits.timeout_seconds):
                     if dependencies is None:
                         event_stream = agent.run_stream_events(
-                            request.prompt,
+                            self._current_input_content(request),
                             message_history=history,
                             usage_limits=usage_limits,
                         )
                     else:
                         event_stream = agent.run_stream_events(
-                            request.prompt,
+                            self._current_input_content(request),
                             deps=dependencies,
                             message_history=history,
                             usage_limits=usage_limits,
@@ -299,6 +301,25 @@ class PydanticAiAgentEngine:
         await self._registry.aclose()
 
     @staticmethod
+    def _current_input_content(request: AgentRunRequest) -> str | list[str | BinaryContent]:
+        user_input = request.user_input
+        if user_input is None:
+            return request.prompt
+        if user_input.has_images and not user_input.resolved_images:
+            raise AgentInternalError("Agent image input reached the provider unresolved")
+        content: list[str | BinaryContent] = []
+        if user_input.implicit_prompt:
+            content.append(user_input.prompt)
+        for part in user_input.parts:
+            if isinstance(part, TextInputPart):
+                content.append(part.text)
+            elif isinstance(part, ImageInputPart):
+                if part.data is None:
+                    raise AgentInternalError("Agent image input has no runtime bytes")
+                content.append(BinaryContent(data=part.data, media_type=part.media_type))
+        return content or request.prompt
+
+    @staticmethod
     def _map_context(
         context: tuple[AgentMessage, ...],
     ) -> tuple[str | None, list[ModelMessage]]:
@@ -323,11 +344,33 @@ class PydanticAiAgentEngine:
                 if isinstance(text, str) and text.strip():
                     instructions.append(text)
                 continue
-            if message.role == "user" and message.kind == "text":
-                if not isinstance(text, str) or not text.strip():
-                    continue
+            if message.role == "user" and message.kind in {"text", "multimodal"}:
+                prompt_parts: list[str | BinaryContent] = []
+                if isinstance(text, str) and text.strip():
+                    prompt_parts.append(text)
+                if message.kind == "multimodal":
+                    raw_images = message.content.get("images", [])
+                    if isinstance(raw_images, list):
+                        for raw_image in raw_images:
+                            if not isinstance(raw_image, dict):
+                                continue
+                            data = raw_image.get("data")
+                            media_type = raw_image.get("media_type")
+                            if (
+                                isinstance(data, bytes)
+                                and isinstance(media_type, str)
+                                and media_type
+                            ):
+                                prompt_parts.append(BinaryContent(data=data, media_type=media_type))
+                if not prompt_parts:
+                    if message.kind == "multimodal" and message.content.get("implicit_prompt"):
+                        prompt_parts.append(IMAGE_ONLY_PROMPT)
+                    else:
+                        continue
                 flush_response()
-                pending_request_parts.append(UserPromptPart(text))
+                pending_request_parts.append(
+                    UserPromptPart(prompt_parts[0] if len(prompt_parts) == 1 else prompt_parts)
+                )
             elif message.role == "assistant" and message.kind == "text":
                 if not isinstance(text, str) or not text.strip():
                     continue

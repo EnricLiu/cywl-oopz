@@ -127,7 +127,7 @@ class ActivePresentationDismissal(Protocol):
 
 
 class OutboundConversationCanceller(Protocol):
-    """Cancel the Agent task that owns one active outbound message."""
+    """Cancel the Agent task after exact active-message ownership is proven."""
 
     async def cancel_for_message(self, receipt: OutboundMessageReceipt) -> bool:
         """Cancel and await matching work when enough owner metadata exists."""

@@ -20,6 +20,7 @@ from cywl_oopz.commands.definitions import (
 )
 from cywl_oopz.commands.models import CommandRequest, CommandScope
 from cywl_oopz.core.observability import opaque_ref
+from cywl_oopz.features.agent.input import AgentUserInput
 
 from .error_presenter import ChatErrorPresentation, ChatErrorPresenter
 from .models import ChatInvocation, ChatInvocationFactory, ConversationKey
@@ -180,6 +181,8 @@ class ChatCommandController:
         self,
         request: CommandRequest,
         prompt: str,
+        *,
+        user_input: AgentUserInput | None = None,
     ) -> bool:
         """Run the command path using only project-owned request values."""
         key = self._request_key(request)
@@ -200,6 +203,7 @@ class ChatCommandController:
             response = await self._service.ask(
                 key,
                 prompt,
+                user_input=user_input,
                 invocation=self._request_invocation(request),
                 progress=presentation,
             )
@@ -390,7 +394,11 @@ class ChatCommand(ChatCommandController):
         key = self._request_key(request)
         if not self._tasks.start(
             key,
-            self._ask_request_with_presenter(request, arguments.prompt),
+            self._ask_request_with_presenter(
+                request,
+                arguments.prompt,
+                user_input=request.user_input,
+            ),
         ):
             await request.responder.reply(
                 f"当前对话正在生成回复；可使用 {self._prefix}cancel 取消后再试。"

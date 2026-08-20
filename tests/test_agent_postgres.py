@@ -15,6 +15,7 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from cywl_oopz.features.agent.catalog import ReloadableProviderCatalog
+from cywl_oopz.features.agent.input import AgentUserInput, ImageInputPart, TextInputPart
 from cywl_oopz.features.agent.memory import MemoryItem
 from cywl_oopz.features.agent.memory_repository import SqlAlchemyMemoryRepository
 from cywl_oopz.features.agent.models import (
@@ -72,6 +73,7 @@ from cywl_oopz.features.music.playlist_repository import (
     SqlAlchemyMusicPlaylistRepository,
 )
 from cywl_oopz.storage.models import (
+    AgentMediaAssetRecord,
     AgentRunRecord,
     ChannelSettingsRecord,
     LlmModelRecord,
@@ -1182,6 +1184,34 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
             "answer",
         ]
         assert [message.sequence for message in loaded_messages] == [1, 2]
+
+        await message_repository.append_user_input(
+            thread.id,
+            run_id,
+            AgentUserInput.from_parts(
+                [
+                    TextInputPart("what is this?"),
+                    ImageInputPart(
+                        data=b"image-bytes",
+                        media_type="image/png",
+                        width=2,
+                        height=3,
+                        byte_size=11,
+                        sha256="a" * 64,
+                    ),
+                ]
+            ),
+        )
+        loaded_multimodal = await message_repository.load(thread.id, limit=10)
+        multimodal = loaded_multimodal[-1]
+        assert multimodal.kind == "multimodal"
+        assert multimodal.content["text"] == "what is this?"
+        assert multimodal.content["images"][0]["data"] == b"image-bytes"
+        async with sessions() as session:
+            asset = await session.scalar(select(AgentMediaAssetRecord))
+        assert asset is not None
+        assert asset.byte_size == 11
+        assert asset.data == b"image-bytes"
         assert await thread_repository.save_summary(
             thread.id,
             "question and answer",

@@ -25,6 +25,8 @@ class ProgressKind(StrEnum):
     """Stable lifecycle events understood by presentation adapters."""
 
     ACCEPTED = "accepted"
+    MEDIA_LOADING = "media_loading"
+    MEDIA_READY = "media_ready"
     THINKING = "thinking"
     MODEL_RETRY = "model_retry"
     TEXT_RESET = "text_reset"
@@ -74,6 +76,8 @@ class ConversationProgressEvent:
     output_tokens: int | None = None
     model_requests: int | None = None
     tool_calls: int | None = None
+    image_count: int | None = None
+    image_bytes: int | None = None
     retry_attempt: int | None = None
     retry_max_attempts: int | None = None
     retry_delay_seconds: float | None = None
@@ -158,6 +162,8 @@ class ConversationProgressEvent:
             self.output_tokens,
             self.model_requests,
             self.tool_calls,
+            self.image_count,
+            self.image_bytes,
         )
         if self.kind is not ProgressKind.COMPLETED and any(
             value is not None for value in statistics

@@ -14,6 +14,7 @@ from cywl_oopz.core.health import HealthRegistry, HealthState
 from cywl_oopz.core.observability import exception_kind, opaque_ref
 from cywl_oopz.features.chat.progress import ProgressSink, RunTraceSink
 
+from .input import AgentUserInput
 from .models import (
     AgentIdentity,
     AgentMessage,
@@ -46,6 +47,7 @@ class AgentRunSpec:
     limits: AgentRunLimits
     context: tuple[AgentMessage, ...]
     skill_scope: AgentSkillRunScope | None = field(default=None, compare=False, repr=False)
+    user_input: AgentUserInput | None = field(default=None, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         if not self.prompt.strip():
@@ -99,6 +101,7 @@ class AgentRunService:
             enabled_tools=spec.enabled_tools,
             limits=spec.limits,
             skill_scope=spec.skill_scope,
+            user_input=spec.user_input,
         )
         run_ref = opaque_ref(str(run_id))
         conversation_ref = opaque_ref(
@@ -129,11 +132,19 @@ class AgentRunService:
                     exception_kind(exc),
                 )
         try:
-            await self._messages.append(
-                spec.thread.id,
-                run_id,
-                (AgentMessage("user", "text", {"text": spec.prompt}),),
-            )
+            append_user_input = getattr(self._messages, "append_user_input", None)
+            if (
+                spec.user_input is not None
+                and spec.user_input.has_images
+                and callable(append_user_input)
+            ):
+                await append_user_input(spec.thread.id, run_id, spec.user_input)
+            else:
+                await self._messages.append(
+                    spec.thread.id,
+                    run_id,
+                    (AgentMessage("user", "text", {"text": spec.prompt}),),
+                )
         except asyncio.CancelledError:
             await self._finish_after_interrupt(
                 state,
@@ -324,7 +335,7 @@ class AgentRunService:
         try:
             await self._runs.finish(
                 state.finish(result.stop_reason, datetime.now(UTC)),
-                usage=self._usage(result),
+                usage=self._usage(result, user_input=spec.user_input),
             )
         except asyncio.CancelledError:
             await self._finish_after_interrupt(
@@ -389,13 +400,21 @@ class AgentRunService:
             )
 
     @staticmethod
-    def _usage(result: AgentRunResult) -> dict[str, object]:
-        return {
+    def _usage(
+        result: AgentRunResult,
+        *,
+        user_input: AgentUserInput | None = None,
+    ) -> dict[str, object]:
+        usage: dict[str, object] = {
             "input_tokens": result.input_tokens,
             "output_tokens": result.output_tokens,
             "model_requests": result.model_requests,
             "tool_calls": result.tool_calls,
         }
+        if user_input is not None and user_input.has_images:
+            usage["image_count"] = len(user_input.images)
+            usage["image_bytes"] = sum(image.actual_byte_size for image in user_input.images)
+        return usage
 
     def _mark_health(self, state: HealthState, detail: str) -> None:
         if self._health is not None:

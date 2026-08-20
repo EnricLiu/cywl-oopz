@@ -26,7 +26,7 @@ from cywl_oopz.features.admin.recall import (
 )
 from cywl_oopz.features.admin.references import ReferencedMessageResolver
 from cywl_oopz.features.chat.models import ConversationKey
-from cywl_oopz.features.chat.tasks import OutboundChatTaskCanceller
+from cywl_oopz.features.chat.tasks import ChatTaskSupervisor, OutboundChatTaskCanceller
 from cywl_oopz.integrations.oopz.message_recall import (
     OopzBotMessageRecallGateway,
     OopzRecentBotMessageLookup,
@@ -242,6 +242,54 @@ async def test_recall_service_orders_dismiss_cancel_transport_and_state() -> Non
     assert events == ["get", "dismiss", "cancel", "recall", "mark"]
     assert repository.current is not None
     assert repository.current.state is OutboundMessageState.RECALLED
+
+
+@pytest.mark.asyncio
+async def test_recalling_historical_message_preserves_current_conversation_task() -> None:
+    events: list[str] = []
+    repository = ReceiptRepository(receipt(), events)
+    tasks = ChatTaskSupervisor()
+    key = ConversationKey("channel", "area", "channel", "person")
+    started = asyncio.Event()
+    release = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def current_agent_loop() -> None:
+        started.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    assert tasks.start(key, current_agent_loop())
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    class HistoricalPresentation:
+        async def dismiss(self, message_id: str) -> bool:
+            del message_id
+            events.append("dismiss")
+            return False
+
+    service = MessageRecallService(
+        ReferencedMessageResolver(repository, RecentLookup(), "bot"),
+        repository,
+        HistoricalPresentation(),
+        OutboundChatTaskCanceller(tasks),
+        SequenceAction("recall", events),
+    )
+
+    outcome = await service.recall("bot-message", ADDRESS)
+
+    assert outcome is MessageRecallOutcome.RECALLED
+    assert events == ["get", "dismiss", "recall", "mark"]
+    assert repository.current is not None
+    assert repository.current.state is OutboundMessageState.RECALLED
+    assert tasks.has_active(key)
+    assert not cancelled.is_set()
+
+    release.set()
+    await tasks.wait(key)
 
 
 @pytest.mark.asyncio

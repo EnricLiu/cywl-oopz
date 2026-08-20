@@ -7,6 +7,8 @@ from enum import StrEnum
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from cywl_oopz.features.agent.input import AgentUserInput
+
     from .responses import CommandResponder
 
 
@@ -163,6 +165,7 @@ class CommandRequest:
     text: CommandText | None = None
     target: CommandTarget | None = None
     mentions: tuple[CommandMention, ...] = ()
+    user_input: AgentUserInput | None = None
 
     def __post_init__(self) -> None:
         if self.trigger is CommandTrigger.TEXT and self.text is None:

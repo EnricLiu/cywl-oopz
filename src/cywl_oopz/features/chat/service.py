@@ -6,9 +6,15 @@ import logging
 import time
 from datetime import UTC, datetime, timedelta
 
-from cywl_oopz.core.errors import AuthorizationError, FeatureDisabledError, ProviderError
+from cywl_oopz.core.errors import (
+    AuthorizationError,
+    FeatureDisabledError,
+    ProviderError,
+    UserRequestError,
+)
 from cywl_oopz.core.health import HealthRegistry, HealthState
 from cywl_oopz.core.observability import exception_kind, opaque_ref
+from cywl_oopz.features.agent.input import AgentUserInput
 from cywl_oopz.settings import ChatSettings
 
 from .history import HistoryTrimmer
@@ -66,11 +72,17 @@ class ChatService:
         key: ConversationKey,
         prompt: str,
         *,
+        user_input: AgentUserInput | None = None,
         invocation: ChatInvocation | None = None,
         progress: ProgressSink | None = None,
     ) -> ChatResponse:
         """Answer one prompt while keeping the same session strictly ordered."""
         del invocation
+        if user_input is not None and user_input.has_images:
+            raise UserRequestError(
+                "image_model_unavailable",
+                "当前文字对话模型不支持图片，请切换到支持图片的模型后再试。",
+            )
         self._ensure_enabled()
         content = prompt.strip()
         if not content:

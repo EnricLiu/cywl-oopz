@@ -215,6 +215,11 @@ def test_agent_skill_catalog_settings_are_validated() -> None:
             "CYWL_AGENT_MAX_RESOURCES_PER_SKILL": "5",
             "CYWL_AGENT_MAX_ACCEPTED_SHARED_SKILLS": "4",
             "CYWL_AGENT_MAX_SKILL_SHARE_RECIPIENTS_PER_CALL": "3",
+            "CYWL_AGENT_MAX_INPUT_IMAGES": "3",
+            "CYWL_AGENT_MAX_INPUT_IMAGE_BYTES": "1048576",
+            "CYWL_AGENT_MAX_INPUT_IMAGE_TOTAL_BYTES": "2097152",
+            "CYWL_AGENT_MAX_INPUT_IMAGE_PIXELS": "12000000",
+            "CYWL_AGENT_MAX_INPUT_IMAGE_DOWNLOADS": "1",
         }
     )
 
@@ -230,6 +235,11 @@ def test_agent_skill_catalog_settings_are_validated() -> None:
     assert settings.agent.max_resources_per_skill == 5
     assert settings.agent.max_accepted_shared_skills == 4
     assert settings.agent.max_skill_share_recipients_per_call == 3
+    assert settings.agent.max_input_images == 3
+    assert settings.agent.max_input_image_bytes == 1_048_576
+    assert settings.agent.max_input_image_total_bytes == 2_097_152
+    assert settings.agent.max_input_image_pixels == 12_000_000
+    assert settings.agent.max_input_image_downloads == 1
 
 
 def test_agent_summary_and_memory_limits_are_consistent() -> None:

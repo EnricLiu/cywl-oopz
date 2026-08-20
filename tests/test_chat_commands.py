@@ -45,6 +45,7 @@ class FakeMessage:
     text: str = ""
     content: str = ""
     mention_list: tuple[object, ...] = ()
+    attachments: list[dict[str, object]] = field(default_factory=list)
 
 
 @dataclass
@@ -62,6 +63,18 @@ class FailingReplyContext(FakeContext):
     async def reply(self, text: str):
         del text
         raise RuntimeError("transport unavailable")
+
+
+class RecordingChatUseCase:
+    enabled = True
+
+    def __init__(self) -> None:
+        self.user_input = None
+
+    async def ask(self, key, prompt, *, user_input=None, invocation=None, progress=None):
+        del key, prompt, invocation, progress
+        self.user_input = user_input
+        return ChatResponse(content="answer", model="test")
 
 
 def context_for(message: FakeMessage, *, private: bool = False) -> FakeContext:
@@ -126,6 +139,33 @@ async def test_chat_and_new_commands_use_the_same_scoped_session(chat_settings) 
     assert await dispatch_command(router, reset_message, reset_context) is True
     assert reset_context.replies == ["已开始新的对话。"]
     assert repository.sessions == {}
+
+
+@pytest.mark.asyncio
+async def test_chat_command_forwards_projected_image_input() -> None:
+    service = RecordingChatUseCase()
+    router = CommandRouter("/")
+    router.register_definition(ChatCommand(service, ChatTaskSupervisor()).definition())
+    file_key = "/im/image.webp"
+    message = FakeMessage(
+        f"/chat ![IMAGEw454h454]({file_key})\n这是谁",
+        attachments=[
+            {
+                "attachmentType": "IMAGE",
+                "fileKey": file_key,
+                "url": "https://imimagecdn.oopz.cn/im/image.webp?sign=redacted",
+                "fileSize": 1234,
+                "hash": "hash-value",
+                "width": 454,
+                "height": 454,
+            }
+        ],
+    )
+
+    assert await dispatch_command(router, message, context_for(message)) is True
+    assert service.user_input is not None
+    assert service.user_input.has_images is True
+    assert service.user_input.text == "这是谁"
 
 
 @pytest.mark.asyncio

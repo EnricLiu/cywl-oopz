@@ -19,6 +19,7 @@ from cywl_oopz.commands.models import (
 from cywl_oopz.commands.parsing import CommandTextParser
 
 from .command_responses import OopzCommandResponder
+from .conversation_input import OopzConversationInputFactory
 
 
 class OopzCommandRequestFactory:
@@ -28,9 +29,13 @@ class OopzCommandRequestFactory:
         self,
         parser: CommandTextParser,
         reference_projector: Callable[[object], object | None] | None = None,
+        conversation_input_factory: OopzConversationInputFactory | None = None,
     ) -> None:
         self._parser = parser
         self._reference_projector = reference_projector
+        self._conversation_input_factory = (
+            conversation_input_factory or OopzConversationInputFactory()
+        )
 
     def from_message(self, message: Any, context: Any) -> CommandRequest | None:
         """Read raw OOPZ text once and retain structured message metadata."""
@@ -65,6 +70,16 @@ class OopzCommandRequestFactory:
             )
         )
         reference_id = str(getattr(message, "reference_message_id", "")).strip()
+        user_input = None
+        if text.name == "chat":
+            try:
+                user_input = self._conversation_input_factory.from_message(
+                    message,
+                    source_text=text.raw_tail,
+                )
+            except ValueError:
+                # ChatArgumentsParser retains the existing, more precise empty-prompt error.
+                user_input = None
         return CommandRequest(
             trigger=CommandTrigger.TEXT,
             actor=CommandActor(actor_id),
@@ -89,6 +104,7 @@ class OopzCommandRequestFactory:
                 else None
             ),
             mentions=self._mentions(message),
+            user_input=user_input,
         )
 
     @staticmethod

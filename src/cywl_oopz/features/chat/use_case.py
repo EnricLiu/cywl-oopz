@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from cywl_oopz.features.agent.input import AgentUserInput
+
 from .models import ChatInvocation, ChatResponse, ChatStatus, ConversationKey
 from .progress import ProgressSink
 
@@ -20,6 +22,7 @@ class ChatUseCase(Protocol):
         key: ConversationKey,
         prompt: str,
         *,
+        user_input: AgentUserInput | None = None,
         invocation: ChatInvocation | None = None,
         progress: ProgressSink | None = None,
     ) -> ChatResponse:

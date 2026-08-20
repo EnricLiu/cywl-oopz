@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from types import SimpleNamespace
 
 import pytest
+from oopz_sdk.models.message import Message
 
 from cywl_oopz.commands.catalog import CommandSpec
 from cywl_oopz.commands.definitions import CommandDefinition, PublicCommandAuthorization
@@ -37,6 +38,7 @@ class FakeMessage:
     reference_message_id: str = ""
     reference_message: object | None = None
     mention_list: list[object] = field(default_factory=list)
+    attachments: list[dict[str, object]] = field(default_factory=list)
 
 
 class FakeContext:
@@ -150,6 +152,74 @@ def test_oopz_factory_ignores_non_command_before_validating_metadata() -> None:
     )
 
     assert request is None
+
+
+def test_oopz_chat_command_projects_image_input_from_command_tail() -> None:
+    file_key = "/im/image.webp"
+    message = FakeMessage(
+        f"/chat ![IMAGEw454h454]({file_key})\n这是谁",
+        attachments=[
+            {
+                "attachmentType": "IMAGE",
+                "fileKey": file_key,
+                "url": "https://imimagecdn.oopz.cn/im/image.webp?sign=redacted",
+                "fileSize": 1234,
+                "hash": "hash-value",
+                "width": 454,
+                "height": 454,
+                "animated": False,
+            }
+        ],
+    )
+
+    request = OopzCommandRequestFactory(CommandTextParser("/")).from_message(
+        message,
+        FakeContext(message),
+    )
+
+    assert request is not None
+    assert request.text is not None
+    assert request.text.raw_tail == f"![IMAGEw454h454]({file_key})\n这是谁"
+    assert request.user_input is not None
+    assert request.user_input.has_images is True
+    assert request.user_input.text == "这是谁"
+
+
+def test_oopz_chat_command_drops_command_prefix_from_cached_sdk_segments() -> None:
+    file_key = "/im/image.webp"
+    message = Message.from_api(
+        {
+            "type": "TEXT",
+            "area": "area",
+            "channel": "channel",
+            "person": "actor",
+            "content": f"/chat ![IMAGEw454h454]({file_key})\n这是谁",
+            "text": f"/chat ![IMAGEw454h454]({file_key})\n这是谁",
+            "attachments": [
+                {
+                    "attachmentType": "IMAGE",
+                    "fileKey": file_key,
+                    "url": "https://imimagecdn.oopz.cn/im/image.webp?sign=redacted",
+                    "fileSize": 1234,
+                    "hash": "hash-value",
+                    "width": 454,
+                    "height": 454,
+                }
+            ],
+        }
+    )
+    # Populate the SDK cached property with the complete message before command projection.
+    assert any(segment.type == "image" for segment in message.segments)
+
+    request = OopzCommandRequestFactory(CommandTextParser("/")).from_message(
+        message,
+        FakeContext(message),
+    )
+
+    assert request is not None
+    assert request.user_input is not None
+    assert request.user_input.text == "这是谁"
+    assert request.user_input.has_images is True
 
 
 @pytest.mark.asyncio

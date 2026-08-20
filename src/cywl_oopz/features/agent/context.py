@@ -131,6 +131,7 @@ class AgentContextBuilder:
             else ()
         )
         retained = self.trim_history(history) if include_history else ()
+        retained = self.trim_history_images(retained) if include_history else ()
         context.extend(retained)
         logger.debug(
             "Agent context built: thread=%s conversation=%s skills=%s summary=%s memory=%s "
@@ -193,3 +194,73 @@ class AgentContextBuilder:
         while filtered and filtered[0].role != "user":
             filtered.pop(0)
         return tuple(filtered)
+
+    def trim_history_images(
+        self,
+        history: tuple[AgentMessage, ...],
+    ) -> tuple[AgentMessage, ...]:
+        """Keep historical image bytes within bounded context budgets.
+
+        Text and image metadata remain available when a binary asset is omitted;
+        the provider adapter can then explain that the historical image was not
+        included in this context window instead of receiving an oversized request.
+        """
+        image_count = 0
+        image_bytes = 0
+        image_pixels = 0
+        bounded: list[AgentMessage] = []
+        for message in history:
+            if message.kind != "multimodal":
+                bounded.append(message)
+                continue
+            content = dict(message.content)
+            raw_images = content.get("images")
+            if not isinstance(raw_images, list):
+                bounded.append(message)
+                continue
+            kept: list[dict[str, object]] = []
+            omitted = 0
+            for raw_image in raw_images:
+                if not isinstance(raw_image, dict):
+                    continue
+                data = raw_image.get("data")
+                try:
+                    byte_size = int(
+                        raw_image.get("byte_size", len(data) if isinstance(data, bytes) else 0)
+                    )
+                    width = int(raw_image.get("width", 0) or 0)
+                    height = int(raw_image.get("height", 0) or 0)
+                except (TypeError, ValueError):
+                    byte_size = width = height = 0
+                fits = (
+                    isinstance(data, bytes)
+                    and image_count < self._settings.max_history_images
+                    and image_bytes + byte_size <= self._settings.max_history_image_bytes
+                    and image_pixels + width * height <= self._settings.max_history_image_pixels
+                )
+                metadata = dict(raw_image)
+                if fits:
+                    kept.append(metadata)
+                    image_count += 1
+                    image_bytes += byte_size
+                    image_pixels += width * height
+                else:
+                    metadata.pop("data", None)
+                    omitted += 1
+                    kept.append(metadata)
+            if omitted:
+                text = str(content.get("text", "")).strip()
+                suffix = f"[历史图片已省略 {omitted} 张]"
+                content["text"] = f"{text}\n{suffix}".strip()
+            content["images"] = kept
+            bounded.append(
+                AgentMessage(
+                    message.role,
+                    message.kind,
+                    content,
+                    message.input_tokens,
+                    message.output_tokens,
+                    message.sequence,
+                )
+            )
+        return tuple(bounded)

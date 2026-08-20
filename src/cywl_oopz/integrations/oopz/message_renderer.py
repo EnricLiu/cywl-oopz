@@ -207,6 +207,7 @@ class OopzMessageRenderer:
             header = {
                 DisplayPhase.CREATED: "✨ **初音未来 正在准备回答…**",
                 DisplayPhase.ACCEPTED: "✨ **初音未来 正在准备回答…**",
+                DisplayPhase.MEDIA_LOADING: "🖼️ **初音未来 正在读取图片…**",
                 DisplayPhase.THINKING: "♪ **初音未来 正在思考…**",
                 DisplayPhase.TOOL_RUNNING: "🛠 **初音未来 正在处理…**",
                 DisplayPhase.DRAFTING: "🎤 **初音未来 正在组织回答…**",
@@ -408,6 +409,11 @@ class OopzMessageRenderer:
             statistics.append(f"{state.elapsed_seconds:.1f}s")
         if state.tool_calls is not None:
             statistics.append(f"{state.tool_calls} 次工具")
+        if state.image_count:
+            image_stat = f"{state.image_count} 张图"
+            if state.image_bytes:
+                image_stat += f"/{OopzMessageRenderer._compact_bytes(state.image_bytes)}"
+            statistics.append(image_stat)
         if state.provider_retry_count:
             statistics.append(f"{state.provider_retry_count} 次重试")
         if state.input_tokens is not None or state.output_tokens is not None:
@@ -422,6 +428,13 @@ class OopzMessageRenderer:
             return str(value)
         rendered = f"{value / 1000:.1f}".rstrip("0").rstrip(".")
         return f"{rendered}k"
+
+    @staticmethod
+    def _compact_bytes(value: int) -> str:
+        if value < 1024 * 1024:
+            return f"{max(value / 1024, 0.1):.1f}KB"
+        rendered = f"{value / (1024 * 1024):.1f}".rstrip("0").rstrip(".")
+        return f"{rendered}MB"
 
     def _render_terminal(self, header: str, message: str) -> str:
         prefix = f"{header}\n"

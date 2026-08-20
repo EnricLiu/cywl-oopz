@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
@@ -14,6 +14,7 @@ from cywl_oopz.core.errors import (
     ProviderTimeoutError,
 )
 from cywl_oopz.core.lifecycle import ModelSelectionSource
+from cywl_oopz.features.agent.input import AgentUserInput, ImageInputPart, TextInputPart
 from cywl_oopz.features.agent.models import (
     AgentIdentity,
     AgentMessage,
@@ -164,6 +165,30 @@ async def test_agent_run_service_persists_isolated_run_messages_usage_and_heartb
         "tool_calls": 1,
     }
     assert len(runs.heartbeats) >= 2
+
+
+@pytest.mark.asyncio
+async def test_agent_run_service_records_image_usage() -> None:
+    runs = RecordingRuns()
+    service = AgentRunService(
+        ScriptedEngine(AgentRunResult("完成", AgentStopReason.COMPLETED)),
+        runs,
+        RecordingMessages(),
+    )
+    spec = replace(
+        run_spec(),
+        user_input=AgentUserInput.from_parts(
+            [
+                TextInputPart("请看图"),
+                ImageInputPart(data=b"image", media_type="image/png", byte_size=5),
+            ]
+        ),
+    )
+
+    outcome = await service.run(spec)
+
+    assert runs.usages[outcome.run_id]["image_count"] == 1
+    assert runs.usages[outcome.run_id]["image_bytes"] == 5
 
 
 @pytest.mark.asyncio

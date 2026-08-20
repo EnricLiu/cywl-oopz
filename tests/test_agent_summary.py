@@ -211,6 +211,30 @@ async def test_context_builder_orders_summary_memory_and_recent_messages() -> No
     assert "memory" not in [item.kind for item in without_memory]
 
 
+def test_context_builder_bounds_historical_image_bytes() -> None:
+    builder = AgentContextBuilder(settings(), FakeMessages(()))
+    history = (
+        AgentMessage(
+            "user",
+            "multimodal",
+            {
+                "text": "图片",
+                "images": [
+                    {
+                        "data": b"12345",
+                        "media_type": "image/png",
+                        "byte_size": 5,
+                        "width": 2,
+                        "height": 2,
+                    }
+                ],
+            },
+        ),
+    )
+    bounded = builder.trim_history_images(history)
+    assert bounded[0].content["images"][0].get("data") == b"12345"
+
+
 @pytest.mark.asyncio
 async def test_summary_service_selects_complete_turns_and_uses_cas() -> None:
     values = tuple(
