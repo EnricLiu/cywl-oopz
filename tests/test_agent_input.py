@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from oopz_sdk.models.message import Message
+
 from cywl_oopz.features.agent.input import IMAGE_ONLY_PROMPT, AgentUserInput, ImageInputPart
 from cywl_oopz.integrations.oopz.conversation_input import OopzConversationInputFactory
-from oopz_sdk.models.message import Message
 
 
 def _message(*, text: str, attachments: list[dict], mentions: list[dict] | None = None) -> Message:

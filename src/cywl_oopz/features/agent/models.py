@@ -19,6 +19,7 @@ from cywl_oopz.core.lifecycle import (
 from cywl_oopz.features.chat.models import ConversationKey
 
 if TYPE_CHECKING:
+    from cywl_oopz.features.agent.input import AgentUserInput
     from cywl_oopz.features.agent.skills.scope import AgentSkillRunScope
 
 
@@ -235,9 +236,10 @@ class AgentRunRequest:
         compare=False,
         repr=False,
     )
+    user_input: AgentUserInput | None = field(default=None, compare=False, repr=False)
 
     def __post_init__(self) -> None:
-        if not self.prompt.strip():
+        if not self.prompt.strip() and self.user_input is None:
             raise ValueError("Agent prompt must not be empty")
 
 

@@ -15,7 +15,15 @@ class OopzConversationInputFactory:
     def from_message(self, message: Any) -> AgentUserInput:
         """Convert text and image segments without downloading external media."""
         parts: list[TextInputPart | ImageInputPart] = []
-        for segment in getattr(message, "segments", ()):
+        segments = getattr(message, "segments", None)
+        if segments is None:
+            text = str(
+                getattr(message, "plain_text", "")
+                or getattr(message, "text", "")
+                or getattr(message, "content", "")
+            )
+            return AgentUserInput.from_parts([TextInputPart(text)])
+        for segment in segments:
             if isinstance(segment, Text):
                 text = segment.plain_text or segment.text
                 if text.strip():

@@ -12,10 +12,8 @@ from dataclasses import dataclass, field
 from typing import ClassVar
 from uuid import UUID
 
-
 IMAGE_ONLY_PROMPT = (
-    "请查看用户附带的图片，并根据图片内容自然回应；"
-    "如果用户没有提出问题，先简要描述你看到的内容。"
+    "请查看用户附带的图片，并根据图片内容自然回应；如果用户没有提出问题，先简要描述你看到的内容。"
 )
 
 
@@ -41,8 +39,8 @@ class ImageInputPart:
     byte_size: int = 0
     sha256: str = ""
     asset_id: UUID | None = None
-    source_file_key: str = ""
-    source_url: str = ""
+    source_file_key: str = field(default="", repr=False)
+    source_url: str = field(default="", repr=False)
     animated: bool = False
 
     _MAX_SOURCE_URL_LENGTH: ClassVar[int] = 4096
@@ -91,12 +89,10 @@ class AgentUserInput:
             raise ValueError("Implicit image prompt is only valid for image-only input")
 
     @classmethod
-    def from_parts(cls, parts: list[InputPart] | tuple[InputPart, ...]) -> "AgentUserInput":
+    def from_parts(cls, parts: list[InputPart] | tuple[InputPart, ...]) -> AgentUserInput:
         """Build an input while dropping empty text-only SDK segments."""
         normalized = tuple(
-            part
-            for part in parts
-            if not isinstance(part, TextInputPart) or part.text.strip()
+            part for part in parts if not isinstance(part, TextInputPart) or part.text.strip()
         )
         if not normalized:
             raise ValueError("Agent input must contain text or an image")
@@ -127,6 +123,6 @@ class AgentUserInput:
     def resolved_images(self) -> bool:
         return all(part.resolved for part in self.images)
 
-    def with_parts(self, parts: tuple[InputPart, ...]) -> "AgentUserInput":
+    def with_parts(self, parts: tuple[InputPart, ...]) -> AgentUserInput:
         """Return a copy retaining the image-only prompt marker."""
         return AgentUserInput(parts=parts, implicit_prompt=self.implicit_prompt)

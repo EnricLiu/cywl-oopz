@@ -8,6 +8,7 @@ from pydantic_ai.messages import ModelMessage
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from cywl_oopz.core.errors import AgentInternalError
+from cywl_oopz.features.agent.input import AgentUserInput, ImageInputPart, TextInputPart
 from cywl_oopz.features.agent.models import (
     AgentIdentity,
     AgentMessage,
@@ -66,6 +67,26 @@ def engine_request() -> AgentRunRequest:
         enabled_tools=(),
         limits=AgentRunLimits(),
     )
+
+
+def test_engine_encodes_current_image_input_as_binary_content() -> None:
+    request = replace(
+        engine_request(),
+        prompt="look",
+        user_input=AgentUserInput.from_parts(
+            [
+                TextInputPart("look"),
+                ImageInputPart(data=b"png-bytes", media_type="image/png", byte_size=9),
+            ]
+        ),
+    )
+
+    content = PydanticAiAgentEngine._current_input_content(request)
+
+    assert isinstance(content, list)
+    assert content[0] == "look"
+    assert content[1].data == b"png-bytes"
+    assert content[1].media_type == "image/png"
 
 
 @pytest.mark.asyncio

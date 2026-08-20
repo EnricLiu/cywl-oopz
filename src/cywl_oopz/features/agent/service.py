@@ -8,7 +8,7 @@ import time
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
-from cywl_oopz.core.errors import ProviderSelectionError
+from cywl_oopz.core.errors import ProviderSelectionError, UserRequestError
 from cywl_oopz.core.health import HealthRegistry, HealthState
 from cywl_oopz.core.observability import exception_kind, opaque_ref
 from cywl_oopz.core.tasks import TaskSupervisor
@@ -31,6 +31,8 @@ from cywl_oopz.settings import AgentSettings, ChatSettings
 
 from .catalog import ReloadableProviderCatalog
 from .context import AgentContextBuilder
+from .input import AgentUserInput, TextInputPart
+from .media import AgentMediaIngestService
 from .models import (
     AgentIdentity,
     AgentRunLimits,
@@ -77,6 +79,7 @@ class AgentConversationService:
         context_builder: AgentContextBuilder | None = None,
         summary_service: ThreadSummaryService | None = None,
         summary_tasks: TaskSupervisor[UUID] | None = None,
+        media_ingest: AgentMediaIngestService | None = None,
         *,
         rate_limits: RateLimitService | None = None,
         locks: ConversationLockPool | None = None,
@@ -95,6 +98,7 @@ class AgentConversationService:
         self._context_builder = context_builder or AgentContextBuilder(settings, messages)
         self._summary_service = summary_service
         self._summary_tasks = summary_tasks
+        self._media_ingest = media_ingest
         self._required_capabilities = (
             frozenset({ModelCapability.TOOL_CALLING}) if settings.enabled_tools else frozenset()
         )
@@ -116,20 +120,23 @@ class AgentConversationService:
         key: ConversationKey,
         prompt: str,
         *,
+        user_input: AgentUserInput | None = None,
         invocation: ChatInvocation | None = None,
         progress: ProgressSink | None = None,
     ) -> ChatResponse:
         """Run one bounded Agent turn with durable run, message, and tool records."""
         started_at = time.perf_counter()
-        content = prompt.strip()
+        user_input = user_input or AgentUserInput.from_parts([TextInputPart(prompt)])
+        content = user_input.prompt.strip()
         if not content:
             raise ValueError("Agent prompt must not be empty")
         self._input_validator.validate_input(content)
         conversation = self._conversation_ref(key)
         logger.info(
-            "Agent request received: conversation=%s prompt_characters=%s",
+            "Agent request received: conversation=%s prompt_characters=%s images=%s",
             conversation,
             len(content),
+            len(user_input.images),
         )
         await emit_progress(progress, ConversationProgressEvent(ProgressKind.ACCEPTED))
 
@@ -137,10 +144,30 @@ class AgentConversationService:
             async with await self._rate_limits.acquire(key):
                 now = datetime.now(UTC)
                 thread = await self._get_or_create_thread(key, now)
-                selection = await self._selection.resolve(
-                    key,
-                    required_capabilities=self._required_capabilities,
-                )
+                required_capabilities = self._required_capabilities
+                if user_input.has_images:
+                    required_capabilities = required_capabilities | frozenset(
+                        {ModelCapability.IMAGE_INPUT}
+                    )
+                try:
+                    selection = await self._selection.resolve(
+                        key,
+                        required_capabilities=required_capabilities,
+                    )
+                except ProviderSelectionError as exc:
+                    if user_input.has_images:
+                        raise UserRequestError(
+                            "image_model_unavailable",
+                            "当前没有可用的图片理解模型，请切换支持图片的模型后再试。",
+                        ) from exc
+                    raise
+                if user_input.has_images:
+                    if self._media_ingest is None:
+                        raise UserRequestError(
+                            "image_input_unavailable",
+                            "图片输入暂时不可用，请稍后再试。",
+                        )
+                    user_input = await self._media_ingest.ingest(user_input, progress)
                 identity = AgentIdentity(
                     key.person_id,
                     key,
@@ -201,6 +228,7 @@ class AgentConversationService:
                         limits=limits,
                         context=context,
                         skill_scope=skill_scope,
+                        user_input=user_input,
                     ),
                     progress,
                 )

@@ -8,6 +8,7 @@ from collections.abc import Coroutine
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import httpx
 from oopz_sdk import OopzBot
 from oopz_sdk.events.context import EventContext
 from oopz_sdk.models import Message as OopzMessage
@@ -70,6 +71,7 @@ from .features.agent.delegation.service import (
     VoiceDelegatedTaskService,
 )
 from .features.agent.direct_tools import DirectToolService
+from .features.agent.media import AgentImagePolicy, AgentMediaIngestService
 from .features.agent.memory import MemoryService
 from .features.agent.memory_repository import SqlAlchemyMemoryRepository
 from .features.agent.models import ModelCapability
@@ -183,6 +185,7 @@ from .integrations.oopz.chat_invocation import OopzChatInvocationFactory
 from .integrations.oopz.command_requests import OopzCommandRequestFactory
 from .integrations.oopz.diagnostic_renderer import OopzAgentDiagnosticRenderer
 from .integrations.oopz.editable_messages import OopzEditableMessageGateway
+from .integrations.oopz.image_loader import OopzImageContentLoader
 from .integrations.oopz.master_audio import OopzMasterPcmOutputFactory
 from .integrations.oopz.message_recall import (
     OopzBotMessageRecallGateway,
@@ -308,6 +311,20 @@ class BotApplication:
         self.agent_messages = SqlAlchemyAgentMessageRepository(self.database.session_factory)
         self.agent_memory_repository = SqlAlchemyMemoryRepository(self.database.session_factory)
         self.agent_memory = MemoryService(settings.agent, self.agent_memory_repository)
+        self.agent_image_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(10.0, connect=3.0),
+            follow_redirects=False,
+        )
+        self.agent_media_ingest = AgentMediaIngestService(
+            OopzImageContentLoader(self.agent_image_client),
+            AgentImagePolicy(
+                max_images=settings.agent.max_input_images,
+                max_image_bytes=settings.agent.max_input_image_bytes,
+                max_total_bytes=settings.agent.max_input_image_total_bytes,
+                max_pixels=settings.agent.max_input_image_pixels,
+                max_parallel_downloads=settings.agent.max_input_image_downloads,
+            ),
+        )
         self.agent_context = AgentContextBuilder(
             settings.agent,
             self.agent_messages,
@@ -612,6 +629,7 @@ class BotApplication:
             context_builder=self.agent_context,
             summary_service=self.agent_summary_service,
             summary_tasks=self.agent_summary_tasks,
+            media_ingest=self.agent_media_ingest,
             health=self.health,
         )
         self._provider = self._create_chat_provider()
@@ -1015,6 +1033,7 @@ class BotApplication:
             if self.web_search is not None:
                 await self.web_search.aclose()
             await self.agent_engine.aclose()
+            await self.agent_image_client.aclose()
             await self._provider.aclose()
             await self.database.close()
             logger.info("Application shutdown completed")

@@ -13,6 +13,7 @@ class DisplayPhase(StrEnum):
 
     CREATED = "created"
     ACCEPTED = "accepted"
+    MEDIA_LOADING = "media_loading"
     THINKING = "thinking"
     RETRYING = "retrying"
     TOOL_RUNNING = "tool_running"
@@ -101,6 +102,10 @@ class AgentLoopReducer:
         kind = event.kind
         if kind is ProgressKind.ACCEPTED:
             return replace(state, phase=DisplayPhase.ACCEPTED)
+        if kind is ProgressKind.MEDIA_LOADING:
+            return replace(state, phase=DisplayPhase.MEDIA_LOADING)
+        if kind is ProgressKind.MEDIA_READY:
+            return replace(state, phase=DisplayPhase.THINKING)
         if kind is ProgressKind.THINKING:
             return replace(
                 state,

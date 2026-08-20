@@ -14,6 +14,7 @@ from cywl_oopz.core.health import HealthRegistry, HealthState
 from cywl_oopz.core.observability import exception_kind, opaque_ref
 from cywl_oopz.features.chat.progress import ProgressSink, RunTraceSink
 
+from .input import AgentUserInput
 from .models import (
     AgentIdentity,
     AgentMessage,
@@ -46,6 +47,7 @@ class AgentRunSpec:
     limits: AgentRunLimits
     context: tuple[AgentMessage, ...]
     skill_scope: AgentSkillRunScope | None = field(default=None, compare=False, repr=False)
+    user_input: AgentUserInput | None = field(default=None, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         if not self.prompt.strip():
@@ -99,6 +101,7 @@ class AgentRunService:
             enabled_tools=spec.enabled_tools,
             limits=spec.limits,
             skill_scope=spec.skill_scope,
+            user_input=spec.user_input,
         )
         run_ref = opaque_ref(str(run_id))
         conversation_ref = opaque_ref(

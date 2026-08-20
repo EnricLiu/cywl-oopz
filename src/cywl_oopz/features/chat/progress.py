@@ -25,6 +25,8 @@ class ProgressKind(StrEnum):
     """Stable lifecycle events understood by presentation adapters."""
 
     ACCEPTED = "accepted"
+    MEDIA_LOADING = "media_loading"
+    MEDIA_READY = "media_ready"
     THINKING = "thinking"
     MODEL_RETRY = "model_retry"
     TEXT_RESET = "text_reset"

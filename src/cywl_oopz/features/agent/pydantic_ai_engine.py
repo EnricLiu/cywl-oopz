@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from pydantic_ai import (
     Agent,
     AgentRunResultEvent,
+    BinaryContent,
     ModelAPIError,
     ModelHTTPError,
     ModelRetry,
@@ -41,6 +42,7 @@ from cywl_oopz.core.errors import (
 from cywl_oopz.core.observability import exception_kind, opaque_ref
 from cywl_oopz.features.chat.progress import ProgressSink, emit_progress
 
+from .input import ImageInputPart, TextInputPart
 from .models import AgentMessage, AgentRunRequest, AgentRunResult, AgentStopReason
 from .progress import ConversationToolProgressReporter, PydanticAiProgressMapper
 from .provider_retry import bind_provider_retry_progress
@@ -175,13 +177,13 @@ class PydanticAiAgentEngine:
                 async with asyncio.timeout(request.limits.timeout_seconds):
                     if dependencies is None:
                         event_stream = agent.run_stream_events(
-                            request.prompt,
+                            self._current_input_content(request),
                             message_history=history,
                             usage_limits=usage_limits,
                         )
                     else:
                         event_stream = agent.run_stream_events(
-                            request.prompt,
+                            self._current_input_content(request),
                             deps=dependencies,
                             message_history=history,
                             usage_limits=usage_limits,
@@ -297,6 +299,25 @@ class PydanticAiAgentEngine:
         """Close registry-owned clients."""
         logger.debug("Closing Agent engine")
         await self._registry.aclose()
+
+    @staticmethod
+    def _current_input_content(request: AgentRunRequest) -> str | list[str | BinaryContent]:
+        user_input = request.user_input
+        if user_input is None:
+            return request.prompt
+        if user_input.has_images and not user_input.resolved_images:
+            raise AgentInternalError("Agent image input reached the provider unresolved")
+        content: list[str | BinaryContent] = []
+        if user_input.implicit_prompt:
+            content.append(user_input.prompt)
+        for part in user_input.parts:
+            if isinstance(part, TextInputPart):
+                content.append(part.text)
+            elif isinstance(part, ImageInputPart):
+                if part.data is None:
+                    raise AgentInternalError("Agent image input has no runtime bytes")
+                content.append(BinaryContent(data=part.data, media_type=part.media_type))
+        return content or request.prompt
 
     @staticmethod
     def _map_context(

@@ -207,6 +207,7 @@ class OopzMessageRenderer:
             header = {
                 DisplayPhase.CREATED: "✨ **初音未来 正在准备回答…**",
                 DisplayPhase.ACCEPTED: "✨ **初音未来 正在准备回答…**",
+                DisplayPhase.MEDIA_LOADING: "🖼️ **初音未来 正在读取图片…**",
                 DisplayPhase.THINKING: "♪ **初音未来 正在思考…**",
                 DisplayPhase.TOOL_RUNNING: "🛠 **初音未来 正在处理…**",
                 DisplayPhase.DRAFTING: "🎤 **初音未来 正在组织回答…**",

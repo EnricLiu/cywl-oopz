@@ -40,6 +40,8 @@ logger = logging.getLogger(__name__)
 _SEMANTIC_KINDS = frozenset(
     {
         ProgressKind.ACCEPTED,
+        ProgressKind.MEDIA_LOADING,
+        ProgressKind.MEDIA_READY,
         ProgressKind.THINKING,
         ProgressKind.MODEL_RETRY,
         ProgressKind.TEXT_RESET,

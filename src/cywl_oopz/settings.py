@@ -430,6 +430,11 @@ class AgentSettings:
     max_resources_per_skill: int = 8
     max_accepted_shared_skills: int = 8
     max_skill_share_recipients_per_call: int = 5
+    max_input_images: int = 4
+    max_input_image_bytes: int = 8 * 1024 * 1024
+    max_input_image_total_bytes: int = 16 * 1024 * 1024
+    max_input_image_pixels: int = 25_000_000
+    max_input_image_downloads: int = 2
 
     @property
     def enabled(self) -> bool:
@@ -625,6 +630,31 @@ class AgentSettings:
                 values,
                 "CYWL_AGENT_MAX_SKILL_SHARE_RECIPIENTS_PER_CALL",
                 5,
+            ),
+            max_input_images=_positive_integer(
+                values,
+                "CYWL_AGENT_MAX_INPUT_IMAGES",
+                4,
+            ),
+            max_input_image_bytes=_positive_integer(
+                values,
+                "CYWL_AGENT_MAX_INPUT_IMAGE_BYTES",
+                8 * 1024 * 1024,
+            ),
+            max_input_image_total_bytes=_positive_integer(
+                values,
+                "CYWL_AGENT_MAX_INPUT_IMAGE_TOTAL_BYTES",
+                16 * 1024 * 1024,
+            ),
+            max_input_image_pixels=_positive_integer(
+                values,
+                "CYWL_AGENT_MAX_INPUT_IMAGE_PIXELS",
+                25_000_000,
+            ),
+            max_input_image_downloads=_positive_integer(
+                values,
+                "CYWL_AGENT_MAX_INPUT_IMAGE_DOWNLOADS",
+                2,
             ),
         )
         if settings.summary_retain_messages >= settings.summary_trigger_messages:
