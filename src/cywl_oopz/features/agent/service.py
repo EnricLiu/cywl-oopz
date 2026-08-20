@@ -286,6 +286,12 @@ class AgentConversationService:
                     elapsed_seconds=time.perf_counter() - started_at,
                     model_requests=result.model_requests,
                     tool_calls=result.tool_calls,
+                    image_count=len(user_input.images) if user_input.has_images else None,
+                    image_bytes=(
+                        sum(image.actual_byte_size for image in user_input.images)
+                        if user_input.has_images
+                        else None
+                    ),
                 )
 
     async def clear(self, key: ConversationKey) -> None:

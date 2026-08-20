@@ -435,6 +435,9 @@ class AgentSettings:
     max_input_image_total_bytes: int = 16 * 1024 * 1024
     max_input_image_pixels: int = 25_000_000
     max_input_image_downloads: int = 2
+    max_history_images: int = 8
+    max_history_image_bytes: int = 16 * 1024 * 1024
+    max_history_image_pixels: int = 50_000_000
 
     @property
     def enabled(self) -> bool:
@@ -655,6 +658,21 @@ class AgentSettings:
                 values,
                 "CYWL_AGENT_MAX_INPUT_IMAGE_DOWNLOADS",
                 2,
+            ),
+            max_history_images=_positive_integer(
+                values,
+                "CYWL_AGENT_MAX_HISTORY_IMAGES",
+                8,
+            ),
+            max_history_image_bytes=_positive_integer(
+                values,
+                "CYWL_AGENT_MAX_HISTORY_IMAGE_BYTES",
+                16 * 1024 * 1024,
+            ),
+            max_history_image_pixels=_positive_integer(
+                values,
+                "CYWL_AGENT_MAX_HISTORY_IMAGE_PIXELS",
+                50_000_000,
             ),
         )
         if settings.summary_retain_messages >= settings.summary_trigger_messages:

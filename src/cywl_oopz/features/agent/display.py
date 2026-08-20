@@ -60,6 +60,8 @@ class AgentLoopViewState:
     output_tokens: int | None = None
     model_requests: int | None = None
     tool_calls: int | None = None
+    image_count: int | None = None
+    image_bytes: int | None = None
     completed_step_count: int = 0
     failed_step_count: int = 0
     provider_retry_count: int = 0
@@ -163,6 +165,8 @@ class AgentLoopReducer:
                 output_tokens=event.output_tokens,
                 model_requests=event.model_requests,
                 tool_calls=event.tool_calls,
+                image_count=event.image_count,
+                image_bytes=event.image_bytes,
                 terminal=True,
             )
         if kind is ProgressKind.FAILED:

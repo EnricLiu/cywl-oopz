@@ -70,6 +70,8 @@ def _diagnostic_snapshot(
         "output_tokens": state.output_tokens,
         "model_requests": state.model_requests,
         "tool_calls": state.tool_calls,
+        "image_count": state.image_count,
+        "image_bytes": state.image_bytes,
         "provider_retry_count": state.provider_retry_count,
         "provider_retries": provider_retries[-8:],
         "steps": [
@@ -136,6 +138,8 @@ class OopzPassiveAgentTraceSession:
                     output_tokens=response.output_tokens,
                     model_requests=response.model_requests,
                     tool_calls=response.tool_calls,
+                    image_count=response.image_count,
+                    image_bytes=response.image_bytes,
                 )
             )
         elif cancelled:
@@ -345,6 +349,8 @@ class OopzAgentLoopMessage:
                 output_tokens=response.output_tokens,
                 model_requests=response.model_requests,
                 tool_calls=response.tool_calls,
+                image_count=response.image_count,
+                image_bytes=response.image_bytes,
             )
         )
 
