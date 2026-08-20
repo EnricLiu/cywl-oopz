@@ -224,11 +224,14 @@ class AgentContextBuilder:
                 if not isinstance(raw_image, dict):
                     continue
                 data = raw_image.get("data")
-                byte_size = int(
-                    raw_image.get("byte_size", len(data) if isinstance(data, bytes) else 0)
-                )
-                width = int(raw_image.get("width", 0) or 0)
-                height = int(raw_image.get("height", 0) or 0)
+                try:
+                    byte_size = int(
+                        raw_image.get("byte_size", len(data) if isinstance(data, bytes) else 0)
+                    )
+                    width = int(raw_image.get("width", 0) or 0)
+                    height = int(raw_image.get("height", 0) or 0)
+                except (TypeError, ValueError):
+                    byte_size = width = height = 0
                 fits = (
                     isinstance(data, bytes)
                     and image_count < self._settings.max_history_images
