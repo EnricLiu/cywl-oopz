@@ -6,7 +6,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
-from .models import ConversationKey
+from cywl_oopz.conversation.models import ConversationKey
 
 
 @dataclass(slots=True)

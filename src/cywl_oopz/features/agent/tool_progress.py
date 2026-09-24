@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 from urllib.parse import urlsplit
 
-from cywl_oopz.features.chat.progress import (
+from cywl_oopz.conversation.progress import (
     TOOL_ITEM_MAX_CHARACTERS,
     TOOL_MAX_ITEMS,
     TOOL_MAX_PREVIEW_LINES,

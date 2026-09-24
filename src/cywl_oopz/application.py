@@ -5,10 +5,10 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Coroutine
+from contextlib import AsyncExitStack
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-import httpx
 from oopz_sdk import OopzBot
 from oopz_sdk.events.context import EventContext
 from oopz_sdk.models import Message as OopzMessage
@@ -17,12 +17,14 @@ from .commands.builtin import HelpCommand, PingCommand, StatusCommand
 from .commands.execution import CommandTaskSupervisor
 from .commands.parsing import CommandTextParser
 from .commands.router import CommandRouter
+from .composition.agent import build_agent
+from .composition.music import build_music
+from .composition.voice import build_voice
+from .composition.web import build_web
 from .core.errors import ConfigurationError, DatabaseError
 from .core.health import HealthRegistry, HealthState
 from .core.observability import exception_kind, opaque_ref
-from .core.tasks import TaskSupervisor
 from .features.access.administration import RoleAdministrationService
-from .features.access.agent_tools import AgentToolAuthorizationAdapter
 from .features.access.commands import RoleCommand, WhoAmICommand
 from .features.access.repository import SqlAlchemyRoleBindingRepository
 from .features.access.service import AuthorizationService
@@ -48,7 +50,6 @@ from .features.admin.reaction_commands import (
 from .features.admin.recall import MessageRecallService
 from .features.admin.references import ReferencedMessageResolver
 from .features.admin.repository import SqlAlchemyChannelInitializationRepository
-from .features.agent.catalog import ProviderCatalogAdminService, ReloadableProviderCatalog
 from .features.agent.commands import (
     AgentModelCommand,
     MemoryCommand,
@@ -57,91 +58,7 @@ from .features.agent.commands import (
     ToolCommand,
     ToolsCommand,
 )
-from .features.agent.context import AgentContextBuilder
-from .features.agent.delegation.mailbox import (
-    DelegatedTaskTextFallbackReconciler,
-    InProcessVoiceTaskCompletionNotifier,
-    VoiceTaskMailboxService,
-)
-from .features.agent.delegation.repository import SqlAlchemyDelegatedTaskRepository
-from .features.agent.delegation.runner import DelegatedAgentTaskRunner
-from .features.agent.delegation.scheduler import DelegatedTaskScheduler
-from .features.agent.delegation.service import (
-    InProcessDelegatedTaskWakeup,
-    VoiceDelegatedTaskService,
-)
-from .features.agent.direct_tools import DirectToolService
-from .features.agent.media import AgentImagePolicy, AgentMediaIngestService
-from .features.agent.memory import MemoryService
-from .features.agent.memory_repository import SqlAlchemyMemoryRepository
 from .features.agent.models import ModelCapability
-from .features.agent.pydantic_ai_engine import PydanticAiAgentEngine
-from .features.agent.registry import AgentModelRegistry
-from .features.agent.repository import (
-    SqlAlchemyAgentMessageRepository,
-    SqlAlchemyAgentRunRepository,
-    SqlAlchemyAgentThreadRepository,
-    SqlAlchemyModelSelectionRepository,
-    SqlAlchemyProviderCatalogRepository,
-    SqlAlchemyToolExecutionRepository,
-)
-from .features.agent.run_service import AgentRunService
-from .features.agent.selection import ProviderSelectionService
-from .features.agent.service import AgentConversationService
-from .features.agent.skills.availability import SkillAvailabilityService
-from .features.agent.skills.library import AgentSkillLibraryService
-from .features.agent.skills.library_tools import (
-    SKILL_LIBRARY_TOOL_NAMES,
-    skill_library_tools,
-)
-from .features.agent.skills.repository import SqlAlchemyAgentSkillRepository
-from .features.agent.skills.tools import LoadAgentSkillTool, ReadAgentSkillResourceTool
-from .features.agent.summarization import (
-    PydanticAiThreadSummarizer,
-    ThreadSummaryService,
-)
-from .features.agent.tools.builtin import (
-    GetAgentStatusTool,
-    GetChannelSettingsTool,
-    ReactToMessageTool,
-)
-from .features.agent.tools.executor import ToolExecutor
-from .features.agent.tools.music import (
-    ClearMusicQueueTool,
-    EnqueueMusicTool,
-    GetMusicQueueTool,
-    PauseMusicTool,
-    ResumeMusicTool,
-    SearchMusicCatalogTool,
-    SetMusicPlaybackModeTool,
-    SkipMusicTool,
-)
-from .features.agent.tools.playlists import (
-    AddMusicPlaylistTrackTool,
-    ClearMusicPlaylistTool,
-    CreateMusicPlaylistTool,
-    DeleteMusicPlaylistTool,
-    GetMusicPlaylistTool,
-    ImportNeteasePlaylistTool,
-    ListMusicPlaylistsTool,
-    LoadMusicPlaylistTool,
-    PreviewNeteasePlaylistTool,
-    RemoveMusicPlaylistTrackTool,
-    RenameMusicPlaylistTool,
-)
-from .features.agent.tools.policy import ToolAvailabilityService, ToolPolicy
-from .features.agent.tools.registry import ToolRegistry
-from .features.agent.tools.web import (
-    BrowserClickTool,
-    BrowserCloseTool,
-    BrowserFillTool,
-    BrowserOpenTool,
-    BrowserPressTool,
-    BrowserSnapshotTool,
-    BrowserWaitTool,
-    ReadWebPageTool,
-    SearchWebTool,
-)
 from .features.chat.commands import (
     CancelChatCommand,
     ChatCommand,
@@ -149,43 +66,27 @@ from .features.chat.commands import (
     ModelCommand,
     NewConversationCommand,
 )
-from .features.chat.models import ConversationKey
 from .features.chat.openai_compatible import OpenAICompatibleChatProvider
 from .features.chat.provider import ChatProvider, DisabledChatProvider
 from .features.chat.repository import SqlAlchemyConversationRepository
 from .features.chat.service import ChatService
 from .features.chat.tasks import ChatTaskSupervisor, OutboundChatTaskCanceller
-from .features.music.bilibili import BilibiliMusicProvider
-from .features.music.catalog import CompositeMusicCatalog, MusicProviderRegistry
 from .features.music.commands import MusicCommand
 from .features.music.errors import MusicSourceUnavailableError
 from .features.music.models import MusicSourceKind
-from .features.music.netease import NeteaseMusicProvider
-from .features.music.playlist_repository import SqlAlchemyMusicPlaylistRepository
-from .features.music.playlists import MusicPlaylistService
-from .features.music.service import MusicRequestService
-from .features.music.youtube import YouTubeMusicProvider
 from .features.voice.commands import VoiceCommand
-from .features.voice.repository import (
-    SqlAlchemyVoiceConfigurationRepository,
-    SqlAlchemyVoiceSessionRepository,
-)
-from .features.voice.runtime import RealtimeVoiceSessionRuntimeFactoryImpl
-from .features.voice.service import VoiceConversationService
-from .features.voice.task_tools import VoiceTaskControlTools
-from .features.web.browser import BrowserSessionManager
 from .features.web.errors import BrowserError
-from .features.web.service import WebSearchService
-from .integrations.media.ytdlp_runner import YtDlpCapabilityProbe, YtDlpProcessRunner
+from .integrations.media.ytdlp_runner import YtDlpCapabilityProbe
 from .integrations.oopz.active_presentations import ActivePresentationRegistry
 from .integrations.oopz.agent_presenter import OopzAgentPresenterFactory
 from .integrations.oopz.channel_catalog import OopzAreaChannelCatalog
 from .integrations.oopz.chat_handlers import AmbientChatHandler, MentionChatHandler
-from .integrations.oopz.chat_invocation import OopzChatInvocationFactory
+from .integrations.oopz.chat_invocation import (
+    OopzChatInvocationFactory,
+    conversation_key_from_context,
+)
 from .integrations.oopz.command_requests import OopzCommandRequestFactory
-from .integrations.oopz.diagnostic_renderer import OopzAgentDiagnosticRenderer
 from .integrations.oopz.editable_messages import OopzEditableMessageGateway
-from .integrations.oopz.image_loader import OopzImageContentLoader
 from .integrations.oopz.master_audio import OopzMasterPcmOutputFactory
 from .integrations.oopz.message_recall import (
     OopzBotMessageRecallGateway,
@@ -193,35 +94,24 @@ from .integrations.oopz.message_recall import (
     OopzReferencedMessageParser,
 )
 from .integrations.oopz.message_renderer import OopzMessageRenderer
-from .integrations.oopz.music import OopzMusicVoiceGateway
 from .integrations.oopz.reaction_commands import (
     OopzReactionCommandInvocationParser,
     OopzReactionCommandResponder,
 )
-from .integrations.oopz.reactions import OopzReactionGateway
-from .integrations.oopz.skill_sharing import OopzSkillShareNotifier
 from .integrations.oopz.tracked_context import TrackedMessageContext
 from .integrations.oopz.voice_capabilities import OopzVoiceCapabilityGate
 from .integrations.oopz.voice_channel_session import OopzVoiceChannelSessionManager
 from .integrations.oopz.voice_conversation import (
-    OopzConversationVoiceAccess,
     OopzVoiceCommandPresenter,
 )
 from .integrations.oopz.voice_media import OopzVoiceMediaGateway
-from .integrations.oopz.voice_task_notifications import OopzVoiceTaskTextGateway
-from .integrations.voice.provider_builder import ConfiguredVoiceProviderBuilder
-from .integrations.web.agent_browser_mcp import AgentBrowserMcpGateway
-from .integrations.web.duckduckgo import DuckDuckGoSearchGateway
 from .settings import (
     MUSIC_AGENT_TOOLS,
-    SKILL_AGENT_TOOLS,
-    SKILL_AUTHORING_AGENT_TOOLS,
     WEB_BROWSER_INTERACTION_TOOLS,
     WEB_BROWSER_READ_TOOLS,
     WEB_SEARCH_AGENT_TOOLS,
     AppSettings,
 )
-from .storage.channel_settings import SqlAlchemyChannelSettingsRepository
 from .storage.database import Database
 
 logger = logging.getLogger(__name__)
@@ -300,225 +190,30 @@ class BotApplication:
             self.command_parser,
             self.referenced_message_parser.parse,
         )
-        catalog_repository = SqlAlchemyProviderCatalogRepository(self.database.session_factory)
-        self.agent_catalog = ReloadableProviderCatalog(catalog_repository)
-        self.agent_catalog_admin = ProviderCatalogAdminService(
-            catalog_repository,
-            self.agent_catalog,
-        )
-        self.agent_threads = SqlAlchemyAgentThreadRepository(self.database.session_factory)
-        self.agent_runs = SqlAlchemyAgentRunRepository(self.database.session_factory)
-        self.agent_messages = SqlAlchemyAgentMessageRepository(self.database.session_factory)
-        self.agent_memory_repository = SqlAlchemyMemoryRepository(self.database.session_factory)
-        self.agent_memory = MemoryService(settings.agent, self.agent_memory_repository)
-        self.agent_image_client = httpx.AsyncClient(
-            timeout=httpx.Timeout(10.0, connect=3.0),
-            follow_redirects=False,
-        )
-        self.agent_media_ingest = AgentMediaIngestService(
-            OopzImageContentLoader(self.agent_image_client),
-            AgentImagePolicy(
-                max_images=settings.agent.max_input_images,
-                max_image_bytes=settings.agent.max_input_image_bytes,
-                max_total_bytes=settings.agent.max_input_image_total_bytes,
-                max_pixels=settings.agent.max_input_image_pixels,
-                max_parallel_downloads=settings.agent.max_input_image_downloads,
-            ),
-        )
-        self.agent_context = AgentContextBuilder(
-            settings.agent,
-            self.agent_messages,
-            self.agent_memory,
-        )
-        selection_repository = SqlAlchemyModelSelectionRepository(self.database.session_factory)
-        self.agent_selection = ProviderSelectionService(
-            self.agent_catalog,
-            selection_repository,
-        )
-        channel_settings = SqlAlchemyChannelSettingsRepository(self.database.session_factory)
-        self.agent_skill_repository = SqlAlchemyAgentSkillRepository(self.database.session_factory)
-        self.agent_skill_notifier = OopzSkillShareNotifier(self.bot)
-        agent_tools = [
-            GetAgentStatusTool(
-                timeout_seconds=settings.agent.tool_timeout_seconds,
-                max_output_characters=settings.agent.max_tool_result_characters,
-            ),
-            GetChannelSettingsTool(
-                channel_settings,
-                timeout_seconds=settings.agent.tool_timeout_seconds,
-                max_output_characters=settings.agent.max_tool_result_characters,
-            ),
-            ReactToMessageTool(
-                OopzReactionGateway(self.bot),
-                timeout_seconds=settings.agent.tool_timeout_seconds,
-                max_output_characters=settings.agent.max_tool_result_characters,
-            ),
-        ]
-        self.music: MusicRequestService | None = None
-        self.music_catalog: CompositeMusicCatalog | None = None
-        self.netease_music_provider: NeteaseMusicProvider | None = None
-        self.bilibili_music_provider: BilibiliMusicProvider | None = None
-        self.youtube_music_provider: YouTubeMusicProvider | None = None
-        self.music_playlists: MusicPlaylistService | None = None
         enabled_agent_tools = settings.agent.enabled_tools
-        if settings.agent.skills_enabled:
-            agent_tools.extend(
-                (
-                    LoadAgentSkillTool(),
-                    ReadAgentSkillResourceTool(),
-                )
-            )
-        else:
-            enabled_agent_tools = tuple(
-                name for name in enabled_agent_tools if name not in SKILL_AGENT_TOOLS
-            )
-        self.music_voice: OopzMusicVoiceGateway | None = None
-        self.music_ytdlp_runner: YtDlpProcessRunner | None = None
-        if settings.music.enabled:
-            if any(
-                source in {MusicSourceKind.YOUTUBE, MusicSourceKind.BILIBILI}
-                for source in settings.music.enabled_sources
-            ):
-                self.music_ytdlp_runner = YtDlpProcessRunner(settings.music_ytdlp)
-            music_providers = []
-            for source in settings.music.enabled_sources:
-                if source is MusicSourceKind.NETEASE:
-                    self.netease_music_provider = NeteaseMusicProvider(settings.music)
-                    music_providers.append(self.netease_music_provider)
-                elif source is MusicSourceKind.BILIBILI:
-                    assert self.music_ytdlp_runner is not None
-                    self.bilibili_music_provider = BilibiliMusicProvider(
-                        settings.music,
-                        settings.music_ytdlp,
-                        self.music_ytdlp_runner,
-                    )
-                    music_providers.append(self.bilibili_music_provider)
-                elif source is MusicSourceKind.YOUTUBE:
-                    assert self.music_ytdlp_runner is not None
-                    self.youtube_music_provider = YouTubeMusicProvider(
-                        settings.music,
-                        settings.music_ytdlp,
-                        self.music_ytdlp_runner,
-                    )
-                    music_providers.append(self.youtube_music_provider)
-            self.music_catalog = CompositeMusicCatalog(
-                MusicProviderRegistry(music_providers),
-                settings.music.default_source,
-            )
-            self.music_voice = OopzMusicVoiceGateway(
-                self.bot,
-                self.voice_channel_sessions,
-                settings.audio,
-            )
-            self.music = MusicRequestService(
-                settings.music,
-                self.music_catalog,
-                self.music_voice,
-            )
-            self.music_playlists = MusicPlaylistService(
-                settings.music,
-                SqlAlchemyMusicPlaylistRepository(self.database.session_factory),
-                self.music,
-                self.netease_music_provider,
-            )
-            music_tool_options = {
-                "timeout_seconds": settings.agent.tool_timeout_seconds,
-                "max_output_characters": settings.agent.max_tool_result_characters,
-            }
-            music_import_tool_options = {
-                **music_tool_options,
-                "timeout_seconds": max(
-                    settings.agent.tool_timeout_seconds,
-                    settings.music.request_timeout_seconds * 2 + 2,
-                ),
-            }
-            agent_tools.extend(
-                (
-                    SearchMusicCatalogTool(self.music, **music_tool_options),
-                    EnqueueMusicTool(self.music, **music_tool_options),
-                    GetMusicQueueTool(self.music, **music_tool_options),
-                    SkipMusicTool(self.music, **music_tool_options),
-                    PauseMusicTool(self.music, **music_tool_options),
-                    ResumeMusicTool(self.music, **music_tool_options),
-                    ClearMusicQueueTool(self.music, **music_tool_options),
-                    SetMusicPlaybackModeTool(self.music, **music_tool_options),
-                    CreateMusicPlaylistTool(self.music_playlists, **music_tool_options),
-                    ListMusicPlaylistsTool(self.music_playlists, **music_tool_options),
-                    GetMusicPlaylistTool(self.music_playlists, **music_tool_options),
-                    AddMusicPlaylistTrackTool(self.music_playlists, **music_tool_options),
-                    RemoveMusicPlaylistTrackTool(
-                        self.music_playlists,
-                        **music_tool_options,
-                    ),
-                    RenameMusicPlaylistTool(self.music_playlists, **music_tool_options),
-                    DeleteMusicPlaylistTool(self.music_playlists, **music_tool_options),
-                    ClearMusicPlaylistTool(self.music_playlists, **music_tool_options),
-                    LoadMusicPlaylistTool(self.music_playlists, **music_tool_options),
-                    PreviewNeteasePlaylistTool(
-                        self.music_playlists,
-                        **music_import_tool_options,
-                    ),
-                    ImportNeteasePlaylistTool(
-                        self.music_playlists,
-                        **music_import_tool_options,
-                    ),
-                )
-            )
-        else:
+        music = build_music(
+            settings, self.bot, self.voice_channel_sessions, self.database.session_factory
+        )
+        self.music = music.music
+        self.music_catalog = music.music_catalog
+        self.netease_music_provider = music.netease_music_provider
+        self.bilibili_music_provider = music.bilibili_music_provider
+        self.youtube_music_provider = music.youtube_music_provider
+        self.music_playlists = music.music_playlists
+        self.music_voice = music.music_voice
+        self.music_ytdlp_runner = music.music_ytdlp_runner
+        if not settings.music.enabled:
             enabled_agent_tools = tuple(
                 name for name in enabled_agent_tools if name not in MUSIC_AGENT_TOOLS
             )
-        self.web_search: WebSearchService | None = None
-        if settings.web.search_enabled:
-            self.web_search = WebSearchService(
-                settings.web,
-                DuckDuckGoSearchGateway(
-                    timeout_seconds=settings.web.search_timeout_seconds,
-                    max_concurrency=settings.web.search_max_concurrency,
-                ),
-            )
-            agent_tools.append(
-                SearchWebTool(
-                    self.web_search,
-                    timeout_seconds=settings.agent.tool_timeout_seconds,
-                    max_output_characters=settings.agent.max_tool_result_characters,
-                )
-            )
-        else:
+        web = build_web(settings)
+        self.web_search = web.web_search
+        self.browser = web.browser
+        if not settings.web.search_enabled:
             enabled_agent_tools = tuple(
                 name for name in enabled_agent_tools if name not in WEB_SEARCH_AGENT_TOOLS
             )
-        self.browser: BrowserSessionManager | None = None
-        if settings.web.browser_enabled:
-            self.browser = BrowserSessionManager(
-                settings.web,
-                AgentBrowserMcpGateway(settings.web),
-            )
-            browser_tool_options = {
-                "timeout_seconds": max(
-                    settings.agent.tool_timeout_seconds,
-                    settings.web.browser_mcp_call_timeout_seconds + 2,
-                ),
-                "max_output_characters": settings.agent.max_tool_result_characters,
-            }
-            agent_tools.extend(
-                (
-                    ReadWebPageTool(self.browser, **browser_tool_options),
-                    BrowserOpenTool(self.browser, **browser_tool_options),
-                    BrowserSnapshotTool(self.browser, **browser_tool_options),
-                    BrowserWaitTool(self.browser, **browser_tool_options),
-                    BrowserCloseTool(self.browser, **browser_tool_options),
-                )
-            )
-            if settings.web.browser_interaction_enabled:
-                agent_tools.extend(
-                    (
-                        BrowserClickTool(self.browser, **browser_tool_options),
-                        BrowserFillTool(self.browser, **browser_tool_options),
-                        BrowserPressTool(self.browser, **browser_tool_options),
-                    )
-                )
-        else:
+        if not settings.web.browser_enabled:
             enabled_agent_tools = tuple(
                 name
                 for name in enabled_agent_tools
@@ -528,38 +223,44 @@ class BotApplication:
             enabled_agent_tools = tuple(
                 name for name in enabled_agent_tools if name not in WEB_BROWSER_INTERACTION_TOOLS
             )
-        self.agent_skill_library: AgentSkillLibraryService | None = None
-        if settings.agent.skills_enabled and settings.agent.skill_authoring_enabled:
-            registered_skill_tools = (
-                frozenset(tool.descriptor.name for tool in agent_tools) | SKILL_LIBRARY_TOOL_NAMES
-            )
-            self.agent_skill_library = AgentSkillLibraryService(
-                self.agent_skill_repository,
-                registered_tools=registered_skill_tools,
-                max_personal_skills=settings.agent.max_personal_skills,
-                max_available_skills=settings.agent.max_available_skills,
-                max_resources_per_skill=settings.agent.max_resources_per_skill,
-                max_instruction_characters=(settings.agent.max_skill_instruction_characters),
-                max_resource_characters=settings.agent.max_skill_resource_characters,
-                max_accepted_shared_skills=settings.agent.max_accepted_shared_skills,
-                max_share_recipients_per_call=(settings.agent.max_skill_share_recipients_per_call),
-                notifier=self.agent_skill_notifier,
-            )
-            agent_tools.extend(skill_library_tools(self.agent_skill_library))
-        else:
-            enabled_agent_tools = tuple(
-                name for name in enabled_agent_tools if name not in SKILL_AUTHORING_AGENT_TOOLS
-            )
-        self.agent_tool_registry = ToolRegistry(agent_tools)
-        self.agent_diagnostic_renderer = OopzAgentDiagnosticRenderer(
-            {
-                descriptor.name: descriptor.display_name
-                for descriptor in self.agent_tool_registry.descriptors()
-            }
+        agent = build_agent(
+            settings,
+            self.database.session_factory,
+            self.bot,
+            self.authorization,
+            self.health,
+            music.tools + web.tools,
+            enabled_agent_tools,
         )
-        self.agent_skill_availability = SkillAvailabilityService(
-            max_available_skills=settings.agent.max_available_skills,
-        )
+        self.agent_catalog = agent.agent_catalog
+        self.agent_catalog_admin = agent.agent_catalog_admin
+        self.agent_threads = agent.agent_threads
+        self.agent_runs = agent.agent_runs
+        self.agent_messages = agent.agent_messages
+        self.agent_memory_repository = agent.agent_memory_repository
+        self.agent_memory = agent.agent_memory
+        self.agent_image_client = agent.agent_image_client
+        self.agent_media_ingest = agent.agent_media_ingest
+        self.agent_context = agent.agent_context
+        self.agent_selection = agent.agent_selection
+        self.agent_skill_repository = agent.agent_skill_repository
+        self.agent_skill_notifier = agent.agent_skill_notifier
+        self.agent_skill_library = agent.agent_skill_library
+        self.agent_tool_registry = agent.agent_tool_registry
+        self.agent_diagnostic_renderer = agent.agent_diagnostic_renderer
+        self.agent_skill_availability = agent.agent_skill_availability
+        self.agent_tool_authorization = agent.agent_tool_authorization
+        self.agent_tool_policy = agent.agent_tool_policy
+        self.agent_tool_availability = agent.agent_tool_availability
+        self.agent_tool_executor = agent.agent_tool_executor
+        self.direct_tools = agent.direct_tools
+        self.agent_models = agent.agent_models
+        self.agent_summary_tasks = agent.agent_summary_tasks
+        self.agent_summary_service = agent.agent_summary_service
+        self.agent_engine = agent.agent_engine
+        self.agent_run_service = agent.agent_run_service
+        self.agent_chat = agent.agent_chat
+        channel_settings = agent.channel_settings
         logger.info(
             "Application configured: agent=%s tools=%s music=%s voice=%s web_search=%s browser=%s",
             settings.agent.enabled,
@@ -568,69 +269,6 @@ class BotApplication:
             settings.voice.enabled,
             self.web_search is not None,
             self.browser is not None,
-        )
-        self.agent_tool_authorization = AgentToolAuthorizationAdapter(self.authorization)
-        self.agent_tool_policy = ToolPolicy(self.agent_tool_authorization)
-        self.agent_tool_availability = ToolAvailabilityService(
-            self.agent_tool_registry,
-            channel_settings,
-            enabled_agent_tools,
-            self.agent_tool_policy,
-        )
-        self.agent_tool_executor = ToolExecutor(
-            self.agent_tool_registry,
-            self.agent_tool_policy,
-            SqlAlchemyToolExecutionRepository(self.database.session_factory),
-        )
-        self.direct_tools = DirectToolService(
-            settings.agent,
-            self.agent_tool_registry,
-            self.agent_tool_availability,
-            self.agent_selection,
-            self.agent_tool_policy,
-        )
-        self.agent_models = AgentModelRegistry(
-            self.agent_catalog,
-            default_max_retries=settings.agent.provider_max_retries,
-        )
-        self.agent_summary_tasks = TaskSupervisor(lambda thread_id: f"agent-summary:{thread_id}")
-        self.agent_summary_service = ThreadSummaryService(
-            settings.agent,
-            PydanticAiThreadSummarizer(self.agent_models, settings.agent),
-            self.agent_threads,
-            self.agent_messages,
-        )
-        self.agent_engine = PydanticAiAgentEngine(
-            self.agent_models,
-            self.agent_tool_executor,
-        )
-        self.agent_run_service = AgentRunService(
-            self.agent_engine,
-            self.agent_runs,
-            self.agent_messages,
-            heartbeat_interval_seconds=max(
-                1.0,
-                min(10.0, settings.agent.stale_run_after_seconds / 3),
-            ),
-            health=self.health,
-        )
-        self.agent_chat = AgentConversationService(
-            settings.agent,
-            settings.chat,
-            self.agent_run_service,
-            self.agent_catalog,
-            self.agent_selection,
-            selection_repository,
-            self.agent_threads,
-            self.agent_messages,
-            self.agent_tool_availability,
-            self.agent_skill_repository if settings.agent.skills_enabled else None,
-            self.agent_skill_availability if settings.agent.skills_enabled else None,
-            context_builder=self.agent_context,
-            summary_service=self.agent_summary_service,
-            summary_tasks=self.agent_summary_tasks,
-            media_ingest=self.agent_media_ingest,
-            health=self.health,
         )
         self._provider = self._create_chat_provider()
         self.chat_tasks = ChatTaskSupervisor()
@@ -679,77 +317,28 @@ class BotApplication:
             self.agent_presenters,
             self.chat_invocations,
         )
-        self.voice_configurations = SqlAlchemyVoiceConfigurationRepository(
-            self.database.session_factory
-        )
-        self.voice_sessions = SqlAlchemyVoiceSessionRepository(self.database.session_factory)
-        self.delegated_task_repository = SqlAlchemyDelegatedTaskRepository(
-            self.database.session_factory
-        )
-        self.delegated_task_wakeup = InProcessDelegatedTaskWakeup()
-        self.voice_task_completion_notifier = InProcessVoiceTaskCompletionNotifier()
-        self.voice_delegated_tasks = VoiceDelegatedTaskService(
-            self.delegated_task_repository,
-            self.delegated_task_wakeup,
-            completion_notifier=self.voice_task_completion_notifier,
-        )
-        self.voice_task_mailbox = VoiceTaskMailboxService(
-            self.delegated_task_repository,
-            self.voice_task_completion_notifier,
-            OopzVoiceTaskTextGateway(self.bot),
-        )
-        self.delegated_task_text_fallback = DelegatedTaskTextFallbackReconciler(
-            self.delegated_task_repository,
-            self.voice_task_completion_notifier,
-            self.voice_task_mailbox,
-            poll_seconds=settings.voice.mailbox_poll_seconds,
-        )
-        self.delegated_task_runner = DelegatedAgentTaskRunner(
-            settings.agent,
-            self.delegated_task_repository,
-            self.delegated_task_wakeup,
-            self.agent_run_service,
-            self.agent_catalog,
-            self.agent_threads,
-            self.agent_context,
-            self.agent_tool_registry,
-            self.agent_skill_repository if settings.agent.skills_enabled else None,
-            self.agent_skill_availability if settings.agent.skills_enabled else None,
-            completion_notifier=self.voice_task_completion_notifier,
-            max_task_retries=settings.agent.provider_max_retries,
-            heartbeat_interval_seconds=max(
-                1.0,
-                min(10.0, settings.agent.stale_run_after_seconds / 3),
-            ),
-        )
-        self.delegated_task_scheduler = DelegatedTaskScheduler(
-            self.delegated_task_repository,
-            self.delegated_task_wakeup,
-            self.delegated_task_runner,
-            completion_notifier=self.voice_task_completion_notifier,
-            read_concurrency=settings.voice.read_task_concurrency,
-            per_user_concurrency=settings.voice.per_user_task_concurrency,
-            reconcile_seconds=settings.voice.mailbox_poll_seconds,
-        )
-        self.voice_task_tools = VoiceTaskControlTools(self.voice_delegated_tasks)
-        self.voice_runtimes = RealtimeVoiceSessionRuntimeFactoryImpl(
-            settings.voice,
+        voice = build_voice(
+            settings,
+            self.database.session_factory,
+            self.bot,
+            self.voice_channel_sessions,
             self.voice_media,
-            self.voice_sessions,
-            ConfiguredVoiceProviderBuilder(tool_schemas=self.voice_task_tools.schemas()),
-            self.voice_task_tools,
-            self.voice_task_mailbox,
+            agent,
         )
-        self.voice_access = OopzConversationVoiceAccess(self.bot, self.voice_channel_sessions)
-        self.voice_conversations = VoiceConversationService(
-            settings.voice,
-            self.voice_access,
-            self.voice_runtimes,
-            self.voice_configurations,
-            self.voice_sessions,
-            self.agent_memory,
-            self.voice_access,
-        )
+        self.voice_configurations = voice.voice_configurations
+        self.voice_sessions = voice.voice_sessions
+        self.delegated_task_repository = voice.delegated_task_repository
+        self.delegated_task_wakeup = voice.delegated_task_wakeup
+        self.voice_task_completion_notifier = voice.voice_task_completion_notifier
+        self.voice_delegated_tasks = voice.voice_delegated_tasks
+        self.voice_task_mailbox = voice.voice_task_mailbox
+        self.delegated_task_text_fallback = voice.delegated_task_text_fallback
+        self.delegated_task_runner = voice.delegated_task_runner
+        self.delegated_task_scheduler = voice.delegated_task_scheduler
+        self.voice_task_tools = voice.voice_task_tools
+        self.voice_runtimes = voice.voice_runtimes
+        self.voice_access = voice.voice_access
+        self.voice_conversations = voice.voice_conversations
         self._register_commands()
         self.bot.on_ready(self._on_ready)
         self.bot.on_message(self._on_message)
@@ -1017,27 +606,44 @@ class BotApplication:
             disposition = await self._run_oopz_until_lifecycle_request()
         finally:
             logger.info("Application shutdown started")
-            await self.command_tasks.close()
-            await self.chat_tasks.close()
-            await self.agent_summary_tasks.close()
-            await self.voice_conversations.aclose()
-            await self.delegated_task_scheduler.aclose()
-            await self.delegated_task_text_fallback.aclose()
-            if self.music is not None:
-                await self.music.aclose()
-            if self.music_ytdlp_runner is not None:
-                await self.music_ytdlp_runner.aclose()
-            await self.voice_channel_sessions.aclose()
-            if self.browser is not None:
-                await self.browser.aclose()
-            if self.web_search is not None:
-                await self.web_search.aclose()
-            await self.agent_engine.aclose()
-            await self.agent_image_client.aclose()
-            await self._provider.aclose()
-            await self.database.close()
+            await self._close_resources()
             logger.info("Application shutdown completed")
         return disposition
+
+    async def _close_resources(self) -> None:
+        """Try every owned resource in dependency order, even if a close fails.
+
+        Consumers stop before their shared transports and persistence. ExitStack
+        preserves cleanup exceptions while still attempting the remaining steps.
+        """
+        callbacks = [
+            self.command_tasks.close,
+            self.chat_tasks.close,
+            self.agent_summary_tasks.close,
+            self.voice_conversations.aclose,
+            self.delegated_task_scheduler.aclose,
+            self.delegated_task_text_fallback.aclose,
+        ]
+        if self.music is not None:
+            callbacks.append(self.music.aclose)
+        if self.music_ytdlp_runner is not None:
+            callbacks.append(self.music_ytdlp_runner.aclose)
+        callbacks.append(self.voice_channel_sessions.aclose)
+        if self.browser is not None:
+            callbacks.append(self.browser.aclose)
+        if self.web_search is not None:
+            callbacks.append(self.web_search.aclose)
+        callbacks.extend(
+            (
+                self.agent_engine.aclose,
+                self.agent_image_client.aclose,
+                self._provider.aclose,
+                self.database.close,
+            )
+        )
+        async with AsyncExitStack() as resources:
+            for close in reversed(callbacks):
+                resources.push_async_callback(close)
 
     async def _run_oopz_until_lifecycle_request(self) -> ShutdownDisposition:
         bot_task = asyncio.create_task(self.bot.run(), name="oopz-bot")
@@ -1165,7 +771,7 @@ class BotApplication:
     ) -> None:
         """Register slow work so the SDK receive loop can immediately process later events."""
         try:
-            key = ConversationKey.from_oopz_context(context)
+            key = conversation_key_from_context(context)
         except ValueError as exc:
             operation.close()
             logger.warning("Could not start chat task: error=%s", exception_kind(exc))

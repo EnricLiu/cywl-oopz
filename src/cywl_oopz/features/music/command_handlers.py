@@ -6,10 +6,9 @@ import logging
 from typing import Protocol
 
 from cywl_oopz.commands.models import CommandRequest, CommandScope
+from cywl_oopz.conversation.models import ActorContext, ConversationKey
 from cywl_oopz.core.errors import DatabaseError
 from cywl_oopz.core.observability import exception_kind, opaque_ref
-from cywl_oopz.features.agent.models import AgentIdentity
-from cywl_oopz.features.chat.models import ConversationKey
 
 from .command_errors import MusicCommandErrorPresenter
 from .command_parsing import MusicArguments
@@ -64,7 +63,7 @@ class MusicSubcommandHandler(Protocol):
     async def handle(
         self,
         request: CommandRequest,
-        identity: AgentIdentity,
+        identity: ActorContext,
         arguments: MusicArguments,
     ) -> None: ...
 
@@ -98,7 +97,7 @@ class MusicCommandHandler:
             await request.responder.reply(self._errors.message(exc))
 
     @staticmethod
-    def _identity(request: CommandRequest) -> AgentIdentity:
+    def _identity(request: CommandRequest) -> ActorContext:
         private = request.location.scope is CommandScope.PRIVATE
         conversation = ConversationKey(
             "private" if private else "channel",
@@ -106,7 +105,7 @@ class MusicCommandHandler:
             "" if private else request.location.channel_id,
             request.actor.person_id,
         )
-        return AgentIdentity(
+        return ActorContext(
             request.actor.person_id,
             conversation,
             source_message_id=request.source.message_id,

@@ -6,7 +6,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from cywl_oopz.features.chat.models import ChatInvocation, ConversationKey
+from cywl_oopz.conversation.models import ChatInvocation, ConversationKey
 from cywl_oopz.settings import AgentSettings
 
 from .models import AgentIdentity, AgentRunLimits, ModelCapability

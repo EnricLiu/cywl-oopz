@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 
+from cywl_oopz.conversation.models import ChatResponse
 from cywl_oopz.core.errors import ProviderResponseError
 
-from .models import ChatChunk, ChatResponse
+from .models import ChatChunk
 
 
 class StreamResponseAssembler:

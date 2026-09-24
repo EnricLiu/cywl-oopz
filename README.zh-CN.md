@@ -175,6 +175,8 @@ YouTube/Bilibili 提取在有界子进程中运行，并要求 `CYWL_AUDIO_MIXER
 ```text
 src/cywl_oopz/
   application.py        组合根与应用生命周期
+  composition/          音乐、网页、Agent 与语音的显式组装
+  conversation/         共享输入、身份、进度与回复生命周期
   commands/             命令解析、路由和基础命令
   core/                 共享错误、健康检查、可观测性和任务辅助类
   features/
@@ -189,6 +191,24 @@ src/cywl_oopz/
 tests/                  单元测试、集成契约测试和可选实时测试
 sdk/                    OOPZ SDK 子模块
 ```
+
+`BotApplication` 创建 OOPZ Bot，并统一管理资源的启动和关闭。
+`composition/` 中的构建函数接收明确依赖，返回有类型的组件集合；功能组装不再创建 Bot，
+也不自行接管应用关闭流程。
+
+命令和 OOPZ 消息入口将请求转换为 `conversation/` 中的共享契约。
+`ConversationResponder` 统一处理完成、错误回退、取消、投递记录和展示会话清理。
+SDK 上下文转换集中在 `integrations/oopz/chat_invocation.py`。
+原来位于 `features/chat` 和 `features/agent/input.py` 的共享类型导入仍有兼容导出；
+新增共享代码应直接引用 `conversation/`。
+
+音乐的 `service.py` 负责用户操作，`session.py` 持有各频道状态与锁，
+`track_playback.py` 负责音源解析与播放启动，`playback.py` 协调队列推进、重试和频道释放。
+队列修改仍由会话锁串行化，空闲释放期间也保持持锁。
+
+语音的 `runtime.py` 持有控制循环与后台任务，`notification_worker.py` 执行邮箱 I/O，
+`recovery.py` 处理 Provider 建连重试和替换媒体资源。
+工作任务通过 `runtime_events.py` 中的事件返回结果，由控制循环接收资源并更新会话状态。
 
 ## 开发与验证
 

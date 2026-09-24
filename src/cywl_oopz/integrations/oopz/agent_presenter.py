@@ -11,6 +11,13 @@ from uuid import UUID
 from oopz_sdk.exceptions import OopzConnectionError, OopzRateLimitError
 
 from cywl_oopz.commands.models import CommandRequest
+from cywl_oopz.conversation.models import ChatResponse
+from cywl_oopz.conversation.progress import (
+    ConversationProgressEvent,
+    ConversationProgressSession,
+    NoopProgressSession,
+    ProgressKind,
+)
 from cywl_oopz.core.observability import opaque_ref
 from cywl_oopz.features.admin.models import OutboundMessageKind, OutboundMessageState
 from cywl_oopz.features.agent.display import (
@@ -18,13 +25,6 @@ from cywl_oopz.features.agent.display import (
     AgentLoopViewState,
     DisplayPhase,
     ToolStepStatus,
-)
-from cywl_oopz.features.chat.models import ChatResponse
-from cywl_oopz.features.chat.progress import (
-    ConversationProgressEvent,
-    ConversationProgressSession,
-    NoopProgressSession,
-    ProgressKind,
 )
 
 from .active_presentations import ActivePresentationRegistry

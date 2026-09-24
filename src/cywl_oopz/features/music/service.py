@@ -5,20 +5,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
-from collections import OrderedDict, deque
+from collections import deque
 from collections.abc import Awaitable, Callable
-from contextlib import suppress
-from dataclasses import dataclass, field
-from uuid import UUID
 
+from cywl_oopz.conversation.models import ActorContext
 from cywl_oopz.core.observability import opaque_ref
-from cywl_oopz.features.agent.models import AgentIdentity
 from cywl_oopz.settings import MusicSettings
 
 from .errors import (
-    MusicBackendClosedError,
-    MusicCatalogError,
-    MusicDecoderError,
     MusicNotFoundError,
     MusicPlaybackError,
     MusicQueryError,
@@ -29,10 +23,6 @@ from .errors import (
 )
 from .models import (
     EnqueueResult,
-    MusicFailure,
-    MusicFailureCode,
-    MusicFailureScope,
-    MusicPlaybackEndReason,
     MusicPlaybackPolicy,
     MusicProviderHealth,
     MusicQueueClearResult,
@@ -40,7 +30,6 @@ from .models import (
     MusicSourceKind,
     MusicTrack,
     MusicTrackReference,
-    PlayableTrack,
     PlaybackOrder,
     PlaybackPolicyChange,
     PlaybackState,
@@ -49,31 +38,12 @@ from .models import (
     RepeatPolicy,
     VoiceChannelKey,
 )
-from .ports import MusicCatalog, MusicPlayback, MusicVoiceGateway
+from .playback import MusicPlaybackCoordinator
+from .ports import MusicCatalog, MusicVoiceGateway
 from .references import MusicInputParser
+from .session import MusicSession
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass(slots=True)
-class _MusicSession:
-    """Mutable state protected by one voice-channel lock."""
-
-    queue: deque[QueuedTrack] = field(default_factory=deque)
-    cycle_history: deque[QueuedTrack] = field(default_factory=deque)
-    current: QueuedTrack | None = None
-    state: PlaybackState = PlaybackState.IDLE
-    policy: MusicPlaybackPolicy = field(default_factory=MusicPlaybackPolicy)
-    revision: int = 0
-    playback: MusicPlayback | None = None
-    resolve_task: asyncio.Task[PlayableTrack] | None = None
-    voice_reserved: bool = False
-    worker: asyncio.Task[None] | None = None
-    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    skip_requested: asyncio.Event = field(default_factory=asyncio.Event)
-    retain_skipped_for_cycle: bool = False
-    idempotent_enqueues: OrderedDict[str, EnqueueResult] = field(default_factory=OrderedDict)
-    last_failure: MusicFailure | None = None
 
 
 class MusicRequestService:
@@ -91,8 +61,8 @@ class MusicRequestService:
         self._catalog = catalog
         self._voice = voice
         self._input_parser = MusicInputParser()
-        self._rng = rng or random.Random()
-        self._sessions: dict[VoiceChannelKey, _MusicSession] = {}
+        self._playback = MusicPlaybackCoordinator(catalog, voice, rng or random.Random())
+        self._sessions: dict[VoiceChannelKey, MusicSession] = {}
         self._closing = False
 
     @property
@@ -164,7 +134,7 @@ class MusicRequestService:
 
     async def enqueue(
         self,
-        identity: AgentIdentity,
+        identity: ActorContext,
         query: str,
         *,
         idempotency_key: str = "",
@@ -178,7 +148,7 @@ class MusicRequestService:
 
     async def enqueue_query(
         self,
-        identity: AgentIdentity,
+        identity: ActorContext,
         query: str,
         *,
         source: MusicSourceKind | None = None,
@@ -193,7 +163,7 @@ class MusicRequestService:
 
     async def enqueue_reference(
         self,
-        identity: AgentIdentity,
+        identity: ActorContext,
         reference: MusicTrackReference,
         *,
         idempotency_key: str = "",
@@ -207,7 +177,7 @@ class MusicRequestService:
 
     async def enqueue_input(
         self,
-        identity: AgentIdentity,
+        identity: ActorContext,
         value: str,
         *,
         source: MusicSourceKind | None = None,
@@ -222,7 +192,7 @@ class MusicRequestService:
 
     async def _enqueue_from(
         self,
-        identity: AgentIdentity,
+        identity: ActorContext,
         load_track: Callable[[], Awaitable[MusicTrack]],
         *,
         idempotency_key: str,
@@ -293,7 +263,7 @@ class MusicRequestService:
             raise MusicQueryError("Music search query is too long")
         return normalized
 
-    async def queue(self, identity: AgentIdentity) -> MusicQueueSnapshot:
+    async def queue(self, identity: ActorContext) -> MusicQueueSnapshot:
         """Return an immutable bounded view for the caller's current voice channel."""
         channel = await self._channel_for(identity)
         session = self._session(channel)
@@ -317,7 +287,7 @@ class MusicRequestService:
 
     async def set_policy(
         self,
-        identity: AgentIdentity,
+        identity: ActorContext,
         *,
         order: PlaybackOrder | None = None,
         repeat: RepeatPolicy | None = None,
@@ -350,7 +320,7 @@ class MusicRequestService:
 
     async def replace_queue(
         self,
-        identity: AgentIdentity,
+        identity: ActorContext,
         tracks: tuple[MusicTrack, ...],
     ) -> QueueRebuildResult:
         """Replace current playback and upcoming items with one ordered track set."""
@@ -371,7 +341,7 @@ class MusicRequestService:
             if replaced_current:
                 session.retain_skipped_for_cycle = False
                 session.skip_requested.set()
-                self._cancel_resolve_locked(session)
+                session.cancel_resolve()
             else:
                 session.state = PlaybackState.WAITING
             session.revision += 1
@@ -396,7 +366,7 @@ class MusicRequestService:
         )
         return QueueRebuildResult(channel, len(tracks), replaced_current, started)
 
-    async def clear(self, identity: AgentIdentity) -> MusicQueueClearResult:
+    async def clear(self, identity: ActorContext) -> MusicQueueClearResult:
         """Stop current playback and clear every transient queue cycle item."""
         channel = await self._channel_for(identity)
         session = self._session(channel)
@@ -414,7 +384,7 @@ class MusicRequestService:
             if stopped_current:
                 session.retain_skipped_for_cycle = False
                 session.skip_requested.set()
-                self._cancel_resolve_locked(session)
+                session.cancel_resolve()
             elif session.voice_reserved:
                 session.state = PlaybackState.WAITING
                 self._start_worker_locked(channel, session)
@@ -438,7 +408,7 @@ class MusicRequestService:
         )
         return MusicQueueClearResult(channel, stopped_current, removed_count)
 
-    async def skip(self, identity: AgentIdentity) -> bool:
+    async def skip(self, identity: ActorContext) -> bool:
         """Request one current track to stop; repeated calls before advance are harmless."""
         channel = await self._channel_for(identity)
         session = self._session(channel)
@@ -451,7 +421,7 @@ class MusicRequestService:
                 return False
             session.skip_requested.set()
             session.retain_skipped_for_cycle = session.policy.repeat is RepeatPolicy.ALL
-            self._cancel_resolve_locked(session)
+            session.cancel_resolve()
             session.revision += 1
             playback = session.playback
         if playback is not None:
@@ -466,7 +436,7 @@ class MusicRequestService:
         logger.info("Music skip requested: channel=%s", self._channel_ref(channel))
         return True
 
-    async def pause(self, identity: AgentIdentity) -> bool:
+    async def pause(self, identity: ActorContext) -> bool:
         """Pause only when this caller's voice channel owns the backend."""
         channel = await self._channel_for(identity)
         session = self._session(channel)
@@ -496,7 +466,7 @@ class MusicRequestService:
         )
         return paused
 
-    async def resume(self, identity: AgentIdentity) -> bool:
+    async def resume(self, identity: ActorContext) -> bool:
         """Resume only when this caller's voice channel owns the backend."""
         channel = await self._channel_for(identity)
         session = self._session(channel)
@@ -544,7 +514,7 @@ class MusicRequestService:
         finally:
             await self._catalog.aclose()
 
-    async def _channel_for(self, identity: AgentIdentity) -> VoiceChannelKey:
+    async def _channel_for(self, identity: ActorContext) -> VoiceChannelKey:
         area_id = identity.conversation.area_id.strip()
         if not area_id:
             raise MusicVoiceChannelRequiredError(
@@ -564,429 +534,17 @@ class MusicRequestService:
             )
         return VoiceChannelKey(area_id, channel_id)
 
-    def _session(self, channel: VoiceChannelKey) -> _MusicSession:
+    def _session(self, channel: VoiceChannelKey) -> MusicSession:
         session = self._sessions.get(channel)
         if session is None:
-            session = _MusicSession()
+            session = MusicSession()
             self._sessions[channel] = session
         return session
-
-    async def _play_queue(
-        self,
-        channel: VoiceChannelKey,
-        session: _MusicSession,
-    ) -> None:
-        drained_normally = False
-        backend_retries: dict[UUID, int] = {}
-        media_retries: dict[UUID, int] = {}
-        try:
-            while True:
-                async with session.lock:
-                    if (
-                        not session.queue
-                        and session.policy.repeat is RepeatPolicy.ALL
-                        and session.cycle_history
-                    ):
-                        session.queue.extend(session.cycle_history)
-                        session.cycle_history.clear()
-                        session.revision += 1
-                        logger.info(
-                            "Music repeat cycle rebuilt: channel=%s tracks=%s order=%s",
-                            self._channel_ref(channel),
-                            len(session.queue),
-                            session.policy.order.value,
-                        )
-                    if not session.queue:
-                        session.current = None
-                        session.state = PlaybackState.RELEASING
-                        session.revision += 1
-                        logger.info(
-                            "Music playback worker releasing idle channel: channel=%s",
-                            self._channel_ref(channel),
-                        )
-                        # Keep the session lock until the SDK has actually left. An
-                        # enqueue arriving in this boundary must acquire a fresh lease,
-                        # not mistake the generation being released for a reservation.
-                        released = await self._release_voice(channel)
-                        session.voice_reserved = not released
-                        if released:
-                            session.state = PlaybackState.IDLE
-                            session.policy = MusicPlaybackPolicy()
-                            session.cycle_history.clear()
-                            session.idempotent_enqueues.clear()
-                        else:
-                            session.state = PlaybackState.FAILED
-                            self._record_failure_locked(
-                                session,
-                                None,
-                                MusicFailureCode.RELEASE_FAILED,
-                                MusicFailureScope.VOICE_SESSION,
-                                recoverable=True,
-                                retry_count=3,
-                            )
-                        session.revision += 1
-                        if session.worker is asyncio.current_task():
-                            session.worker = None
-                        drained_normally = True
-                        return
-                    else:
-                        item = self._take_next(session)
-                        session.current = item
-                        session.state = PlaybackState.LOADING
-                        session.revision += 1
-                        session.skip_requested.clear()
-                        session.retain_skipped_for_cycle = False
-                playback: MusicPlayback | None = None
-                completed = False
-                retry_current = False
-                halt_after_failure = False
-                try:
-                    logger.info(
-                        "Music track resolving: channel=%s source=%s",
-                        self._channel_ref(channel),
-                        item.track.source.value,
-                    )
-                    async with session.lock:
-                        if session.skip_requested.is_set():
-                            continue
-                        resolve_task = asyncio.create_task(
-                            self._catalog.resolve(item.track),
-                            name=f"music-resolve:{self._channel_ref(channel)}",
-                        )
-                        session.resolve_task = resolve_task
-                    try:
-                        playable = await resolve_task
-                    except asyncio.CancelledError:
-                        current = asyncio.current_task()
-                        if (
-                            session.skip_requested.is_set()
-                            and current is not None
-                            and current.cancelling() == 0
-                        ):
-                            logger.info(
-                                "Music track resolve cancelled by queue control: channel=%s",
-                                self._channel_ref(channel),
-                            )
-                            continue
-                        raise
-                    finally:
-                        async with session.lock:
-                            if session.resolve_task is resolve_task:
-                                session.resolve_task = None
-                    if session.skip_requested.is_set():
-                        logger.info(
-                            "Music track skipped before playback: channel=%s",
-                            self._channel_ref(channel),
-                        )
-                        continue
-                    playback = await self._voice.start_playback(channel, playable)
-                    if session.skip_requested.is_set():
-                        await playback.stop()
-                        continue
-                    async with session.lock:
-                        session.playback = playback
-                        session.state = PlaybackState.PLAYING
-                        session.revision += 1
-                    logger.info(
-                        "Music track playback started: channel=%s source=%s",
-                        self._channel_ref(channel),
-                        item.track.source.value,
-                    )
-                    result = await playback.wait_finished()
-                    completed = result.end_reason is MusicPlaybackEndReason.FINISHED
-                    if result.end_reason in {
-                        MusicPlaybackEndReason.BACKEND_CLOSED,
-                        MusicPlaybackEndReason.VOICE_LEFT,
-                    } and (
-                        backend_retries.get(item.id, 0) < 1 and not session.skip_requested.is_set()
-                    ):
-                        backend_retries[item.id] = backend_retries.get(item.id, 0) + 1
-                        if result.end_reason is MusicPlaybackEndReason.VOICE_LEFT:
-                            retry_current = await self._reacquire_voice(channel, session)
-                            halt_after_failure = not retry_current
-                            message = "physical voice generation loss"
-                            failure_code = MusicFailureCode.VOICE_LEFT
-                        else:
-                            retry_current = True
-                            message = "shared backend failure"
-                            failure_code = MusicFailureCode.BACKEND_CLOSED
-                        async with session.lock:
-                            self._record_failure_locked(
-                                session,
-                                item,
-                                failure_code,
-                                MusicFailureScope.VOICE_SESSION,
-                                recoverable=retry_current,
-                                retry_count=backend_retries[item.id],
-                            )
-                        logger.warning(
-                            "Retrying music track after %s: channel=%s attempt=%s fresh_voice=%s",
-                            message,
-                            self._channel_ref(channel),
-                            backend_retries[item.id],
-                            result.end_reason is MusicPlaybackEndReason.VOICE_LEFT,
-                        )
-                    elif (
-                        result.end_reason is MusicPlaybackEndReason.TRACK_ERROR
-                        and result.duration_seconds is not None
-                        and result.duration_seconds <= 3.0
-                        and media_retries.get(item.id, 0) < 1
-                        and not session.skip_requested.is_set()
-                    ):
-                        media_retries[item.id] = media_retries.get(item.id, 0) + 1
-                        retry_current = True
-                        async with session.lock:
-                            self._record_failure_locked(
-                                session,
-                                item,
-                                MusicFailureCode.TRACK_ERROR,
-                                MusicFailureScope.TRACK,
-                                recoverable=True,
-                                retry_count=media_retries[item.id],
-                            )
-                        logger.warning(
-                            "Re-resolving music after early media failure: "
-                            "channel=%s source=%s attempt=%s elapsed_seconds=%.3f",
-                            self._channel_ref(channel),
-                            item.track.source.value,
-                            media_retries[item.id],
-                            result.duration_seconds,
-                        )
-                    elif not completed and result.end_reason not in {
-                        MusicPlaybackEndReason.STOPPED,
-                        MusicPlaybackEndReason.REPLACED,
-                    }:
-                        if result.end_reason in {
-                            MusicPlaybackEndReason.BACKEND_CLOSED,
-                            MusicPlaybackEndReason.VOICE_LEFT,
-                        }:
-                            halt_after_failure = True
-                            async with session.lock:
-                                session.state = PlaybackState.FAILED
-                                self._record_failure_locked(
-                                    session,
-                                    item,
-                                    MusicFailureCode(result.end_reason.value),
-                                    MusicFailureScope.VOICE_SESSION,
-                                    recoverable=False,
-                                    retry_count=backend_retries.get(item.id, 0),
-                                )
-                                session.revision += 1
-                        elif result.end_reason is MusicPlaybackEndReason.TRACK_ERROR:
-                            logger.error(
-                                "Music media playback failed: "
-                                "channel=%s source=%s retries=%s error=%s",
-                                self._channel_ref(channel),
-                                item.track.source.value,
-                                media_retries.get(item.id, 0),
-                                (
-                                    type(result.terminal_error).__name__
-                                    if result.terminal_error is not None
-                                    else "none"
-                                ),
-                            )
-                            async with session.lock:
-                                session.state = PlaybackState.FAILED
-                                self._record_failure_locked(
-                                    session,
-                                    item,
-                                    MusicFailureCode.TRACK_ERROR,
-                                    MusicFailureScope.TRACK,
-                                    recoverable=False,
-                                    retry_count=media_retries.get(item.id, 0),
-                                )
-                                session.revision += 1
-                        else:
-                            raise MusicPlaybackError(
-                                f"Music playback ended with {result.end_reason.value}"
-                            ) from result.terminal_error
-                except asyncio.CancelledError:
-                    if playback is not None:
-                        with suppress(Exception):
-                            await playback.stop()
-                    raise
-                except MusicBackendClosedError as exc:
-                    if backend_retries.get(item.id, 0) < 1 and not session.skip_requested.is_set():
-                        backend_retries[item.id] = backend_retries.get(item.id, 0) + 1
-                        retry_current = True
-                        logger.warning(
-                            "Retrying music startup after shared backend failure: "
-                            "channel=%s attempt=%s error=%s",
-                            self._channel_ref(channel),
-                            backend_retries[item.id],
-                            type(exc).__name__,
-                        )
-                    else:
-                        logger.error(
-                            "Music backend recovery exhausted: channel=%s error=%s",
-                            self._channel_ref(channel),
-                            type(exc).__name__,
-                        )
-                        async with session.lock:
-                            session.state = PlaybackState.FAILED
-                            self._record_failure_locked(
-                                session,
-                                item,
-                                MusicFailureCode.BACKEND_CLOSED,
-                                MusicFailureScope.VOICE_SESSION,
-                                recoverable=False,
-                                retry_count=backend_retries.get(item.id, 0),
-                            )
-                            session.revision += 1
-                        halt_after_failure = True
-                except MusicDecoderError as exc:
-                    if media_retries.get(item.id, 0) < 1 and not session.skip_requested.is_set():
-                        media_retries[item.id] = media_retries.get(item.id, 0) + 1
-                        retry_current = True
-                        async with session.lock:
-                            self._record_failure_locked(
-                                session,
-                                item,
-                                MusicFailureCode.TRACK_ERROR,
-                                MusicFailureScope.TRACK,
-                                recoverable=True,
-                                retry_count=media_retries[item.id],
-                            )
-                        logger.warning(
-                            "Re-resolving music after decoder startup failure: "
-                            "channel=%s source=%s attempt=%s error=%s",
-                            self._channel_ref(channel),
-                            item.track.source.value,
-                            media_retries[item.id],
-                            type(exc).__name__,
-                        )
-                    else:
-                        logger.error(
-                            "Music media recovery exhausted: channel=%s source=%s error=%s",
-                            self._channel_ref(channel),
-                            item.track.source.value,
-                            type(exc).__name__,
-                        )
-                        async with session.lock:
-                            session.state = PlaybackState.FAILED
-                            self._record_failure_locked(
-                                session,
-                                item,
-                                MusicFailureCode.TRACK_ERROR,
-                                MusicFailureScope.TRACK,
-                                recoverable=False,
-                                retry_count=media_retries.get(item.id, 0),
-                            )
-                            session.revision += 1
-                except Exception as exc:
-                    logger.error(
-                        "Music playback failed: channel=%s error=%s",
-                        self._channel_ref(channel),
-                        type(exc).__name__,
-                    )
-                    if playback is not None:
-                        with suppress(Exception):
-                            await playback.stop()
-                    async with session.lock:
-                        session.state = PlaybackState.FAILED
-                        scope = (
-                            MusicFailureScope.CATALOG
-                            if isinstance(exc, (MusicCatalogError, MusicNotFoundError))
-                            else MusicFailureScope.TRACK
-                        )
-                        self._record_failure_locked(
-                            session,
-                            item,
-                            (
-                                MusicFailureCode.CATALOG_ERROR
-                                if scope is MusicFailureScope.CATALOG
-                                else MusicFailureCode.TRACK_ERROR
-                            ),
-                            scope,
-                            recoverable=False,
-                            retry_count=0,
-                        )
-                        session.revision += 1
-                finally:
-                    async with session.lock:
-                        if halt_after_failure and not session.skip_requested.is_set():
-                            session.queue.appendleft(item)
-                            backend_retries.pop(item.id, None)
-                            media_retries.pop(item.id, None)
-                        elif not session.skip_requested.is_set() and completed:
-                            self._retain_completed(session, item)
-                            session.last_failure = None
-                            backend_retries.pop(item.id, None)
-                            media_retries.pop(item.id, None)
-                        elif not session.skip_requested.is_set() and retry_current:
-                            session.queue.appendleft(item)
-                            session.state = PlaybackState.WAITING
-                            session.revision += 1
-                        elif session.retain_skipped_for_cycle:
-                            session.cycle_history.append(item)
-                            backend_retries.pop(item.id, None)
-                            media_retries.pop(item.id, None)
-                        else:
-                            backend_retries.pop(item.id, None)
-                            media_retries.pop(item.id, None)
-                        if session.playback is playback:
-                            session.playback = None
-                        session.current = None
-                        session.skip_requested.clear()
-                        session.retain_skipped_for_cycle = False
-                        session.revision += 1
-                    logger.debug(
-                        "Music playback state reset: channel=%s",
-                        self._channel_ref(channel),
-                    )
-                if halt_after_failure:
-                    return
-        finally:
-            if not drained_normally:
-                async with session.lock:
-                    reserved = session.voice_reserved
-                    session.playback = None
-                    self._cancel_resolve_locked(session)
-                    session.resolve_task = None
-                    session.current = None
-                    session.skip_requested.clear()
-                    session.retain_skipped_for_cycle = False
-                    session.voice_reserved = False
-                    if session.worker is asyncio.current_task():
-                        session.worker = None
-                    if session.state not in {PlaybackState.IDLE, PlaybackState.FAILED}:
-                        session.state = PlaybackState.IDLE
-                        session.revision += 1
-                    if reserved:
-                        released = await self._release_voice(channel)
-                        session.voice_reserved = not released
-                        if not released and session.state is not PlaybackState.FAILED:
-                            session.state = PlaybackState.FAILED
-                            self._record_failure_locked(
-                                session,
-                                None,
-                                MusicFailureCode.RELEASE_FAILED,
-                                MusicFailureScope.VOICE_SESSION,
-                                recoverable=True,
-                                retry_count=3,
-                            )
-                            session.revision += 1
-
-    def _take_next(self, session: _MusicSession) -> QueuedTrack:
-        if session.policy.order is PlaybackOrder.SHUFFLE and len(session.queue) > 1:
-            index = self._rng.randrange(len(session.queue))
-            session.queue.rotate(-index)
-            item = session.queue.popleft()
-            session.queue.rotate(index)
-            return item
-        return session.queue.popleft()
-
-    @staticmethod
-    def _retain_completed(session: _MusicSession, item: QueuedTrack) -> None:
-        if session.policy.repeat is RepeatPolicy.ONE:
-            session.queue.appendleft(item)
-        else:
-            session.cycle_history.append(item)
 
     async def _reserve_voice_locked(
         self,
         channel: VoiceChannelKey,
-        session: _MusicSession,
+        session: MusicSession,
     ) -> None:
         """Reserve the shared backend while the caller holds ``session.lock``."""
         if self._closing:
@@ -1010,52 +568,10 @@ class MusicRequestService:
             raise MusicVoiceBusyError("OOPZ voice is currently used by another feature")
         session.voice_reserved = True
 
-    async def _reacquire_voice(
-        self,
-        channel: VoiceChannelKey,
-        session: _MusicSession,
-    ) -> bool:
-        """Replace one stale physical voice generation without holding session.lock."""
-        async with session.lock:
-            session.voice_reserved = False
-            session.state = PlaybackState.RECOVERING
-            session.revision += 1
-        try:
-            await self._voice.reset(channel)
-            acquired = await self._voice.acquire(channel)
-        except Exception as exc:
-            logger.warning(
-                "Could not acquire a fresh OOPZ voice generation for music: channel=%s error=%s",
-                self._channel_ref(channel),
-                type(exc).__name__,
-            )
-            return False
-        async with session.lock:
-            session.voice_reserved = acquired
-        return acquired
-
-    @staticmethod
-    def _record_failure_locked(
-        session: _MusicSession,
-        item: QueuedTrack | None,
-        code: MusicFailureCode,
-        scope: MusicFailureScope,
-        *,
-        recoverable: bool,
-        retry_count: int,
-    ) -> None:
-        session.last_failure = MusicFailure(
-            code,
-            scope,
-            recoverable,
-            item.id if item is not None else None,
-            retry_count,
-        )
-
     def _start_worker_locked(
         self,
         channel: VoiceChannelKey,
-        session: _MusicSession,
+        session: MusicSession,
     ) -> bool:
         """Create one worker while the caller holds ``session.lock``."""
         if self._closing:
@@ -1063,19 +579,12 @@ class MusicRequestService:
         if session.worker is not None and not session.worker.done():
             return False
         worker = asyncio.create_task(
-            self._play_queue(channel, session),
+            self._playback.run(channel, session),
             name=f"music:{self._channel_ref(channel)}",
         )
         session.worker = worker
         worker.add_done_callback(lambda completed: self._on_worker_done(channel, completed))
         return True
-
-    @staticmethod
-    def _cancel_resolve_locked(session: _MusicSession) -> None:
-        """Cancel the current source lookup while the caller holds ``session.lock``."""
-        task = session.resolve_task
-        if task is not None and not task.done():
-            task.cancel()
 
     def _on_worker_done(
         self,
@@ -1095,30 +604,6 @@ class MusicRequestService:
             )
         else:
             logger.debug("Music playback worker completed: channel=%s", self._channel_ref(channel))
-
-    async def _release_voice(self, channel: VoiceChannelKey) -> bool:
-        for attempt, delay in enumerate((0.1, 0.25, 0.5), start=1):
-            try:
-                released = await self._voice.release(channel)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                logger.warning(
-                    "Could not release idle OOPZ voice channel: channel=%s attempt=%s error=%s",
-                    self._channel_ref(channel),
-                    attempt,
-                    type(exc).__name__,
-                )
-                if attempt < 3:
-                    await asyncio.sleep(delay)
-                continue
-            logger.info(
-                "Music voice channel released after queue drained: channel=%s left=%s",
-                self._channel_ref(channel),
-                released,
-            )
-            return True
-        return False
 
     @staticmethod
     def _channel_ref(channel: VoiceChannelKey) -> str:

@@ -9,7 +9,8 @@ from typing import Any
 from oopz_sdk.models.attachment import Attachment, ImageAttachment
 from oopz_sdk.models.segment import Image, Text, parse_message_segments
 
-from cywl_oopz.features.agent.input import AgentUserInput, ImageInputPart, TextInputPart
+from cywl_oopz.conversation.input import ImageInputPart, TextInputPart
+from cywl_oopz.conversation.input import UserInput as AgentUserInput
 
 logger = logging.getLogger(__name__)
 

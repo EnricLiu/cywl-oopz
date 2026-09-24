@@ -5,7 +5,7 @@ from __future__ import annotations
 from uuid import UUID
 
 from cywl_oopz.commands.models import CommandRequest
-from cywl_oopz.features.agent.models import AgentIdentity
+from cywl_oopz.conversation.models import ActorContext
 
 from .command_handlers import MusicCommandView
 from .command_parsing import (
@@ -32,13 +32,13 @@ class MusicPlaylistReferenceResolver:
     def __init__(self, playlists: MusicPlaylistService) -> None:
         self._playlists = playlists
 
-    async def playlist(self, identity: AgentIdentity, reference: str) -> MusicPlaylist:
+    async def playlist(self, identity: ActorContext, reference: str) -> MusicPlaylist:
         return await self._playlists.get(
             identity,
             await self.playlist_id(identity, reference),
         )
 
-    async def playlist_id(self, identity: AgentIdentity, reference: str) -> UUID:
+    async def playlist_id(self, identity: ActorContext, reference: str) -> UUID:
         try:
             return UUID(reference)
         except ValueError:
@@ -97,7 +97,7 @@ class MusicPlaylistCommandHandler:
     async def handle(
         self,
         request: CommandRequest,
-        identity: AgentIdentity,
+        identity: ActorContext,
         arguments: MusicArguments,
     ) -> None:
         if isinstance(arguments, PlaylistListArguments):
@@ -169,7 +169,7 @@ class MusicPlaylistCommandHandler:
     async def _mutation(
         self,
         request: CommandRequest,
-        identity: AgentIdentity,
+        identity: ActorContext,
         arguments: PlaylistMutationArguments,
     ) -> None:
         if arguments.action is PlaylistMutationAction.DELETE:

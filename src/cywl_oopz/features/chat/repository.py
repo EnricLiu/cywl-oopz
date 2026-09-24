@@ -9,10 +9,11 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from cywl_oopz.conversation.models import ConversationKey
 from cywl_oopz.core.errors import DatabaseError
 from cywl_oopz.storage.models import ConversationSessionRecord
 
-from .models import ChatMessage, ConversationKey, ConversationSession
+from .models import ChatMessage, ConversationSession
 
 logger = logging.getLogger(__name__)
 

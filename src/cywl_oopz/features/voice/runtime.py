@@ -4,13 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import random
 import time
 from collections import deque
 from collections.abc import Callable, Mapping
 from contextlib import suppress
-from dataclasses import dataclass, field, replace
-from uuid import UUID
+from dataclasses import replace
 
 from cywl_oopz.core.observability import exception_kind, opaque_ref
 from cywl_oopz.settings import VoiceSettings
@@ -18,13 +16,10 @@ from cywl_oopz.settings import VoiceSettings
 from .audio import VoiceAudioIngress, VoiceInputQueue, VoiceOutputTransitQueue
 from .errors import (
     VoiceAudioQueueClosedError,
-    VoiceProviderAuthenticationError,
-    VoiceProviderConfigurationError,
     VoiceProviderDisconnectedError,
 )
 from .events import (
     VoiceAssistantAudio,
-    VoiceModelEvent,
     VoiceProviderErrorEvent,
     VoiceProviderFailed,
     VoiceResponseCancelled,
@@ -39,7 +34,6 @@ from .events import (
 )
 from .models import (
     PcmChunk,
-    PlaybackCursor,
     VoiceMediaEndReason,
     VoiceProviderCapabilities,
     VoiceRecoveryContext,
@@ -52,9 +46,9 @@ from .models import (
     VoiceStopReason,
     VoiceTaskNotification,
 )
+from .notification_worker import VoiceNotificationWorker
 from .notifications import (
     VoiceTaskNotificationStrategy,
-    compile_internal_task_context,
     select_task_notification_strategy,
 )
 from .ports import (
@@ -68,6 +62,25 @@ from .ports import (
     VoiceSessionRuntimeFactory,
     VoiceTaskControlHandler,
     VoiceTaskMailbox,
+)
+from .recovery import VoiceMediaRecovery, VoiceProviderConnector
+from .runtime_events import (
+    _ActiveResponse,
+    _AudioBarrier,
+    _AudioEvent,
+    _ControlEvent,
+    _MailboxAvailable,
+    _MailboxClaimed,
+    _MailboxPresented,
+    _MediaEnded,
+    _MediaRecovered,
+    _MediaRecoveryFailed,
+    _ProviderEvent,
+    _PumpFailed,
+    _ResponseDrained,
+    _StopRequested,
+    _ToolCallFinished,
+    _WatchdogExpired,
 )
 from .settings import VoiceTurnRole
 
@@ -84,8 +97,6 @@ _TASK_READ_TIMEOUT_SECONDS = 0.15
 _NOTIFICATION_SILENCE_SECONDS = 0.7
 _NOTIFICATION_COALESCE_SECONDS = 0.4
 _NOTIFICATION_COOLDOWN_SECONDS = 5.0
-_NOTIFICATION_BATCH_LIMIT = 3
-_NOTIFICATION_PERSIST_ATTEMPTS = 3
 _NOTIFICATION_PERSIST_RETRY_SECONDS = 0.05
 
 
@@ -111,122 +122,6 @@ def _compact_recovery_text(text: str, limit: int) -> str:
     return normalized[:limit] or "（无可用文本）"
 
 
-@dataclass(frozen=True, slots=True)
-class _ProviderEvent:
-    session: RealtimeVoiceSession
-    event: VoiceModelEvent
-
-
-@dataclass(frozen=True, slots=True)
-class _StopRequested:
-    reason: VoiceStopReason
-
-
-@dataclass(frozen=True, slots=True)
-class _MediaEnded:
-    generation: int
-    reason: VoiceMediaEndReason
-    error_kind: str | None
-
-
-@dataclass(frozen=True, slots=True)
-class _MediaRecovered:
-    generation: int
-    media: VoiceMediaSession
-
-
-@dataclass(frozen=True, slots=True)
-class _MediaRecoveryFailed:
-    generation: int
-    reason: VoiceMediaEndReason
-    error_kind: str
-
-
-@dataclass(frozen=True, slots=True)
-class _PumpFailed:
-    pump: str
-    error_kind: str
-    retryable_provider: bool = False
-    media_generation: int | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class _WatchdogExpired:
-    reason: VoiceStopReason
-
-
-@dataclass(frozen=True, slots=True)
-class _ResponseDrained:
-    response_id: str
-    generation: int
-    cursor: PlaybackCursor
-
-
-@dataclass(frozen=True, slots=True)
-class _ToolCallFinished:
-    session: RealtimeVoiceSession
-    call_id: str
-    name: str
-    output: Mapping[str, object]
-    elapsed_ms: float
-
-
-@dataclass(frozen=True, slots=True)
-class _AudioBarrier:
-    response_id: str
-    generation: int
-    routed: asyncio.Future[None]
-
-
-@dataclass(frozen=True, slots=True)
-class _MailboxAvailable:
-    """A lossy completion signal or periodic reconciliation tick."""
-
-
-@dataclass(frozen=True, slots=True)
-class _MailboxClaimed:
-    notices: tuple[VoiceTaskNotification, ...]
-    error_kind: str = ""
-
-
-@dataclass(frozen=True, slots=True)
-class _MailboxPresented:
-    notices: tuple[VoiceTaskNotification, ...]
-    strategy: VoiceTaskNotificationStrategy
-    succeeded: bool
-
-    @property
-    def count(self) -> int:
-        return len(self.notices)
-
-
-@dataclass(slots=True)
-class _ActiveResponse:
-    response_id: str
-    generation: int
-    provider_item_id: str = ""
-    provider_done: bool = False
-    pending_transcript: VoiceTranscriptFinal | None = None
-    usage: dict[str, int | float] = field(default_factory=dict)
-
-
-_AudioEvent = VoiceAssistantAudio | _AudioBarrier
-_ControlEvent = (
-    _ProviderEvent
-    | _StopRequested
-    | _MediaEnded
-    | _MediaRecovered
-    | _MediaRecoveryFailed
-    | _PumpFailed
-    | _WatchdogExpired
-    | _ResponseDrained
-    | _ToolCallFinished
-    | _MailboxAvailable
-    | _MailboxClaimed
-    | _MailboxPresented
-)
-
-
 class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
     """Coordinate media and Provider tasks; only the control loop mutates session state."""
 
@@ -248,6 +143,14 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
         self._task_controls = task_controls
         self._task_mailbox = task_mailbox
         self._control: asyncio.Queue[_ControlEvent] = asyncio.Queue(settings.event_queue_size)
+        self._notifications = VoiceNotificationWorker(
+            context,
+            settings,
+            task_mailbox,
+            self._control.put,
+            coalesce_seconds=_NOTIFICATION_COALESCE_SECONDS,
+            persist_retry_seconds=_NOTIFICATION_PERSIST_RETRY_SECONDS,
+        )
         self._audio_events: asyncio.Queue[_AudioEvent] = asyncio.Queue(_AUDIO_STAGING_CHUNKS)
         self._input = VoiceInputQueue(settings.input_queue_ms)
         self._output = VoiceOutputTransitQueue(settings.output_queue_ms)
@@ -256,7 +159,9 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
         self._result: asyncio.Future[VoiceRuntimeResult] | None = None
         self._stop_signal: asyncio.Future[VoiceStopReason] | None = None
         self._media: VoiceMediaSession | None = None
-        self._pending_media: VoiceMediaSession | None = None
+        self._media_recovery = VoiceMediaRecovery(
+            context, settings, media_gateway, self._control.put
+        )
         self._media_generation = 0
         self._media_tasks: set[asyncio.Task[None]] = set()
         self._media_recovery_task: asyncio.Task[None] | None = None
@@ -328,7 +233,7 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
             self._spawn(self._provider_audio_router(), "voice-provider-audio")
             self._spawn(self._watchdog(), "voice-watchdog")
             if self._task_mailbox is not None:
-                self._spawn(self._mailbox_listener(), "voice-task-mailbox")
+                self._spawn(self._notifications.listen(), "voice-task-mailbox")
             session = self._provider_session
             if session is None:  # pragma: no cover - guarded by _connect_provider
                 raise RuntimeError("Voice Provider session was not connected")
@@ -454,8 +359,8 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
 
     async def _close_media_transport(self) -> None:
         media = self._media
-        pending = self._pending_media
-        self._pending_media = None
+        pending = self._media_recovery.pending
+        self._media_recovery.pending = None
         candidates: list[VoiceMediaSession] = []
         if media is not None:
             candidates.append(media)
@@ -493,66 +398,24 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
             )
 
     async def _connect_provider(self) -> None:
-        last_error: Exception | None = None
-        for attempt in range(1, self._settings.provider_connect_attempts + 1):
-            self._provider_connect_started_at = time.monotonic()
-            self._stats = replace(
-                self._stats,
-                provider_connect_attempts=self._stats.provider_connect_attempts + 1,
-            )
-            provider_context = replace(
-                self._context,
-                recovery_context=VoiceRecoveryContext(
-                    tuple(self._recovery_turns),
-                    tuple(self._recovery_tasks),
-                ),
-            )
-            provider = self._provider_builder(provider_context)
-            try:
-                session = await provider.connect(self._context.descriptor)
-            except asyncio.CancelledError:
-                with suppress(Exception):
-                    await provider.aclose()
-                raise
-            except Exception as exc:
-                last_error = exc
-                with suppress(Exception):
-                    await provider.aclose()
-                logger.warning(
-                    "Voice Provider connect failed: session=%s attempt=%d error=%s",
-                    opaque_ref(str(self._context.descriptor.session_id)),
-                    attempt,
-                    exception_kind(exc),
-                    exc_info=True,
-                )
-                if (
-                    isinstance(
-                        exc,
-                        (VoiceProviderAuthenticationError, VoiceProviderConfigurationError),
-                    )
-                    or attempt >= self._settings.provider_connect_attempts
-                ):
-                    break
-                delay = min(1.5, 0.2 * (2 ** (attempt - 1)))
-                delay *= random.uniform(0.8, 1.2)
-                logger.warning(
-                    "Voice Provider connect retry: session=%s attempt=%d error=%s",
-                    opaque_ref(str(self._context.descriptor.session_id)),
-                    attempt,
-                    exception_kind(exc),
-                )
-                await asyncio.sleep(delay)
-            else:
-                self._provider = provider
-                self._provider_session = session
-                self._stats = replace(
-                    self._stats,
-                    provider_connections=self._stats.provider_connections + 1,
-                )
-                return
-        raise VoiceProviderDisconnectedError(
-            "Voice Provider connection attempts exhausted"
-        ) from last_error
+        provider_context = replace(
+            self._context,
+            recovery_context=VoiceRecoveryContext(
+                tuple(self._recovery_turns), tuple(self._recovery_tasks)
+            ),
+        )
+        self._provider, self._provider_session = await VoiceProviderConnector(
+            self._settings
+        ).connect(provider_context, self._provider_builder, self._record_connect_attempt)
+        self._stats = replace(
+            self._stats, provider_connections=self._stats.provider_connections + 1
+        )
+
+    def _record_connect_attempt(self) -> None:
+        self._provider_connect_started_at = time.monotonic()
+        self._stats = replace(
+            self._stats, provider_connect_attempts=self._stats.provider_connect_attempts + 1
+        )
 
     async def _recover_provider(self, *, playout_flushed: bool = False) -> bool:
         if self._recovery_started_at is not None:
@@ -683,7 +546,7 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
             )
         await self._cancel_media_pumps()
         task = self._spawn(
-            self._recover_media(event.generation, event.reason, self._require_media()),
+            self._media_recovery.run(event.generation, event.reason, self._require_media()),
             "voice-media-recovery",
         )
         self._media_recovery_task = task
@@ -696,69 +559,13 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
             event.reason.value,
         )
 
-    async def _recover_media(
-        self,
-        generation: int,
-        reason: VoiceMediaEndReason,
-        old_media: VoiceMediaSession,
-    ) -> None:
-        replacement: VoiceMediaSession | None = None
-        try:
-            async with asyncio.timeout(self._settings.owner_leave_grace_seconds):
-                await old_media.aclose()
-                replacement = await self._media_gateway.open(
-                    self._context.descriptor,
-                    self._context.lease,
-                )
-            self._pending_media = replacement
-            await self._control.put(_MediaRecovered(generation, replacement))
-        except asyncio.CancelledError:
-            if replacement is not None:
-                await self._discard_replacement_media(replacement)
-                if self._pending_media is replacement:
-                    self._pending_media = None
-            raise
-        except TimeoutError:
-            if replacement is not None:
-                await self._discard_replacement_media(replacement)
-            await self._control.put(_MediaRecoveryFailed(generation, reason, "timeout"))
-        except Exception as exc:
-            if replacement is not None:
-                await self._discard_replacement_media(replacement)
-            logger.warning(
-                "Voice media recovery failed: session=%s generation=%d reason=%s error=%s",
-                opaque_ref(str(self._context.descriptor.session_id)),
-                generation,
-                reason.value,
-                exception_kind(exc),
-                exc_info=True,
-            )
-            await self._control.put(_MediaRecoveryFailed(generation, reason, exception_kind(exc)))
-
-    async def _discard_replacement_media(self, media: VoiceMediaSession) -> None:
-        try:
-            async with asyncio.timeout(min(0.25, self._settings.stop_timeout_seconds / 4)):
-                await media.aclose()
-        except TimeoutError:
-            logger.warning(
-                "Replacement voice media close exceeded cleanup budget: session=%s",
-                opaque_ref(str(self._context.descriptor.session_id)),
-            )
-        except Exception as exc:
-            logger.warning(
-                "Replacement voice media close failed: session=%s error=%s",
-                opaque_ref(str(self._context.descriptor.session_id)),
-                exception_kind(exc),
-                exc_info=True,
-            )
-
     async def _handle_media_recovered(self, event: _MediaRecovered) -> None:
         if event.generation != self._media_generation or self._closed:
-            if self._pending_media is event.media:
-                self._pending_media = None
+            if self._media_recovery.pending is event.media:
+                self._media_recovery.pending = None
             self._spawn(self._close_one_media(event.media), "voice-stale-media-close")
             return
-        self._pending_media = None
+        self._media_recovery.pending = None
         self._media = event.media
         self._media_generation += 1
         self._media_recovery_task = None
@@ -958,167 +765,158 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
             if isinstance(event, _MailboxPresented):
                 self._handle_mailbox_presented(event)
                 continue
-            if event.session is not self._provider_session:
-                logger.debug(
-                    "Ignoring event from stale Voice Provider session: session=%s event=%s",
-                    opaque_ref(str(self._context.descriptor.session_id)),
-                    type(event.event).__name__,
-                )
-                continue
-            model_event = event.event
-            self._last_activity = time.monotonic()
-            if isinstance(model_event, VoiceSessionReady):
-                now = time.monotonic()
-                ready_ms = (now - self._provider_connect_started_at) * 1000
-                recovery_started_at = self._recovery_started_at
-                recovery_ms = (
-                    (now - recovery_started_at) * 1000 if recovery_started_at is not None else 0.0
-                )
-                self._stats = replace(
-                    self._stats,
-                    initial_provider_ready_ms=(self._stats.initial_provider_ready_ms or ready_ms),
-                    last_provider_ready_ms=ready_ms,
-                    provider_reconnects=(
-                        self._stats.provider_reconnects + int(recovery_started_at is not None)
-                    ),
-                    last_provider_recovery_ms=(
-                        recovery_ms
-                        if recovery_started_at is not None
-                        else self._stats.last_provider_recovery_ms
-                    ),
-                    max_provider_recovery_ms=max(
-                        self._stats.max_provider_recovery_ms,
-                        recovery_ms,
-                    ),
-                )
-                self._recovery_started_at = None
-                logger.info(
-                    "Voice Provider ready: session=%s model=%s reconnect=%s "
-                    "ready_ms=%.1f recovery_ms=%.1f",
-                    opaque_ref(str(self._context.descriptor.session_id)),
-                    self._context.configuration.model.alias,
-                    recovery_started_at is not None,
-                    ready_ms,
-                    recovery_ms,
-                )
-                self._set_state(
-                    VoiceSessionState.RECOVERING
-                    if self._media_recovery_started_at is not None
-                    else (
-                        VoiceSessionState.USER_SPEAKING
-                        if self._user_speaking
-                        else VoiceSessionState.LISTENING
-                    )
-                )
-                self._provider_ready.set()
-                self._handle_mailbox_available()
-                if self._started and self._media_recovery_started_at is None:
-                    try:
-                        await self._sessions.mark_active(self._context.descriptor.session_id)
-                    except Exception as exc:
-                        logger.warning(
-                            "Could not persist recovered voice active state: session=%s error=%s",
-                            opaque_ref(str(self._context.descriptor.session_id)),
-                            exception_kind(exc),
-                            exc_info=True,
-                        )
-            elif isinstance(model_event, VoiceUserSpeechStarted):
-                if self._user_speaking:
-                    self._stats = replace(
-                        self._stats,
-                        duplicate_speech_started=self._stats.duplicate_speech_started + 1,
-                    )
-                    self._publish_status()
-                    continue
-                self._user_speaking = True
-                await self._require_media().set_user_speaking(True)
-                if self._active_response is None:
-                    self._set_state(VoiceSessionState.USER_SPEAKING)
-                    continue
-                await self._interrupt_active_response(
-                    notify_provider=True,
-                    target_state=VoiceSessionState.USER_SPEAKING,
-                    count_barge_in=True,
-                )
-            elif isinstance(model_event, VoiceUserSpeechStopped):
-                self._user_speaking = False
-                await self._require_media().set_user_speaking(False)
-                self._last_user_speech_stopped = time.monotonic()
-                self._set_state(VoiceSessionState.THINKING)
-            elif isinstance(model_event, VoiceResponseStarted):
-                await self._start_response(model_event.response_id)
-                if self._proactive_task_notices:
-                    notices = self._proactive_task_notices
-                    self._proactive_task_notices = ()
-                    self._spawn(
-                        self._mark_proactive_notifications_presented(notices),
-                        "voice-task-mailbox-proactive-presented",
-                    )
-            elif isinstance(model_event, VoiceAssistantAudio):
-                await self._stage_assistant_audio(model_event)
-            elif isinstance(model_event, VoiceTranscriptFinal):
-                await self._handle_final_transcript(model_event)
-            elif isinstance(model_event, VoiceResponseCompleted):
-                self._accumulate_response_usage(model_event.response_id, model_event.usage)
-                await self._complete_response_playout(model_event.response_id, model_event.usage)
-            elif isinstance(model_event, VoiceResponseCancelled):
-                self._accumulate_response_usage(model_event.response_id, model_event.usage)
-                if model_event.response_id in self._cancelled_response_set:
-                    continue
-                active = self._active_response
-                if active is None or active.response_id != model_event.response_id:
-                    if self._proactive_task_notices:
-                        await self._defer_pending_proactive_notifications()
-                    continue
-                await self._interrupt_active_response(
-                    notify_provider=False,
-                    target_state=(
-                        VoiceSessionState.USER_SPEAKING
-                        if self._user_speaking
-                        else VoiceSessionState.LISTENING
-                    ),
-                    count_barge_in=False,
-                )
-            elif isinstance(model_event, VoiceToolCall):
-                self._start_tool_call(event.session, model_event)
-            elif isinstance(model_event, (VoiceProviderFailed, VoiceProviderErrorEvent)):
-                if self._proactive_task_notices:
-                    await self._defer_pending_proactive_notifications()
-                log = logger.warning if model_event.retryable else logger.error
-                log(
-                    "Voice Provider reported failure: session=%s error=%s",
-                    opaque_ref(str(self._context.descriptor.session_id)),
-                    model_event,
-                )
-                if model_event.retryable and await self._recover_provider():
-                    continue
-                if self._result is not None and self._result.done():
-                    return
-                self._set_state(VoiceSessionState.FAILED)
-                self._complete(VoiceStopReason.PROVIDER_FAILED)
-                return
-            elif isinstance(model_event, VoiceSessionFinished):
-                logger.info(
-                    "Voice Provider session finished: session=%s",
-                    opaque_ref(str(self._context.descriptor.session_id)),
-                )
-                self._set_state(VoiceSessionState.CLOSING)
-                self._complete(VoiceStopReason.RUNTIME_ENDED)
+            await self._handle_provider_event(event)
+            if self._result is not None and self._result.done():
                 return
 
-    async def _mailbox_listener(self) -> None:
-        mailbox = self._task_mailbox
-        if mailbox is None:
-            return
-        await self._control.put(_MailboxAvailable())
-        while True:
-            signalled = await mailbox.wait(
-                self._context.descriptor.owner_person_id,
-                self._settings.mailbox_poll_seconds,
+    async def _handle_provider_event(self, event: _ProviderEvent) -> None:
+        if event.session is not self._provider_session:
+            logger.debug(
+                "Ignoring event from stale Voice Provider session: session=%s event=%s",
+                opaque_ref(str(self._context.descriptor.session_id)),
+                type(event.event).__name__,
             )
-            if signalled:
-                await asyncio.sleep(_NOTIFICATION_COALESCE_SECONDS)
-            await self._control.put(_MailboxAvailable())
+            return
+        model_event = event.event
+        self._last_activity = time.monotonic()
+        if isinstance(model_event, VoiceSessionReady):
+            await self._handle_provider_ready()
+        elif isinstance(model_event, VoiceUserSpeechStarted):
+            if self._user_speaking:
+                self._stats = replace(
+                    self._stats,
+                    duplicate_speech_started=self._stats.duplicate_speech_started + 1,
+                )
+                self._publish_status()
+                return
+            self._user_speaking = True
+            await self._require_media().set_user_speaking(True)
+            if self._active_response is None:
+                self._set_state(VoiceSessionState.USER_SPEAKING)
+                return
+            await self._interrupt_active_response(
+                notify_provider=True,
+                target_state=VoiceSessionState.USER_SPEAKING,
+                count_barge_in=True,
+            )
+        elif isinstance(model_event, VoiceUserSpeechStopped):
+            self._user_speaking = False
+            await self._require_media().set_user_speaking(False)
+            self._last_user_speech_stopped = time.monotonic()
+            self._set_state(VoiceSessionState.THINKING)
+        elif isinstance(model_event, VoiceResponseStarted):
+            await self._start_response(model_event.response_id)
+            if self._proactive_task_notices:
+                notices = self._proactive_task_notices
+                self._proactive_task_notices = ()
+                self._spawn(
+                    self._notifications.mark_presented(notices),
+                    "voice-task-mailbox-proactive-presented",
+                )
+        elif isinstance(model_event, VoiceAssistantAudio):
+            await self._stage_assistant_audio(model_event)
+        elif isinstance(model_event, VoiceTranscriptFinal):
+            await self._handle_final_transcript(model_event)
+        elif isinstance(model_event, VoiceResponseCompleted):
+            self._accumulate_response_usage(model_event.response_id, model_event.usage)
+            await self._complete_response_playout(model_event.response_id, model_event.usage)
+        elif isinstance(model_event, VoiceResponseCancelled):
+            self._accumulate_response_usage(model_event.response_id, model_event.usage)
+            if model_event.response_id in self._cancelled_response_set:
+                return
+            active = self._active_response
+            if active is None or active.response_id != model_event.response_id:
+                if self._proactive_task_notices:
+                    await self._defer_pending_proactive_notifications()
+                return
+            await self._interrupt_active_response(
+                notify_provider=False,
+                target_state=(
+                    VoiceSessionState.USER_SPEAKING
+                    if self._user_speaking
+                    else VoiceSessionState.LISTENING
+                ),
+                count_barge_in=False,
+            )
+        elif isinstance(model_event, VoiceToolCall):
+            self._start_tool_call(event.session, model_event)
+        elif isinstance(model_event, (VoiceProviderFailed, VoiceProviderErrorEvent)):
+            if self._proactive_task_notices:
+                await self._defer_pending_proactive_notifications()
+            log = logger.warning if model_event.retryable else logger.error
+            log(
+                "Voice Provider reported failure: session=%s error=%s",
+                opaque_ref(str(self._context.descriptor.session_id)),
+                model_event,
+            )
+            if model_event.retryable and await self._recover_provider():
+                return
+            if self._result is not None and self._result.done():
+                return
+            self._set_state(VoiceSessionState.FAILED)
+            self._complete(VoiceStopReason.PROVIDER_FAILED)
+            return
+        elif isinstance(model_event, VoiceSessionFinished):
+            logger.info(
+                "Voice Provider session finished: session=%s",
+                opaque_ref(str(self._context.descriptor.session_id)),
+            )
+            self._set_state(VoiceSessionState.CLOSING)
+            self._complete(VoiceStopReason.RUNTIME_ENDED)
+            return
+
+    async def _handle_provider_ready(self) -> None:
+        now = time.monotonic()
+        ready_ms = (now - self._provider_connect_started_at) * 1000
+        recovery_started_at = self._recovery_started_at
+        recovery_ms = (now - recovery_started_at) * 1000 if recovery_started_at is not None else 0.0
+        self._stats = replace(
+            self._stats,
+            initial_provider_ready_ms=(self._stats.initial_provider_ready_ms or ready_ms),
+            last_provider_ready_ms=ready_ms,
+            provider_reconnects=(
+                self._stats.provider_reconnects + int(recovery_started_at is not None)
+            ),
+            last_provider_recovery_ms=(
+                recovery_ms
+                if recovery_started_at is not None
+                else self._stats.last_provider_recovery_ms
+            ),
+            max_provider_recovery_ms=max(
+                self._stats.max_provider_recovery_ms,
+                recovery_ms,
+            ),
+        )
+        self._recovery_started_at = None
+        logger.info(
+            "Voice Provider ready: session=%s model=%s reconnect=%s ready_ms=%.1f recovery_ms=%.1f",
+            opaque_ref(str(self._context.descriptor.session_id)),
+            self._context.configuration.model.alias,
+            recovery_started_at is not None,
+            ready_ms,
+            recovery_ms,
+        )
+        self._set_state(
+            VoiceSessionState.RECOVERING
+            if self._media_recovery_started_at is not None
+            else (
+                VoiceSessionState.USER_SPEAKING
+                if self._user_speaking
+                else VoiceSessionState.LISTENING
+            )
+        )
+        self._provider_ready.set()
+        self._handle_mailbox_available()
+        if self._started and self._media_recovery_started_at is None:
+            try:
+                await self._sessions.mark_active(self._context.descriptor.session_id)
+            except Exception as exc:
+                logger.warning(
+                    "Could not persist recovered voice active state: session=%s error=%s",
+                    opaque_ref(str(self._context.descriptor.session_id)),
+                    exception_kind(exc),
+                    exc_info=True,
+                )
 
     def _handle_mailbox_available(self) -> None:
         self._mailbox_available_pending = True
@@ -1131,33 +929,7 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
             return
         self._mailbox_available_pending = False
         self._mailbox_claim_in_flight = True
-        self._spawn(self._claim_mailbox(), "voice-task-mailbox-claim")
-
-    async def _claim_mailbox(self) -> None:
-        mailbox = self._task_mailbox
-        if mailbox is None:
-            return
-        notices: tuple[VoiceTaskNotification, ...] = ()
-        error_kind = ""
-        try:
-            notices = await mailbox.claim(
-                self._context.descriptor.session_id,
-                _NOTIFICATION_BATCH_LIMIT,
-            )
-            await self._control.put(_MailboxClaimed(notices))
-        except asyncio.CancelledError:
-            if notices:
-                await asyncio.shield(mailbox.defer(tuple(item.task_id for item in notices)))
-            raise
-        except Exception as exc:
-            error_kind = exception_kind(exc)
-            logger.warning(
-                "Voice task mailbox claim failed: session=%s error=%s",
-                opaque_ref(str(self._context.descriptor.session_id)),
-                error_kind,
-                exc_info=True,
-            )
-            await self._control.put(_MailboxClaimed((), error_kind))
+        self._spawn(self._notifications.claim(), "voice-task-mailbox-claim")
 
     async def _handle_mailbox_claimed(self, event: _MailboxClaimed) -> None:
         self._mailbox_claim_in_flight = False
@@ -1181,7 +953,7 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                 self._stats,
                 task_notifications_deferred=self._stats.task_notifications_deferred + count,
             )
-            self._spawn(self._defer_notifications(task_ids), "voice-task-mailbox-defer")
+            self._spawn(self._notifications.defer(task_ids), "voice-task-mailbox-defer")
             return
 
         provider = self._provider
@@ -1193,7 +965,7 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
             self._notification_in_flight = True
             self._proactive_task_notices = event.notices
             self._spawn(
-                self._request_proactive_notifications(event.notices),
+                self._notifications.request_proactive(event.notices, self._provider_session),
                 "voice-task-mailbox-proactive",
             )
             return
@@ -1209,92 +981,13 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
                 strategy.value,
                 count,
             )
-            self._spawn(self._defer_notifications(task_ids), "voice-task-mailbox-capability-defer")
+            self._spawn(self._notifications.defer(task_ids), "voice-task-mailbox-capability-defer")
             return
 
         self._notification_in_flight = True
         self._spawn(
-            self._present_text_notifications(event.notices),
+            self._notifications.present_text(event.notices),
             "voice-task-mailbox-text",
-        )
-
-    async def _request_proactive_notifications(
-        self,
-        notices: tuple[VoiceTaskNotification, ...],
-    ) -> None:
-        session = self._provider_session
-        if session is None:
-            await self._proactive_request_failed(notices, "provider_session_missing")
-            return
-        try:
-            await session.request_proactive_response(compile_internal_task_context(notices))
-        except asyncio.CancelledError:
-            await asyncio.shield(
-                self._require_mailbox().defer(tuple(item.task_id for item in notices))
-            )
-            raise
-        except Exception as exc:
-            logger.warning(
-                "Voice proactive task notification request failed: session=%s tasks=%s error=%s",
-                opaque_ref(str(self._context.descriptor.session_id)),
-                len(notices),
-                exception_kind(exc),
-                exc_info=True,
-            )
-            await self._proactive_request_failed(notices, exception_kind(exc))
-
-    async def _proactive_request_failed(
-        self,
-        notices: tuple[VoiceTaskNotification, ...],
-        error_kind: str,
-    ) -> None:
-        logger.warning(
-            "Voice proactive task notification request failed: session=%s tasks=%s error=%s",
-            opaque_ref(str(self._context.descriptor.session_id)),
-            len(notices),
-            error_kind,
-        )
-        await self._defer_notifications(tuple(item.task_id for item in notices))
-        await self._control.put(
-            _MailboxPresented(
-                notices,
-                VoiceTaskNotificationStrategy.INTERNAL_RESPONSE,
-                False,
-            )
-        )
-
-    async def _mark_proactive_notifications_presented(
-        self,
-        notices: tuple[VoiceTaskNotification, ...],
-    ) -> None:
-        succeeded = False
-        task_ids = tuple(item.task_id for item in notices)
-        for attempt in range(1, _NOTIFICATION_PERSIST_ATTEMPTS + 1):
-            try:
-                await asyncio.shield(self._require_mailbox().mark_presented(task_ids))
-                succeeded = True
-                break
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                log = logger.error if attempt == _NOTIFICATION_PERSIST_ATTEMPTS else logger.warning
-                log(
-                    "Could not persist started proactive notification: "
-                    "session=%s tasks=%s attempt=%s error=%s",
-                    opaque_ref(str(self._context.descriptor.session_id)),
-                    len(notices),
-                    attempt,
-                    exception_kind(exc),
-                    exc_info=True,
-                )
-                if attempt < _NOTIFICATION_PERSIST_ATTEMPTS:
-                    await asyncio.sleep(_NOTIFICATION_PERSIST_RETRY_SECONDS * attempt)
-        await self._control.put(
-            _MailboxPresented(
-                notices,
-                VoiceTaskNotificationStrategy.INTERNAL_RESPONSE,
-                succeeded,
-            )
         )
 
     async def _defer_pending_proactive_notifications(self) -> None:
@@ -1302,62 +995,12 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
         if not notices:
             return
         self._proactive_task_notices = ()
-        await self._defer_notifications(tuple(item.task_id for item in notices))
+        await self._notifications.defer(tuple(item.task_id for item in notices))
         self._handle_mailbox_presented(
             _MailboxPresented(
                 notices,
                 VoiceTaskNotificationStrategy.INTERNAL_RESPONSE,
                 False,
-            )
-        )
-
-    async def _defer_notifications(self, task_ids: tuple[UUID, ...]) -> None:
-        mailbox = self._task_mailbox
-        if mailbox is None:
-            return
-        try:
-            await asyncio.shield(mailbox.defer(task_ids))
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            logger.warning(
-                "Voice task notification defer failed: session=%s tasks=%s error=%s",
-                opaque_ref(str(self._context.descriptor.session_id)),
-                len(task_ids),
-                exception_kind(exc),
-                exc_info=True,
-            )
-
-    async def _present_text_notifications(
-        self,
-        notices: tuple[VoiceTaskNotification, ...],
-    ) -> None:
-        mailbox = self._task_mailbox
-        if mailbox is None:
-            return
-        succeeded = False
-        try:
-            succeeded = await mailbox.present_text(notices)
-        except asyncio.CancelledError:
-            await asyncio.shield(mailbox.defer(tuple(item.task_id for item in notices)))
-            raise
-        except Exception as exc:
-            logger.warning(
-                "Voice task text fallback failed: session=%s tasks=%s error=%s",
-                opaque_ref(str(self._context.descriptor.session_id)),
-                len(notices),
-                exception_kind(exc),
-                exc_info=True,
-            )
-            await self._defer_notifications(tuple(item.task_id for item in notices))
-        else:
-            if not succeeded:
-                await self._defer_notifications(tuple(item.task_id for item in notices))
-        await self._control.put(
-            _MailboxPresented(
-                notices,
-                VoiceTaskNotificationStrategy.TEXT_FALLBACK,
-                succeeded,
             )
         )
 
@@ -1407,12 +1050,6 @@ class RealtimeVoiceSessionRuntimeImpl(VoiceSessionRuntime):
             and now - self._last_user_speech_stopped >= _NOTIFICATION_SILENCE_SECONDS
             and now - self._last_notification_attempt >= _NOTIFICATION_COOLDOWN_SECONDS
         )
-
-    def _require_mailbox(self) -> VoiceTaskMailbox:
-        mailbox = self._task_mailbox
-        if mailbox is None:  # pragma: no cover - guarded by notification call sites
-            raise RuntimeError("Voice task mailbox is unavailable")
-        return mailbox
 
     def _start_tool_call(
         self,

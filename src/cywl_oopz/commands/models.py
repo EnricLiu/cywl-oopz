@@ -7,7 +7,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from cywl_oopz.features.agent.input import AgentUserInput
+    from cywl_oopz.conversation.input import UserInput as AgentUserInput
 
     from .responses import CommandResponder
 

@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from typing import TypeVar
 from urllib.parse import urlsplit
 
-from cywl_oopz.features.chat.models import ConversationKey
+from cywl_oopz.conversation.models import ConversationKey
 from cywl_oopz.settings import WebToolsSettings
 
 from .errors import BrowserError, BrowserUnavailableError, WebPageUrlError

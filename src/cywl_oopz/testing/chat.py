@@ -4,13 +4,8 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 
-from cywl_oopz.features.chat.models import (
-    ChatChunk,
-    ChatRequest,
-    ChatResponse,
-    ConversationKey,
-    ConversationSession,
-)
+from cywl_oopz.conversation.models import ChatResponse, ConversationKey
+from cywl_oopz.features.chat.models import ChatChunk, ChatRequest, ConversationSession
 
 
 class InMemoryConversationRepository:

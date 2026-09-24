@@ -9,12 +9,12 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
+from cywl_oopz.conversation.input import UserInput as AgentUserInput
+from cywl_oopz.conversation.progress import ProgressSink, RunTraceSink
 from cywl_oopz.core.errors import AgentInternalError, ProviderError, ProviderTimeoutError
 from cywl_oopz.core.health import HealthRegistry, HealthState
 from cywl_oopz.core.observability import exception_kind, opaque_ref
-from cywl_oopz.features.chat.progress import ProgressSink, RunTraceSink
 
-from .input import AgentUserInput
 from .models import (
     AgentIdentity,
     AgentMessage,

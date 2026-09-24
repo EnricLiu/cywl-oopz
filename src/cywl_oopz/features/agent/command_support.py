@@ -5,9 +5,9 @@ from __future__ import annotations
 import logging
 
 from cywl_oopz.commands.models import CommandRequest, CommandScope
+from cywl_oopz.conversation.error_presenter import ChatErrorPresenter
+from cywl_oopz.conversation.models import ChatInvocation, ConversationKey
 from cywl_oopz.core.observability import opaque_ref
-from cywl_oopz.features.chat.error_presenter import ChatErrorPresenter
-from cywl_oopz.features.chat.models import ChatInvocation, ConversationKey
 
 logger = logging.getLogger(__name__)
 

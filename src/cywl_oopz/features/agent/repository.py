@@ -14,8 +14,9 @@ from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from cywl_oopz.conversation.input import UserInput as AgentUserInput
+from cywl_oopz.conversation.models import ConversationKey
 from cywl_oopz.core.errors import DatabaseError
-from cywl_oopz.features.chat.models import ConversationKey
 from cywl_oopz.storage.models import (
     AgentMediaAssetRecord,
     AgentMessageRecord,
@@ -28,7 +29,6 @@ from cywl_oopz.storage.models import (
     UserLlmPreferenceRecord,
 )
 
-from .input import AgentUserInput
 from .models import (
     AgentMessage,
     AgentRun,

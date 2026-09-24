@@ -7,8 +7,8 @@ from urllib.parse import urlparse
 
 import httpx
 
+from cywl_oopz.conversation.input import ImageInputPart
 from cywl_oopz.core.errors import UserRequestError
-from cywl_oopz.features.agent.input import ImageInputPart
 
 
 class OopzImageContentLoader:

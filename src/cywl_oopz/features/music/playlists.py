@@ -6,8 +6,8 @@ import logging
 import unicodedata
 from uuid import UUID
 
+from cywl_oopz.conversation.models import ActorContext
 from cywl_oopz.core.observability import opaque_ref
-from cywl_oopz.features.agent.models import AgentIdentity
 from cywl_oopz.settings import MusicSettings
 
 from .errors import (
@@ -58,7 +58,7 @@ class MusicPlaylistService:
         self._music = music
         self._playlist_source = playlist_source
 
-    async def create(self, identity: AgentIdentity, name: str) -> MusicPlaylist:
+    async def create(self, identity: ActorContext, name: str) -> MusicPlaylist:
         area_id = self._area_id(identity)
         display_name, normalized_name = self._normalize_name(name)
         playlist = await self._repository.create(
@@ -74,7 +74,7 @@ class MusicPlaylistService:
         )
         return playlist
 
-    async def list(self, identity: AgentIdentity) -> tuple[MusicPlaylistSummary, ...]:
+    async def list(self, identity: ActorContext) -> tuple[MusicPlaylistSummary, ...]:
         area_id = self._area_id(identity)
         playlists = await self._repository.list(area_id)
         logger.debug(
@@ -84,7 +84,7 @@ class MusicPlaylistService:
         )
         return playlists
 
-    async def get(self, identity: AgentIdentity, playlist_id: UUID) -> MusicPlaylist:
+    async def get(self, identity: ActorContext, playlist_id: UUID) -> MusicPlaylist:
         area_id = self._area_id(identity)
         playlist = await self._repository.get(area_id, playlist_id)
         if playlist is None:
@@ -93,7 +93,7 @@ class MusicPlaylistService:
 
     async def add(
         self,
-        identity: AgentIdentity,
+        identity: ActorContext,
         playlist_id: UUID,
         query: str,
     ) -> MusicPlaylistEntry:
@@ -102,7 +102,7 @@ class MusicPlaylistService:
 
     async def add_query(
         self,
-        identity: AgentIdentity,
+        identity: ActorContext,
         playlist_id: UUID,
         query: str,
         *,
@@ -117,7 +117,7 @@ class MusicPlaylistService:
 
     async def add_input(
         self,
-        identity: AgentIdentity,
+        identity: ActorContext,
         playlist_id: UUID,
         value: str,
         *,
@@ -129,7 +129,7 @@ class MusicPlaylistService:
 
     async def add_reference(
         self,
-        identity: AgentIdentity,
+        identity: ActorContext,
         playlist_id: UUID,
         reference: MusicTrackReference,
     ) -> MusicPlaylistEntry:
@@ -139,7 +139,7 @@ class MusicPlaylistService:
 
     async def _append(
         self,
-        identity: AgentIdentity,
+        identity: ActorContext,
         playlist_id: UUID,
         track: MusicTrack,
     ) -> MusicPlaylistEntry:
@@ -162,7 +162,7 @@ class MusicPlaylistService:
 
     async def remove(
         self,
-        identity: AgentIdentity,
+        identity: ActorContext,
         playlist_id: UUID,
         entry_id: UUID,
     ) -> PlaylistTrackRemoval:
@@ -179,7 +179,7 @@ class MusicPlaylistService:
 
     async def rename(
         self,
-        identity: AgentIdentity,
+        identity: ActorContext,
         playlist_id: UUID,
         name: str,
     ) -> PlaylistRename:
@@ -201,7 +201,7 @@ class MusicPlaylistService:
 
     async def delete(
         self,
-        identity: AgentIdentity,
+        identity: ActorContext,
         playlist_id: UUID,
     ) -> PlaylistDeletion:
         area_id = self._area_id(identity)
@@ -217,7 +217,7 @@ class MusicPlaylistService:
 
     async def clear(
         self,
-        identity: AgentIdentity,
+        identity: ActorContext,
         playlist_id: UUID,
     ) -> PlaylistClear:
         area_id = self._area_id(identity)
@@ -232,7 +232,7 @@ class MusicPlaylistService:
 
     async def load(
         self,
-        identity: AgentIdentity,
+        identity: ActorContext,
         playlist_id: UUID,
     ) -> PlaylistQueueLoad:
         playlist = await self.get(identity, playlist_id)
@@ -270,7 +270,7 @@ class MusicPlaylistService:
 
     async def import_netease(
         self,
-        identity: AgentIdentity,
+        identity: ActorContext,
         reference: str,
         *,
         name: str | None,
@@ -328,7 +328,7 @@ class MusicPlaylistService:
         return display_name, normalized_name
 
     @staticmethod
-    def _area_id(identity: AgentIdentity) -> str:
+    def _area_id(identity: ActorContext) -> str:
         area_id = identity.conversation.area_id.strip()
         if not area_id:
             raise MusicAreaRequiredError("Shared music playlists require an OOPZ area")
