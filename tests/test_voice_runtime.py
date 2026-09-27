@@ -1483,7 +1483,7 @@ async def test_realtime_runtime_stop_preempts_owner_media_recovery() -> None:
         await runtime.aclose()
 
     assert reopen_cancelled.is_set()
-    assert runtime._pending_media is None
+    assert runtime._media_recovery.pending is None
     assert not runtime._tasks
 
 

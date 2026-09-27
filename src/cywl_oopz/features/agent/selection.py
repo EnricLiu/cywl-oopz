@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import logging
 
+from cywl_oopz.conversation.models import ConversationKey
 from cywl_oopz.core.errors import ProviderSelectionError
 from cywl_oopz.core.observability import opaque_ref
-from cywl_oopz.features.chat.models import ConversationKey
 
 from .catalog import ReloadableProviderCatalog
 from .models import ModelCapability, ModelSelection, ModelSelectionSource

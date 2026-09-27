@@ -25,6 +25,7 @@ from cywl_oopz.features.chat.models import ChatResponse, ConversationKey
 from cywl_oopz.features.chat.progress import ConversationProgressEvent, ProgressKind
 from cywl_oopz.features.chat.tasks import ChatTaskSupervisor
 from cywl_oopz.integrations.oopz.agent_presenter import OopzAgentPresenterFactory
+from cywl_oopz.integrations.oopz.chat_invocation import conversation_key_from_context
 from cywl_oopz.integrations.oopz.editable_messages import (
     EditableMessageRef,
     MessageAddress,
@@ -138,7 +139,7 @@ class LiveAgentDisplayHarness:
             config=self.settings.oopz,
             event=event,
         )
-        self.key = ConversationKey.from_oopz_context(self.context)
+        self.key = conversation_key_from_context(self.context)
 
     async def run(self, prompt: str) -> None:
         await self.run_with(self.application.agent_chat, prompt)

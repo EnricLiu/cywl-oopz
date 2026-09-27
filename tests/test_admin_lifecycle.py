@@ -179,6 +179,50 @@ async def test_oopz_stop_timeout_still_releases_the_run_task() -> None:
     assert run_released.is_set()
 
 
+@pytest.mark.parametrize("cancel_close", [False, True])
+@pytest.mark.asyncio
+async def test_shutdown_attempts_all_resources_in_dependency_order(cancel_close: bool) -> None:
+    closed: list[str] = []
+    failure = asyncio.CancelledError() if cancel_close else RuntimeError("close failed")
+
+    class Resource:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        async def aclose(self) -> None:
+            closed.append(self.name)
+            if self.name == "voice_conversations":
+                raise failure
+
+        close = aclose
+
+    names = (
+        "command_tasks",
+        "chat_tasks",
+        "agent_summary_tasks",
+        "voice_conversations",
+        "delegated_task_scheduler",
+        "delegated_task_text_fallback",
+        "music",
+        "music_ytdlp_runner",
+        "voice_channel_sessions",
+        "browser",
+        "web_search",
+        "agent_engine",
+        "agent_image_client",
+        "_provider",
+        "database",
+    )
+    application = object.__new__(BotApplication)
+    for name in names:
+        setattr(application, name, Resource(name))
+
+    with pytest.raises(type(failure)):
+        await application._close_resources()
+
+    assert closed == list(names)
+
+
 def test_cli_uses_exit_code_75_only_for_restart(monkeypatch) -> None:
     class FakeSettings:
         @staticmethod

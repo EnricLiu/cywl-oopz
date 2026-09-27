@@ -8,30 +8,26 @@ import time
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
+from cywl_oopz.conversation.input import TextInputPart
+from cywl_oopz.conversation.input import UserInput as AgentUserInput
+from cywl_oopz.conversation.models import ChatInvocation, ChatResponse, ChatStatus, ConversationKey
+from cywl_oopz.conversation.progress import (
+    ConversationProgressEvent,
+    ProgressKind,
+    ProgressSink,
+    emit_progress,
+)
 from cywl_oopz.core.errors import ProviderSelectionError, UserRequestError
 from cywl_oopz.core.health import HealthRegistry, HealthState
 from cywl_oopz.core.observability import exception_kind, opaque_ref
 from cywl_oopz.core.tasks import TaskSupervisor
 from cywl_oopz.features.chat.history import HistoryTrimmer
 from cywl_oopz.features.chat.locks import ConversationLockPool
-from cywl_oopz.features.chat.models import (
-    ChatInvocation,
-    ChatResponse,
-    ChatStatus,
-    ConversationKey,
-)
-from cywl_oopz.features.chat.progress import (
-    ConversationProgressEvent,
-    ProgressKind,
-    ProgressSink,
-    emit_progress,
-)
 from cywl_oopz.features.chat.rate_limit import RateLimitService
 from cywl_oopz.settings import AgentSettings, ChatSettings
 
 from .catalog import ReloadableProviderCatalog
 from .context import AgentContextBuilder
-from .input import AgentUserInput, TextInputPart
 from .media import AgentMediaIngestService
 from .models import (
     AgentIdentity,

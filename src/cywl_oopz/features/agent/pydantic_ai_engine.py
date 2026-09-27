@@ -33,6 +33,8 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 
+from cywl_oopz.conversation.input import IMAGE_ONLY_PROMPT, ImageInputPart, TextInputPart
+from cywl_oopz.conversation.progress import ProgressSink, emit_progress
 from cywl_oopz.core.errors import (
     AgentInternalError,
     ProviderError,
@@ -40,9 +42,7 @@ from cywl_oopz.core.errors import (
     ProviderTimeoutError,
 )
 from cywl_oopz.core.observability import exception_kind, opaque_ref
-from cywl_oopz.features.chat.progress import ProgressSink, emit_progress
 
-from .input import IMAGE_ONLY_PROMPT, ImageInputPart, TextInputPart
 from .models import AgentMessage, AgentRunRequest, AgentRunResult, AgentStopReason
 from .progress import ConversationToolProgressReporter, PydanticAiProgressMapper
 from .provider_retry import bind_provider_retry_progress

@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 
-from cywl_oopz.features.chat.progress import (
+from cywl_oopz.conversation.progress import (
     ConversationProgressEvent,
     ProgressKind,
     ProgressSink,

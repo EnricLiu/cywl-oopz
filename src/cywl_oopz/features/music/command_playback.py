@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from cywl_oopz.commands.models import CommandRequest
-from cywl_oopz.features.agent.models import AgentIdentity
+from cywl_oopz.conversation.models import ActorContext
 
 from .command_handlers import MusicCommandView
 from .command_parsing import (
@@ -30,7 +30,7 @@ class MusicHelpCommandHandler:
     async def handle(
         self,
         request: CommandRequest,
-        identity: AgentIdentity,
+        identity: ActorContext,
         arguments: MusicArguments,
     ) -> None:
         del identity, arguments
@@ -56,7 +56,7 @@ class MusicPlaybackCommandHandler:
     async def handle(
         self,
         request: CommandRequest,
-        identity: AgentIdentity,
+        identity: ActorContext,
         arguments: MusicArguments,
     ) -> None:
         if isinstance(arguments, MusicPlayArguments):
@@ -121,7 +121,7 @@ class MusicModeCommandHandler:
     async def handle(
         self,
         request: CommandRequest,
-        identity: AgentIdentity,
+        identity: ActorContext,
         arguments: MusicArguments,
     ) -> None:
         assert isinstance(arguments, MusicModeArguments)

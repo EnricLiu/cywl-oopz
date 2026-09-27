@@ -12,6 +12,9 @@ __pycache__/
 coverage.xml
 htmlcov/
 
+sdk/
+ref/
 docs/
-impl-logs/
 logs/
+deploy/
+impl-logs/

@@ -24,6 +24,7 @@ jobs:
           --health-retries 10
     env:
       DATABASE_URL: postgresql+asyncpg://cywl:test-password@127.0.0.1:5432/cywl_test
+      CYWL_RUN_POSTGRES_TESTS: "1"
     steps:
       - uses: actions/checkout@v4
       - run: |

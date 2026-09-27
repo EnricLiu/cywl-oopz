@@ -31,11 +31,14 @@ from cywl_oopz.features.music.models import (
     PlayableTrack,
     PlaybackOrder,
     PlaybackState,
+    QueuedTrack,
     RepeatPolicy,
     ResolvedMediaInput,
     VoiceChannelKey,
 )
 from cywl_oopz.features.music.service import MusicRequestService
+from cywl_oopz.features.music.session import MusicSession
+from cywl_oopz.features.music.track_playback import TrackPlaybackRunner
 from cywl_oopz.settings import MusicSettings
 
 
@@ -54,6 +57,41 @@ def identity(person_id: str = "person") -> AgentIdentity:
         person_id,
         ConversationKey("channel", "area", "text", person_id),
     )
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_playback_handoff_closes_unclaimed_handle() -> None:
+    session = MusicSession()
+    channel = VoiceChannelKey("area", "voice")
+    item = QueuedTrack(MusicTrack("netease", "track", "track", (), 1000), "person")
+    started = asyncio.Event()
+    stopped = asyncio.Event()
+
+    class Playback:
+        async def stop(self) -> None:
+            stopped.set()
+
+    class Voice:
+        async def start_playback(self, channel, playable):
+            # Hold the lock at the ownership handoff, after the transport exists.
+            await session.lock.acquire()
+            started.set()
+            return Playback()
+
+    runner = TrackPlaybackRunner(FakeCatalog(), Voice())
+    work = asyncio.create_task(runner.prepare(channel, session, item))
+    try:
+        await asyncio.wait_for(started.wait(), 1)
+        work.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await work
+        assert stopped.is_set()
+        assert session.playback is None
+    finally:
+        if session.lock.locked():
+            session.lock.release()
+        work.cancel()
+        await asyncio.gather(work, return_exceptions=True)
 
 
 class FakeCatalog:

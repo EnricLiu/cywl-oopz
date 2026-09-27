@@ -6,10 +6,10 @@ from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
-from cywl_oopz.features.chat.models import ConversationKey
-from cywl_oopz.features.chat.progress import ProgressSink
+from cywl_oopz.conversation.input import UserInput as AgentUserInput
+from cywl_oopz.conversation.models import ConversationKey
+from cywl_oopz.conversation.progress import ProgressSink
 
-from .input import AgentUserInput
 from .models import (
     AgentMessage,
     AgentRun,

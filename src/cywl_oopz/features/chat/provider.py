@@ -5,9 +5,10 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import Protocol
 
+from cywl_oopz.conversation.models import ChatResponse
 from cywl_oopz.core.errors import FeatureDisabledError
 
-from .models import ChatChunk, ChatRequest, ChatResponse
+from .models import ChatChunk, ChatRequest
 
 
 class ChatProvider(Protocol):

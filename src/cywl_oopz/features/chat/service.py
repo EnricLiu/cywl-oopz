@@ -6,6 +6,14 @@ import logging
 import time
 from datetime import UTC, datetime, timedelta
 
+from cywl_oopz.conversation.input import UserInput as AgentUserInput
+from cywl_oopz.conversation.models import ChatInvocation, ChatResponse, ChatStatus, ConversationKey
+from cywl_oopz.conversation.progress import (
+    ConversationProgressEvent,
+    ProgressKind,
+    ProgressSink,
+    emit_progress,
+)
 from cywl_oopz.core.errors import (
     AuthorizationError,
     FeatureDisabledError,
@@ -14,22 +22,11 @@ from cywl_oopz.core.errors import (
 )
 from cywl_oopz.core.health import HealthRegistry, HealthState
 from cywl_oopz.core.observability import exception_kind, opaque_ref
-from cywl_oopz.features.agent.input import AgentUserInput
 from cywl_oopz.settings import ChatSettings
 
 from .history import HistoryTrimmer
 from .locks import ConversationLockPool
-from .models import (
-    ChatInvocation,
-    ChatMessage,
-    ChatRequest,
-    ChatResponse,
-    ChatRole,
-    ChatStatus,
-    ConversationKey,
-    ConversationSession,
-)
-from .progress import ConversationProgressEvent, ProgressKind, ProgressSink, emit_progress
+from .models import ChatMessage, ChatRequest, ChatRole, ConversationSession
 from .provider import ChatProvider
 from .rate_limit import RateLimitService
 from .repository import ConversationRepository

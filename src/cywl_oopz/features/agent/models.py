@@ -11,15 +11,16 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 from uuid import UUID
 
+from cywl_oopz.conversation.models import ActorContext as AgentIdentity
+from cywl_oopz.conversation.models import ConversationKey
 from cywl_oopz.core.lifecycle import (
     AgentRunStatus,
     AgentStopReason,
     ModelSelectionSource,
 )
-from cywl_oopz.features.chat.models import ConversationKey
 
 if TYPE_CHECKING:
-    from cywl_oopz.features.agent.input import AgentUserInput
+    from cywl_oopz.conversation.input import UserInput as AgentUserInput
     from cywl_oopz.features.agent.skills.scope import AgentSkillRunScope
 
 
@@ -167,17 +168,6 @@ class ModelCatalogView:
 
     selection: ModelSelection
     choices: tuple[SelectableModel, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class AgentIdentity:
-    """Trusted caller identity derived from OOPZ context by the integration layer."""
-
-    person_id: str
-    conversation: ConversationKey
-    source_message_id: str = ""
-    transport_channel_id: str = ""
-    mentioned_person_ids: tuple[str, ...] = field(default=(), repr=False)
 
 
 @dataclass(frozen=True, slots=True)

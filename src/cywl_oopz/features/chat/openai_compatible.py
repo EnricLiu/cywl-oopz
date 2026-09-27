@@ -9,11 +9,12 @@ from typing import Any
 
 import httpx
 
+from cywl_oopz.conversation.models import ChatResponse
 from cywl_oopz.core.errors import ProviderError, ProviderResponseError, ProviderTimeoutError
 from cywl_oopz.core.observability import exception_kind
 from cywl_oopz.settings import ChatSettings
 
-from .models import ChatChunk, ChatRequest, ChatResponse
+from .models import ChatChunk, ChatRequest
 
 logger = logging.getLogger(__name__)
 

@@ -372,6 +372,49 @@ class ProgressChatService:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("entry", ["command", "mention", "private"])
+async def test_cancel_fallback_is_traced_and_closed_for_every_entry(entry: str) -> None:
+    class CancelledService:
+        enabled = True
+
+        async def ask(self, *args, **kwargs):
+            raise asyncio.CancelledError
+
+    class BrokenCancelTrace(DirectPresentation):
+        owns_message = True
+
+        async def cancel(self) -> None:
+            raise RuntimeError("edit unavailable")
+
+    presentation = BrokenCancelTrace()
+    factory = OwnedPresentationFactory(presentation)
+    service = CancelledService()
+    message = FakeMessage(
+        "/chat hello" if entry == "command" else "hello",
+        mention_list=(SimpleNamespace(person="bot"),),
+    )
+    context = context_for(message, private=entry == "private")
+    if entry == "command":
+        router = CommandRouter("/")
+        router.register_definition(ChatCommand(service, ChatTaskSupervisor(), factory).definition())
+        operation = dispatch_command(router, message, context)
+    elif entry == "mention":
+        operation = MentionChatHandler(service, "bot", factory).handle(message, context)
+    else:
+        operation = AmbientChatHandler(
+            service, InMemoryChannelSettingsRepository(), factory
+        ).handle(message, context)
+
+    with pytest.raises(asyncio.CancelledError):
+        await operation
+
+    assert context.replies == ["已取消当前文字回复。"]
+    assert len(presentation.deliveries) == 1
+    assert presentation.deliveries[0][3] is True
+    assert presentation.closed is True
+
+
+@pytest.mark.asyncio
 async def test_owned_presentation_replaces_the_normal_final_reply() -> None:
     presentation = OwnedPresentation()
     router = CommandRouter("/")

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from enum import StrEnum
 
-from cywl_oopz.features.chat.progress import ConversationProgressEvent, ProgressKind
+from cywl_oopz.conversation.progress import ConversationProgressEvent, ProgressKind
 
 
 class DisplayPhase(StrEnum):

@@ -197,6 +197,8 @@ with content that requires an authenticated session; never commit those files.
 ```text
 src/cywl_oopz/
   application.py        Composition root and application lifecycle
+  composition/          Explicit builders for music, web, Agent, and voice
+  conversation/         Shared input, identity, progress, and reply lifecycle
   commands/             Command parsing, routing, and basic commands
   core/                 Shared errors, health, observability, and task helpers
   features/
@@ -211,6 +213,27 @@ src/cywl_oopz/
 tests/                  Unit, integration-contract, and opt-in live tests
 sdk/                    OOPZ SDK submodule
 ```
+
+`BotApplication` creates the OOPZ bot and owns resource startup and shutdown.
+The builders in `composition/` receive explicit dependencies and return typed
+component bundles; they do not create another bot or manage application shutdown.
+
+Commands and OOPZ message handlers adapt requests into `conversation/` contracts.
+`ConversationResponder` shares completion, error fallback, cancellation, delivery
+tracking, and presenter cleanup across those entry points. SDK context conversion
+lives in `integrations/oopz/chat_invocation.py`. Existing shared imports from
+`features/chat` and `features/agent/input.py` remain compatibility exports; use
+`conversation/` for new shared code.
+
+Music responsibilities are split between `service.py` (user operations),
+`session.py` (per-channel state and locks), `track_playback.py` (source resolution
+and playback startup), and `playback.py` (queue advancement, retries, and voice
+release). Queue mutations still use the session lock, including idle release.
+
+Voice `runtime.py` owns the control loop and its background tasks.
+`notification_worker.py` performs mailbox I/O, while `recovery.py` handles
+provider connection retries and replacement media. Workers report results through
+`runtime_events.py`; the control loop accepts resources and updates session state.
 
 ## Develop and verify
 

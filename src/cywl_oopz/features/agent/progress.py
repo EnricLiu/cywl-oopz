@@ -15,13 +15,13 @@ from pydantic_ai.messages import (
     ToolReturnPart,
 )
 
-from cywl_oopz.core.observability import exception_kind
-from cywl_oopz.features.chat.progress import (
+from cywl_oopz.conversation.progress import (
     ConversationProgressEvent,
     ProgressKind,
     ProgressSink,
     emit_progress,
 )
+from cywl_oopz.core.observability import exception_kind
 
 from .tool_progress import ToolProgressCatalog, ToolProgressPresentation
 from .tools.models import ToolDescriptor, ToolProgressUpdate

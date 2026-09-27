@@ -11,15 +11,15 @@ from typing import Protocol
 
 from PIL import Image, UnidentifiedImageError
 
-from cywl_oopz.core.errors import UserRequestError
-from cywl_oopz.features.chat.progress import (
+from cywl_oopz.conversation.input import ImageInputPart
+from cywl_oopz.conversation.input import UserInput as AgentUserInput
+from cywl_oopz.conversation.progress import (
     ConversationProgressEvent,
     ProgressKind,
     ProgressSink,
     emit_progress,
 )
-
-from .input import AgentUserInput, ImageInputPart
+from cywl_oopz.core.errors import UserRequestError
 
 
 @dataclass(frozen=True, slots=True)

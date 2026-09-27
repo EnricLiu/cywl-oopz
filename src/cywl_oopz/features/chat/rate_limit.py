@@ -7,11 +7,10 @@ import logging
 import time
 from dataclasses import dataclass
 
+from cywl_oopz.conversation.models import ConversationKey
 from cywl_oopz.core.errors import RateLimitExceeded
 from cywl_oopz.core.observability import opaque_ref
 from cywl_oopz.settings import ChatSettings
-
-from .models import ConversationKey
 
 logger = logging.getLogger(__name__)
 

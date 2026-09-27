@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
+from cywl_oopz.conversation.models import ConversationKey
 from cywl_oopz.core.tasks import TaskSupervisor
 from cywl_oopz.features.admin.models import OopzMessageScope, OutboundMessageReceipt
-
-from .models import ConversationKey
 
 
 class ChatTaskSupervisor(TaskSupervisor[ConversationKey]):

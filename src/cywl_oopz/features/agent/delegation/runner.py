@@ -11,6 +11,8 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
+from cywl_oopz.conversation.models import ConversationKey
+from cywl_oopz.conversation.progress import ConversationProgressEvent, ProgressKind, ProgressSink
 from cywl_oopz.core.errors import (
     ConfigurationError,
     DatabaseError,
@@ -20,8 +22,6 @@ from cywl_oopz.core.errors import (
 )
 from cywl_oopz.core.lifecycle import ModelSelectionSource, ToolEffect
 from cywl_oopz.core.observability import exception_kind, opaque_ref
-from cywl_oopz.features.chat.models import ConversationKey
-from cywl_oopz.features.chat.progress import ConversationProgressEvent, ProgressKind, ProgressSink
 from cywl_oopz.settings import AgentSettings
 
 from ..catalog import ReloadableProviderCatalog
