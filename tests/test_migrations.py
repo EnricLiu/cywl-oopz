@@ -1,7 +1,31 @@
+import logging
+
+from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
+from sqlalchemy import create_engine
 
 from cywl_oopz.storage.models import Base
+
+
+def test_embedded_alembic_preserves_application_logging(caplog) -> None:
+    logger = logging.getLogger("cywl_oopz.core.health")
+    caplog.set_level(logging.INFO, logger=logger.name)
+    root_handlers = tuple(logging.getLogger().handlers)
+    engine = create_engine("sqlite://")
+    try:
+        with engine.connect() as connection:
+            config = Config("alembic.ini")
+            config.attributes["connection"] = connection
+            # Inspecting the revision executes env.py without PostgreSQL DDL.
+            command.current(config)
+
+        assert logger.disabled is False
+        assert tuple(logging.getLogger().handlers) == root_handlers
+        logger.info("Application logging survives embedded Alembic")
+        assert "Application logging survives embedded Alembic" in caplog.messages
+    finally:
+        engine.dispose()
 
 
 def test_initial_schema_models_and_migration_head_are_present() -> None:

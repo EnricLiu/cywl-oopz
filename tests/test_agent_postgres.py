@@ -1223,14 +1223,13 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
         assert summarized_thread.summary == "question and answer"
         assert summarized_thread.summary_through_sequence == 2
         assert summarized_thread.summary_version == 1
-        assert (
-            await message_repository.load(
-                thread.id,
-                limit=10,
-                after_sequence=2,
-            )
-            == ()
+        remaining = await message_repository.load(
+            thread.id,
+            limit=10,
+            after_sequence=2,
         )
+        assert remaining == (multimodal,)
+        assert remaining[0].sequence == 3
 
         memory_repository = SqlAlchemyMemoryRepository(sessions)
         memory_id = uuid4()
@@ -1281,12 +1280,9 @@ async def test_agent_migration_constraints_and_repositories_on_postgresql() -> N
             )
             == 1
         )
-        assert await message_repository.count(thread.id) == 2
+        assert await message_repository.count(thread.id) == 3
         visible_after_abandon = await message_repository.load(thread.id, limit=10)
-        assert [message.content["text"] for message in visible_after_abandon] == [
-            "question",
-            "answer",
-        ]
+        assert visible_after_abandon == loaded_multimodal
 
         with pytest.raises(IntegrityError):
             async with sessions.begin() as session:

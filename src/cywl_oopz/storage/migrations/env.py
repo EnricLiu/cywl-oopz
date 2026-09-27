@@ -16,8 +16,9 @@ from cywl_oopz.storage.models import Base
 from cywl_oopz.storage.url import normalize_asyncpg_url
 
 config = context.config
-if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+if config.config_file_name is not None and config.attributes.get("connection") is None:
+    # Embedded callers own their logging handlers (including pytest capture).
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 load_dotenv(find_dotenv(usecwd=True), override=False)
 target_metadata = Base.metadata
